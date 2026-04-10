@@ -1,108 +1,98 @@
 # krx-data-pipeline
 
-Maintainable, production-oriented Korean stock data pipeline that:
+유지보수 가능하며 운영 환경을 고려하여 설계된 한국 주식 데이터 파이프라인입니다.
 
-1. **Syncs the KOSPI / KOSDAQ stock universe** (stock master) using both
-   [FinanceDataReader](https://github.com/financedata-org/FinanceDataReader)
-   and [pykrx](https://github.com/sharebook-kr/pykrx).
-2. **Collects per-ticker daily OHLCV history** from listing date using pykrx.
-3. **Stores everything in PostgreSQL** with a clean ports/adapters architecture
-   that allows future file-based storage (CSV / Parquet) without refactoring
-   core logic.
+1. [FinanceDataReader](https://github.com/financedata-org/FinanceDataReader) 및 [pykrx](https://github.com/sharebook-kr/pykrx)를 사용하여 **KOSPI / KOSDAQ 종목 유니버스를 동기화**합니다 (종목 마스터 관리).
+2. pykrx를 사용하여 상장일로부터 **종목별 일봉(OHLCV) 이력 데이터를 수집**합니다.
+3. 깔끔한 포트/어댑터(Ports & Adapters) 아키텍처를 적용하여 **PostgreSQL에 모든 데이터를 저장**합니다. 핵심 로직의 리팩토링 없이 향후 파일 기반 저장소(CSV / Parquet)로 확장할 수 있도록 설계되었습니다.
 
-## Non-goals (current scope)
+## 목표 제외 범위 (현재 스코프)
 
-- **Intraday** (minute / hourly) collection is out of scope — extension points
-  are designed but not implemented.
-- **Selenium** is explicitly not used.
+- **분봉/시간봉 (Intraday)** 수집은 현재 범위에서 제외됩니다. 확장 포인트는 설계되어 있으나 아직 구현되지 않았습니다.
+- **Selenium**은 명시적으로 사용하지 않습니다.
 
-## Quickstart
+## 빠른 시작 (Quickstart)
 
-### Prerequisites
+### 필수 조건 (Prerequisites)
 
 - Python ≥ 3.12
-- [uv](https://docs.astral.sh/uv/) package manager
-- PostgreSQL (for production use)
+- [uv](https://docs.astral.sh/uv/) 패키지 매니저
+- PostgreSQL (실제 운영 환경용)
 
-### Setup
+### 설정 (Setup)
 
 ```bash
-# 1. Install dependencies
+# 1. 의존성 패키지 설치
 uv sync
 
-# 2. Configure environment
+# 2. 환경 변수 설정
 cp .env.example .env
-# Edit .env with your database credentials and preferences
+# .env 파일을 열어 데이터베이스 계정 정보 및 설정을 수정하세요
 
-# 3. Initialise the database schema
+# 3. 데이터베이스 스키마 초기화
 krx-collector db init
 
-# 4. Sync the stock universe
+# 4. 종목 유니버스 동기화
 krx-collector universe sync --source fdr --markets kospi,kosdaq
 
-# 5. Backfill daily OHLCV data
+# 5. 일봉(OHLCV) 데이터 백필(수집)
 krx-collector prices backfill --market all --since-listing
 
-# 6. Run validations
+# 6. 데이터 정합성 검증 실행
 krx-collector validate --date 2025-01-15 --market all
 ```
 
-> **Note:** All commands currently print "Not implemented yet" — this is a
-> skeleton repository.  Adapter implementations will be added in subsequent
-> iterations.
-
-### Running via `python -m`
+### `python -m`으로 실행하기
 
 ```bash
 python -m krx_collector universe sync --source pykrx
 ```
 
-### Development
+### 개발 환경 (Development)
 
 ```bash
-# Install dev dependencies
+# 개발용 의존성 패키지 포함하여 설치
 uv sync --extra dev
 
-# Run tests
+# 테스트 실행
 uv run pytest
 
-# Lint
+# 코드 린트(Lint) 검사
 uv run ruff check src/ tests/
 
-# Format
+# 코드 포맷팅
 uv run black src/ tests/
 ```
 
-## Project structure
+## 프로젝트 구조
 
-```
+```text
 krx-data-pipeline/
-├── .env.example                  # Environment template
-├── pyproject.toml                # Project metadata & dependencies (uv)
+├── .env.example                  # 환경 변수 템플릿
+├── pyproject.toml                # 프로젝트 메타데이터 및 의존성 (uv)
 ├── sql/
-│   └── postgres_ddl.sql          # Database schema
+│   └── postgres_ddl.sql          # 데이터베이스 스키마 DDL
 ├── docs/
-│   ├── architecture.md           # Architecture & data flow
-│   ├── database.md               # Schema documentation
-│   └── operations.md             # Runbook & cron examples
+│   ├── architecture.md           # 아키텍처 및 데이터 흐름 설명
+│   ├── database.md               # 데이터베이스 스키마 문서
+│   └── operations.md             # 운영 가이드(Runbook) 및 cron 스케줄 예시
 ├── src/krx_collector/
-│   ├── cli/app.py                # argparse CLI with subcommands
-│   ├── domain/                   # Pure models & enums (no dependencies)
-│   ├── ports/                    # Protocol interfaces (universe, prices, storage)
-│   ├── adapters/                 # Concrete provider implementations (stubs)
-│   ├── service/                  # Use-case orchestration
-│   ├── infra/                    # Config, logging, calendar, DB
-│   └── util/                     # Retry, timezone helpers
+│   ├── cli/app.py                # 하위 명령어를 포함하는 argparse CLI 진입점
+│   ├── domain/                   # 외부 의존성이 없는 순수 도메인 모델 및 Enum
+│   ├── ports/                    # 프로토콜 인터페이스 (universe, prices, storage)
+│   ├── adapters/                 # 실제 데이터를 가져오거나 저장하는 구현체 (Providers)
+│   ├── service/                  # 유스케이스(Use-case) 오케스트레이션
+│   ├── infra/                    # 설정(Config), 로깅, 캘린더, 데이터베이스 인프라
+│   └── util/                     # 재시도(Retry), 시간대(Timezone) 유틸리티
 └── tests/
     ├── unit/
     └── integration/
 ```
 
-## Architecture
+## 아키텍처
 
-See [docs/architecture.md](docs/architecture.md) for the full data-flow
-diagram and ports/adapters rationale.
+전체 데이터 흐름도와 포트/어댑터 설계 이유에 대한 상세 내용은 [docs/architecture.md](docs/architecture.md) 문서를 참고하세요.
 
-## License
+## 라이선스
 
 MIT
