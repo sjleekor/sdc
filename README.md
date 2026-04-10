@@ -30,22 +30,22 @@ cp .env.example .env
 # .env 파일을 열어 데이터베이스 계정 정보 및 설정을 수정하세요
 
 # 3. 데이터베이스 스키마 초기화
-krx-collector db init
+uv run krx-collector db init
 
 # 4. 종목 유니버스 동기화
-krx-collector universe sync --source fdr --markets kospi,kosdaq
+uv run krx-collector universe sync --source fdr --markets kospi,kosdaq
 
 # 5. 일봉(OHLCV) 데이터 백필(수집)
-krx-collector prices backfill --market all --since-listing
+uv run krx-collector prices backfill --market all --since-listing
 
 # 6. 데이터 정합성 검증 실행
-krx-collector validate --date 2025-01-15 --market all
+uv run krx-collector validate --date 2025-01-15 --market all
 ```
 
 ### `python -m`으로 실행하기
 
 ```bash
-python -m krx_collector universe sync --source pykrx
+uv run python -m krx_collector universe sync --source pykrx
 ```
 
 ### 개발 환경 (Development)

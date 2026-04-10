@@ -14,13 +14,13 @@ KRX 정규장 시간: 09:00–15:30 KST. 당일의 온전한 데이터를 확보
 # │ │ │ │ ┌───── 요일 (dow)
 # │ │ │ │ │
 # 종목 유니버스 동기화 — 매일 16:00 KST (평일)
-  0  16  *  *  1-5  cd /opt/krx-data-pipeline && krx-collector universe sync --source fdr
+  0  16  *  *  1-5  cd /opt/krx-data-pipeline && uv run krx-collector universe sync --source fdr
 
 # 일봉 OHLCV 수집 — 매일 16:30 KST (평일)
-  30 16  *  *  1-5  cd /opt/krx-data-pipeline && krx-collector prices backfill --market all --since-listing
+  30 16  *  *  1-5  cd /opt/krx-data-pipeline && uv run krx-collector prices backfill --market all --since-listing
 
 # 데이터 정합성 검증 — 매일 17:00 KST (평일)
-  0  17  *  *  1-5  cd /opt/krx-data-pipeline && krx-collector validate --market all
+  0  17  *  *  1-5  cd /opt/krx-data-pipeline && uv run krx-collector validate --market all
 ```
 
 > **Tip:** crontab 맨 위에 `TZ=Asia/Seoul`을 설정하거나, systemd timer의 `OnCalendar=`를 사용하여 UTC 혼동을 방지하는 것이 좋습니다.
@@ -34,10 +34,10 @@ KRX 정규장 시간: 09:00–15:30 KST. 당일의 온전한 데이터를 확보
 
 ```bash
 # 특정 종목의 특정 기간 다시 백필하기
-krx-collector prices backfill --tickers 005930 --start 2024-01-01 --end 2024-12-31
+uv run krx-collector prices backfill --tickers 005930 --start 2024-01-01 --end 2024-12-31
 
 # 특정 시장의 모든 종목 처음부터 다시 백필하기
-krx-collector prices backfill --market kospi --since-listing
+uv run krx-collector prices backfill --market kospi --since-listing
 ```
 
 ### 종목 유니버스 전체 갱신 (Full Refresh)
@@ -45,7 +45,7 @@ krx-collector prices backfill --market kospi --since-listing
 `stock_master` 데이터가 꼬였거나 완전히 새로 덮어쓰고 싶을 때 사용합니다:
 
 ```bash
-krx-collector universe sync --source fdr --full-refresh
+uv run krx-collector universe sync --source fdr --full-refresh
 ```
 
 증분 비교(Diff)를 계산하지 않고 기존 데이터를 모두 새 데이터로 교체합니다.
@@ -54,10 +54,10 @@ krx-collector universe sync --source fdr --full-refresh
 
 ```bash
 # 특정 날짜 검증하기
-krx-collector validate --date 2024-06-15 --market all
+uv run krx-collector validate --date 2024-06-15 --market all
 
 # 오늘 날짜 검증하기 (기본값)
-krx-collector validate
+uv run krx-collector validate
 ```
 
 수행되는 검증 항목:
@@ -69,7 +69,7 @@ krx-collector validate
 
 ```bash
 # 테이블 생성 (멱등성 보장 — CREATE TABLE IF NOT EXISTS 사용)
-krx-collector db init
+uv run krx-collector db init
 ```
 
 ### 데이터 수집 이력 조회
