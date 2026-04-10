@@ -1,12 +1,11 @@
-# Architecture
+# 아키텍처
 
-## Overview
+## 개요
 
-The KRX data pipeline follows a **ports & adapters** (hexagonal) architecture.
-Domain logic is isolated from infrastructure concerns, making it easy to swap
-data sources or storage backends without modifying core business rules.
+KRX 데이터 파이프라인은 **포트 & 어댑터**(헥사고날) 아키텍처를 따릅니다.
+도메인 로직은 인프라와 분리되어 있어, 핵심 비즈니스 규칙을 수정하지 않고도 데이터 소스나 저장소를 쉽게 교체할 수 있습니다.
 
-## Data Flow
+## 데이터 흐름
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -16,20 +15,20 @@ data sources or storage backends without modifying core business rules.
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                      Service Layer (use-cases)                  │
+│                      서비스 계층 (Use-cases)                      │
 │  sync_universe() │ backfill_daily_prices() │ validate()         │
 └────────┬─────────────────────┬─────────────────────┬────────────┘
          │                     │                     │
          ▼                     ▼                     ▼
 ┌─────────────────┐  ┌─────────────────┐   ┌─────────────────────┐
-│  Ports           │  │  Ports           │   │  Ports              │
+│  포트 (Ports)    │  │  포트 (Ports)    │   │  포트 (Ports)         │
 │  UniverseProvider│  │  PriceProvider   │   │  Storage            │
 │  (Protocol)      │  │  (Protocol)      │   │  (Protocol)         │
 └────────┬─────────┘  └────────┬─────────┘   └──────────┬──────────┘
          │                     │                        │
          ▼                     ▼                        ▼
 ┌─────────────────────────────────────────┐   ┌─────────────────────┐
-│           Adapters                      │   │  Infra / DB         │
+│           어댑터 (Adapters)               │   │  인프라 / DB          │
 │  FdrUniverseProvider                    │   │  PostgresStorage    │
 │  PykrxUniverseProvider                  │   │  (future: FileStore)│
 │  PykrxDailyPriceProvider                │   │                     │
@@ -39,54 +38,45 @@ data sources or storage backends without modifying core business rules.
    FinanceDataReader       pykrx API               PostgreSQL
 ```
 
-## Ports & Adapters Rationale
+## 포트 & 어댑터 설계 이유
 
-### Why Protocols instead of ABCs?
+### ABC 대신 Protocol을 사용하는 이유?
 
-- **Structural typing**: Adapters don't need to inherit from a base class.
-  Any class with the right method signatures automatically satisfies the
-  protocol — enabling easier testing with mocks/fakes.
-- **No runtime import coupling**: The domain and service layers never import
-  adapter code.  Dependency wiring happens at the CLI / composition root.
+- **구조적 타이핑 (Structural typing)**: 어댑터는 기본 클래스를 상속받을 필요가 없습니다. 알맞은 메서드 시그니처를 가진 클래스라면 자동으로 프로토콜을 만족하므로 Mock/Fake 객체를 활용한 테스트가 더 쉬워집니다.
+- **런타임 임포트 결합 제거**: 도메인과 서비스 계층은 절대 어댑터 코드를 임포트하지 않습니다. 의존성 주입은 CLI / Composition Root에서 이루어집니다.
 
-### Why separate Universe and Price ports?
+### Universe와 Price 포트를 분리한 이유?
 
-- **Single Responsibility**: Universe fetching (list of tickers) and price
-  fetching (OHLCV bars per ticker) are fundamentally different operations
-  with different rate-limiting, error-handling, and caching strategies.
-- **Source flexibility**: Universe can come from FDR or pykrx; prices come
-  from pykrx only (for now).  Keeping them separate avoids coupling.
+- **단일 책임 원칙 (Single Responsibility)**: 종목 목록(Universe) 수집과 개별 종목의 일봉 데이터(Price) 수집은 서로 다른 Rate-limiting, 에러 처리, 캐싱 전략이 필요한 근본적으로 다른 작업입니다.
+- **소스 유연성**: Universe는 FDR이나 pykrx에서 가져올 수 있지만, Price는 현재 pykrx에서만 가져옵니다. 두 포트를 분리하면 결합도를 낮출 수 있습니다.
 
-### Storage abstraction
+### Storage 추상화
 
-The `Storage` protocol is designed so that:
+`Storage` 프로토콜은 다음과 같이 설계되었습니다:
 
-1. **PostgreSQL** is the primary backend (via `PostgresStorage`).
-2. A future **file-based backend** (CSV / Parquet writer) can implement
-   the same protocol and be swapped in via dependency injection at the
-   CLI layer — no changes to services or domain.
+1. **PostgreSQL**이 주력 백엔드입니다 (`PostgresStorage` 사용).
+2. 추후 **파일 기반 백엔드** (CSV / Parquet 저장)도 동일한 프로토콜을 구현하여 서비스나 도메인 변경 없이 CLI 계층에서 의존성 주입을 통해 교체할 수 있습니다.
 
-## Domain Layer
+## 도메인 계층
 
-Pure Python dataclasses with no framework dependencies:
+프레임워크 의존성이 없는 순수 Python 데이터 클래스(Dataclass)입니다:
 
-- `Stock`, `DailyBar`, `StockUniverseSnapshot` — immutable value objects.
-- `IngestionRun` — mutable audit record.
-- `UpsertResult`, `SyncResult`, `BackfillResult` — operation outcomes.
+- `Stock`, `DailyBar`, `StockUniverseSnapshot` — 불변 값 객체.
+- `IngestionRun` — 가변 감사(Audit) 기록.
+- `UpsertResult`, `SyncResult`, `BackfillResult` — 작업 결과.
 - Enums: `Market`, `Source`, `ListingStatus`, `RunType`, `RunStatus`.
 
-## Configuration
+## 설정 (Configuration)
 
-- `pydantic-settings` loads from `.env` / environment variables.
-- Timezone is fixed to `Asia/Seoul` (not configurable).
-- Settings are cached as a singleton via `get_settings()`.
+- `pydantic-settings`가 `.env` 및 환경 변수에서 설정을 불러옵니다.
+- 시간대는 `Asia/Seoul`로 고정되어 있습니다 (설정 변경 불가).
+- 설정은 `get_settings()`를 통해 싱글톤으로 캐싱됩니다.
 
-## Future: Intraday Extension
+## 향후 확장: 분봉(Intraday) 수집
 
-An `IntradayPriceProvider` protocol is sketched in `ports/prices.py`
-(commented out).  When implemented:
+`IntradayPriceProvider` 프로토콜 초안이 `ports/prices.py`에 주석 처리되어 있습니다. 향후 구현 시:
 
-1. Add the protocol method `fetch_intraday_bars(ticker, date, interval)`.
-2. Add `intraday_ohlcv` table (see DDL comments).
-3. Add a new service use-case `backfill_intraday`.
-4. Add a CLI subcommand `prices backfill-intraday`.
+1. `fetch_intraday_bars(ticker, date, interval)` 프로토콜 메서드 추가.
+2. `intraday_ohlcv` 테이블 추가 (DDL 주석 참고).
+3. 새로운 서비스 Use-case `backfill_intraday` 추가.
+4. CLI 하위 명령어 `prices backfill-intraday` 추가.
