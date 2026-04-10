@@ -294,7 +294,7 @@ class PostgresStorage:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT d::date 
+                    SELECT d::date
                     FROM generate_series(%s::date, %s::date, '1 day'::interval) d
                     LEFT JOIN daily_ohlcv t ON t.trade_date = d AND t.ticker = %s
                     WHERE t.trade_date IS NULL
