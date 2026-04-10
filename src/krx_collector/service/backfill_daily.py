@@ -18,6 +18,7 @@ Resume / checkpointing design (not yet implemented):
 from __future__ import annotations
 
 import logging
+import random
 import time
 from datetime import date, timedelta
 
@@ -139,8 +140,10 @@ def backfill_daily_prices(
                             upsert_res = storage.upsert_daily_bars(fetch_res.bars)
                             result.bars_upserted += upsert_res.updated
 
-                        # Rate limiting
-                        time.sleep(rate_limit_seconds)
+                        # Rate limiting with jitter (+/- 20%)
+                        if rate_limit_seconds > 0:
+                            jitter = random.uniform(-0.2, 0.2) * rate_limit_seconds
+                            time.sleep(max(0.0, rate_limit_seconds + jitter))
 
                         current_start = current_end + timedelta(days=1)
 
