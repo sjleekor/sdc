@@ -64,15 +64,23 @@ class FdrUniverseProvider:
                     continue
 
                 for _, row in df.iterrows():
-                    # Handle NaT in ListingDate
+                    # FDR columns have changed: 'Code' instead of 'Symbol', 'Name' is still there.
+                    # 'ListingDate' seems to be removed in the new FDR output.
+                    ticker = str(row.get("Code", ""))
+                    if not ticker:
+                        continue
+                        
+                    name = str(row.get("Name", ""))
+                    
+                    # Handle ListingDate if it exists, otherwise leave as None
                     listing_date = None
-                    if pd.notna(row.get("ListingDate")):
+                    if "ListingDate" in row and pd.notna(row["ListingDate"]):
                         listing_date = pd.to_datetime(row["ListingDate"]).date()
 
                     stock = Stock(
-                        ticker=str(row["Symbol"]),
+                        ticker=ticker,
                         market=market,
-                        name=str(row["Name"]),
+                        name=name,
                         listing_date=listing_date,
                         status=ListingStatus.ACTIVE,  # FDR current listing only returns active
                         last_seen_date=reference_date,
