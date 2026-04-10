@@ -23,9 +23,10 @@ import time
 from datetime import date, timedelta
 
 from krx_collector.domain.enums import Market, RunStatus, RunType
-from krx_collector.domain.models import BackfillResult, IngestionRun, Stock
+from krx_collector.domain.models import BackfillResult, DailyPriceResult, IngestionRun, Stock
 from krx_collector.ports.prices import PriceProvider
 from krx_collector.ports.storage import Storage
+from krx_collector.util.retry import retry
 from krx_collector.util.time import now_kst, today_kst
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,8 @@ def backfill_daily_prices(
     start: date | None = None,
     end: date | None = None,
     rate_limit_seconds: float = 0.2,
+    long_rest_interval: int = 100,
+    long_rest_seconds: float = 10.0,
 ) -> BackfillResult:
     """Backfill daily OHLCV bars from *provider* into *storage*."""
     run = IngestionRun(
@@ -51,11 +54,22 @@ def backfill_daily_prices(
             "start": str(start) if start else None,
             "end": str(end) if end else None,
             "rate_limit": rate_limit_seconds,
+            "long_rest_interval": long_rest_interval,
+            "long_rest_seconds": long_rest_seconds,
         },
     )
     storage.record_run(run)
 
     result = BackfillResult()
+    api_requests_count = 0
+
+    @retry(max_attempts=4, base_delay=0.5, backoff_factor=2.0)
+    def _fetch_with_retry(t: str, m: Market, s: date, e: date) -> DailyPriceResult:
+        res = provider.fetch_daily_ohlcv(ticker=t, market=m, start=s, end=e)
+        if res.error:
+            # Raise an exception so that the @retry decorator can catch it and backoff.
+            raise RuntimeError(res.error)
+        return res
 
     try:
         # 1. Resolve ticker list
@@ -125,12 +139,25 @@ def backfill_daily_prices(
                         logger.info(
                             "Backfilling %s from %s to %s", ticker, current_start, current_end
                         )
-                        fetch_res = provider.fetch_daily_ohlcv(
-                            ticker=ticker,
-                            market=stock.market,
-                            start=current_start,
-                            end=current_end
-                        )
+
+                        try:
+                            fetch_res = _fetch_with_retry(
+                                ticker,
+                                stock.market,
+                                current_start,
+                                current_end
+                            )
+                        except Exception as e:
+                            fetch_res = DailyPriceResult(ticker=ticker, error=str(e))
+
+                        api_requests_count += 1
+
+                        if long_rest_interval > 0 and api_requests_count % long_rest_interval == 0:
+                            logger.info(
+                                "Reached %d requests. Taking a long rest for %.1f seconds...",
+                                api_requests_count, long_rest_seconds
+                            )
+                            time.sleep(long_rest_seconds)
 
                         if fetch_res.error:
                             result.errors[ticker] = fetch_res.error
