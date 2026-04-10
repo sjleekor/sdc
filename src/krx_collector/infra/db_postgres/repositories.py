@@ -281,3 +281,27 @@ class PostgresStorage:
                         )
                     )
         return bars
+
+    def query_missing_days(
+        self,
+        ticker: str,
+        start: date,
+        end: date,
+    ) -> list[date]:
+        """Return trade dates without stored bars."""
+        missing = []
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT d::date 
+                    FROM generate_series(%s::date, %s::date, '1 day'::interval) d
+                    LEFT JOIN daily_ohlcv t ON t.trade_date = d AND t.ticker = %s
+                    WHERE t.trade_date IS NULL
+                    ORDER BY d
+                    """,
+                    (start, end, ticker)
+                )
+                for row in cur.fetchall():
+                    missing.append(row[0])
+        return missing

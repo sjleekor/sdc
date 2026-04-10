@@ -90,37 +90,62 @@ def backfill_daily_prices(
                 logger.warning("Start date > end date for %s. Skipping.", ticker)
                 continue
             try:
-                # To be robust, we could query missing days, or chunk by year.
-                # For pykrx, querying long ranges at once is fine but chunking is safer.
-                # Let's just fetch the whole range for now as a single chunk to simplify,
-                # or chunk by 1-year blocks.
+                # 1. Query missing days to optimize fetching
+                missing_days = storage.query_missing_days(ticker, resolved_start, resolved_end)
 
-                current_start = resolved_start
-                while current_start <= resolved_end:
-                    current_end = min(
-                        current_start + timedelta(days=365),
-                        resolved_end
-                    )
+                if not missing_days:
+                    logger.debug("No missing days for %s. Skipping.", ticker)
+                    continue
 
-                    fetch_res = provider.fetch_daily_ohlcv(
-                        ticker=ticker,
-                        market=stock.market,
-                        start=current_start,
-                        end=current_end
-                    )
+                # 2. Group missing days into continuous date ranges
+                ranges: list[tuple[date, date]] = []
+                current_range_start = missing_days[0]
+                current_range_end = missing_days[0]
 
-                    if fetch_res.error:
-                        result.errors[ticker] = fetch_res.error
+                for d in missing_days[1:]:
+                    if d == current_range_end + timedelta(days=1):
+                        current_range_end = d
+                    else:
+                        ranges.append((current_range_start, current_range_end))
+                        current_range_start = d
+                        current_range_end = d
+                ranges.append((current_range_start, current_range_end))
+
+                # 3. Fetch and upsert for each range
+                for r_start, r_end in ranges:
+                    current_start = r_start
+                    while current_start <= r_end:
+                        # Chunk by 1 year to avoid overloading the pykrx API
+                        current_end = min(
+                            current_start + timedelta(days=365),
+                            r_end
+                        )
+
+                        logger.info(
+                            "Backfilling %s from %s to %s", ticker, current_start, current_end
+                        )
+                        fetch_res = provider.fetch_daily_ohlcv(
+                            ticker=ticker,
+                            market=stock.market,
+                            start=current_start,
+                            end=current_end
+                        )
+
+                        if fetch_res.error:
+                            result.errors[ticker] = fetch_res.error
+                            break
+
+                        if fetch_res.bars:
+                            upsert_res = storage.upsert_daily_bars(fetch_res.bars)
+                            result.bars_upserted += upsert_res.updated
+
+                        # Rate limiting
+                        time.sleep(rate_limit_seconds)
+
+                        current_start = current_end + timedelta(days=1)
+
+                    if ticker in result.errors:
                         break
-
-                    if fetch_res.bars:
-                        upsert_res = storage.upsert_daily_bars(fetch_res.bars)
-                        result.bars_upserted += upsert_res.updated
-
-                    # Rate limiting
-                    time.sleep(rate_limit_seconds)
-
-                    current_start = current_end + timedelta(days=1)
 
             except Exception as exc:
                 logger.exception("Error backfilling ticker %s", ticker)

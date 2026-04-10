@@ -114,3 +114,24 @@ class Storage(Protocol):
             List of daily bars.
         """
         ...
+
+    def query_missing_days(
+        self,
+        ticker: str,
+        start: date,
+        end: date,
+    ) -> list[date]:
+        """Return trade dates in [start, end] that have no daily bar stored.
+
+        This is an *optional* optimisation for incremental backfill.  A
+        minimal implementation may return all dates in the range.
+
+        Args:
+            ticker: 6-digit KRX ticker code.
+            start: Range start (inclusive).
+            end: Range end (inclusive).
+
+        Returns:
+            Sorted list of missing dates.
+        """
+        ...
