@@ -36,7 +36,7 @@ uv run krx-collector db init
 uv run krx-collector universe sync --source fdr --markets kospi,kosdaq
 
 # 5. 일봉(OHLCV) 데이터 백필(수집)
-uv run krx-collector prices backfill --market all --since-listing
+uv run krx-collector prices backfill --market all
 
 # 6. 데이터 정합성 검증 실행
 uv run krx-collector validate --date 2025-01-15 --market all

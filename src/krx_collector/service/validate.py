@@ -93,13 +93,8 @@ def validate(
             fetched_tickers = {b.ticker for b in bars}
 
             for stock in active_stocks:
-                # If listed after target_date, skip
-                if stock.listing_date and stock.listing_date > resolved_date:
-                    continue
-
                 if stock.ticker not in fetched_tickers:
                     missing_tickers.append(stock.ticker)
-
             if missing_tickers:
                 logger.warning("Missing daily bars for %d active tickers on %s.", len(missing_tickers), resolved_date)
 

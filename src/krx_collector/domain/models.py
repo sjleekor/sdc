@@ -36,7 +36,6 @@ class Stock:
         ticker: 6-digit KRX ticker code (e.g. ``"005930"``).
         market: Exchange market segment.
         name: Korean company name.
-        listing_date: IPO / listing date (``None`` if unknown).
         status: Current listing status.
         last_seen_date: Date when the stock was last observed in a universe fetch.
         source: Data source that provided this record.
@@ -45,7 +44,6 @@ class Stock:
     ticker: str
     market: Market
     name: str
-    listing_date: date | None
     status: ListingStatus
     last_seen_date: date
     source: Source

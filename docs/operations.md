@@ -17,7 +17,7 @@ KRX 정규장 시간: 09:00–15:30 KST. 당일의 온전한 데이터를 확보
   0  16  *  *  1-5  cd /opt/krx-data-pipeline && uv run krx-collector universe sync --source fdr
 
 # 일봉 OHLCV 수집 — 매일 16:30 KST (평일)
-  30 16  *  *  1-5  cd /opt/krx-data-pipeline && uv run krx-collector prices backfill --market all --since-listing
+  30 16  *  *  1-5  cd /opt/krx-data-pipeline && uv run krx-collector prices backfill --market all
 
 # 데이터 정합성 검증 — 매일 17:00 KST (평일)
   0  17  *  *  1-5  cd /opt/krx-data-pipeline && uv run krx-collector validate --market all
@@ -37,7 +37,7 @@ KRX 정규장 시간: 09:00–15:30 KST. 당일의 온전한 데이터를 확보
 uv run krx-collector prices backfill --tickers 005930 --start 2024-01-01 --end 2024-12-31
 
 # 특정 시장의 모든 종목 처음부터 다시 백필하기
-uv run krx-collector prices backfill --market kospi --since-listing
+uv run krx-collector prices backfill --market kospi
 ```
 
 ### 종목 유니버스 전체 갱신 (Full Refresh)

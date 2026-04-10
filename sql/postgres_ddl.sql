@@ -18,7 +18,6 @@ CREATE TABLE IF NOT EXISTS stock_master (
     ticker          TEXT        NOT NULL,
     market          TEXT        NOT NULL,   -- KOSPI | KOSDAQ
     name            TEXT        NOT NULL,
-    listing_date    DATE,
     status          TEXT        NOT NULL,   -- ACTIVE | DELISTED | UNKNOWN
     last_seen_date  DATE        NOT NULL,
     source          TEXT        NOT NULL,   -- FDR | PYKRX
@@ -43,7 +42,6 @@ CREATE TABLE IF NOT EXISTS stock_master_snapshot_items (
     ticker          TEXT        NOT NULL,
     market          TEXT        NOT NULL,
     name            TEXT        NOT NULL,
-    listing_date    DATE,
     status          TEXT        NOT NULL,
     UNIQUE (snapshot_id, ticker, market)
 );

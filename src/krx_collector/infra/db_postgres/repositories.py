@@ -89,7 +89,6 @@ class PostgresStorage:
                         s.ticker,
                         s.market.value,
                         s.name,
-                        s.listing_date,
                         s.status.value,
                     )
                     for s in snapshot.records
@@ -97,7 +96,7 @@ class PostgresStorage:
                 psycopg2.extras.execute_values(
                     cur,
                     """
-                    INSERT INTO stock_master_snapshot_items (snapshot_id, ticker, market, name, listing_date, status)
+                    INSERT INTO stock_master_snapshot_items (snapshot_id, ticker, market, name, status)
                     VALUES %s
                     ON CONFLICT (snapshot_id, ticker, market) DO NOTHING
                     """,
@@ -111,7 +110,6 @@ class PostgresStorage:
                         s.ticker,
                         s.market.value,
                         s.name,
-                        s.listing_date,
                         s.status.value,
                         s.last_seen_date,
                         s.source.value,
@@ -127,11 +125,10 @@ class PostgresStorage:
                 psycopg2.extras.execute_values(
                     cur,
                     """
-                    INSERT INTO stock_master (ticker, market, name, listing_date, status, last_seen_date, source)
+                    INSERT INTO stock_master (ticker, market, name, status, last_seen_date, source)
                     VALUES %s
                     ON CONFLICT (ticker, market) DO UPDATE SET
                         name = EXCLUDED.name,
-                        listing_date = COALESCE(EXCLUDED.listing_date, stock_master.listing_date),
                         status = EXCLUDED.status,
                         last_seen_date = EXCLUDED.last_seen_date,
                         source = EXCLUDED.source,
@@ -164,25 +161,12 @@ class PostgresStorage:
                             ticker=row["ticker"],
                             market=Market(row["market"]),
                             name=row["name"],
-                            listing_date=row["listing_date"],
                             status=ListingStatus(row["status"]),
                             last_seen_date=row["last_seen_date"],
                             source=Source(row["source"]),
                         )
                     )
         return stocks
-
-    def get_listing_date(self, ticker: str) -> date | None:
-        """Query stock_master for the listing date."""
-        with get_connection(self._dsn) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT listing_date FROM stock_master WHERE ticker = %s", (ticker,)
-                )
-                row = cur.fetchone()
-                if row:
-                    return row[0]
-                return None
 
     # -- Daily OHLCV ----------------------------------------------------------
 

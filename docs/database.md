@@ -13,7 +13,6 @@
 | `ticker`       | TEXT NOT NULL  | 6자리 KRX 종목 코드 (PK part 1) |
 | `market`       | TEXT NOT NULL  | KOSPI \| KOSDAQ (PK part 2)   |
 | `name`         | TEXT NOT NULL  | 종목명 (한글)                  |
-| `listing_date` | DATE NULL      | 상장일 (모를 경우 NULL)        |
 | `status`       | TEXT NOT NULL  | ACTIVE \| DELISTED \| UNKNOWN  |
 | `last_seen_date` | DATE NOT NULL | 이 종목이 마지막으로 확인된 스냅샷 날짜 |
 | `source`       | TEXT NOT NULL  | FDR \| PYKRX                   |
@@ -43,7 +42,6 @@
 | `ticker`       | TEXT NOT NULL  | 6자리 KRX 종목 코드          |
 | `market`       | TEXT NOT NULL  | KOSPI \| KOSDAQ              |
 | `name`         | TEXT NOT NULL  | 스냅샷 당시의 종목명         |
-| `listing_date` | DATE NULL      | 상장일                       |
 | `status`       | TEXT NOT NULL  | ACTIVE \| DELISTED \| UNKNOWN |
 
 **고유키(Unique):** `(snapshot_id, ticker, market)`
@@ -105,17 +103,14 @@ ON CONFLICT (trade_date, ticker, market) DO UPDATE SET
 ### `stock_master`
 
 ```sql
-INSERT INTO stock_master (ticker, market, name, listing_date, status, last_seen_date, source)
+INSERT INTO stock_master (ticker, market, name, status, last_seen_date, source)
 VALUES (...)
 ON CONFLICT (ticker, market) DO UPDATE SET
     name = EXCLUDED.name,
-    listing_date = COALESCE(EXCLUDED.listing_date, stock_master.listing_date),
     status = EXCLUDED.status,
     last_seen_date = EXCLUDED.last_seen_date,
     source = EXCLUDED.source;
 ```
-
-**참고:** `COALESCE`를 사용하여, 새로운 소스에서 상장일을 제공하지 않더라도 기존에 저장된 상장일 정보가 보존되도록 했습니다.
 
 ## 향후 확장: `intraday_ohlcv`
 

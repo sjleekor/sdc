@@ -71,17 +71,11 @@ class FdrUniverseProvider:
                         continue
                         
                     name = str(row.get("Name", ""))
-                    
-                    # Handle ListingDate if it exists, otherwise leave as None
-                    listing_date = None
-                    if "ListingDate" in row and pd.notna(row["ListingDate"]):
-                        listing_date = pd.to_datetime(row["ListingDate"]).date()
 
                     stock = Stock(
                         ticker=ticker,
                         market=market,
                         name=name,
-                        listing_date=listing_date,
                         status=ListingStatus.ACTIVE,  # FDR current listing only returns active
                         last_seen_date=reference_date,
                         source=Source.FDR,

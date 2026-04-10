@@ -34,7 +34,6 @@ class MockUniverseProvider:
                 ticker="000001",
                 market=Market.KOSPI,
                 name="Mock Corp A",
-                listing_date=date(2020, 1, 1),
                 status=ListingStatus.ACTIVE,
                 last_seen_date=as_of or date.today(),
                 source=Source.FDR,
@@ -43,7 +42,6 @@ class MockUniverseProvider:
                 ticker="000002",
                 market=Market.KOSDAQ,
                 name="Mock Corp B",
-                listing_date=date(2021, 5, 1),
                 status=ListingStatus.ACTIVE,
                 last_seen_date=as_of or date.today(),
                 source=Source.FDR,
@@ -138,7 +136,6 @@ def test_end_to_end_pipeline(storage: PostgresStorage) -> None:
         market=Market.KOSPI,  # Only backfill KOSPI
         start=test_date,
         end=test_date,
-        since_listing=False,
         rate_limit_seconds=0.0,
     )
 

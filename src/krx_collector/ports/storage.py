@@ -72,14 +72,6 @@ class Storage(Protocol):
         """
         ...
 
-    def get_listing_date(self, ticker: str) -> date | None:
-        """Return the listing date for *ticker*, or ``None`` if unknown.
-
-        Used by the backfill service to decide the start date when
-        ``--since-listing`` is active.
-        """
-        ...
-
     # -- Daily OHLCV ----------------------------------------------------------
 
     def upsert_daily_bars(self, bars: list[DailyBar]) -> UpsertResult:

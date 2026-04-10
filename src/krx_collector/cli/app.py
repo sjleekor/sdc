@@ -112,7 +112,7 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
 
     print(
         f"→ prices backfill: market={args.market}, tickers={args.tickers}, "
-        f"start={args.start}, end={args.end}, since_listing={args.since_listing}, "
+        f"start={args.start}, end={args.end}, "
         f"rate_limit={args.rate_limit_seconds}"
     )
 
@@ -151,7 +151,6 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
         tickers=tickers_list,
         start=args.start,
         end=args.end,
-        since_listing=args.since_listing,
         rate_limit_seconds=rate_limit,
     )
 
@@ -272,19 +271,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--start",
         type=_parse_date,
         default=None,
-        help="Start date (YYYY-MM-DD). Ignored if --since-listing.",
+        help="Start date (YYYY-MM-DD). Default: 2000-01-01.",
     )
     prices_backfill.add_argument(
         "--end",
         type=_parse_date,
         default=None,
         help="End date (YYYY-MM-DD). Default: today (KST).",
-    )
-    prices_backfill.add_argument(
-        "--since-listing",
-        action="store_true",
-        default=True,
-        help="Use each ticker's listing date as start (default: True).",
     )
     prices_backfill.add_argument(
         "--rate-limit-seconds",

@@ -110,7 +110,6 @@ def sync_universe(
                 ticker=old_s.ticker,
                 market=old_s.market,
                 name=old_s.name,
-                listing_date=old_s.listing_date,
                 status=ListingStatus.DELISTED,
                 last_seen_date=old_s.last_seen_date,  # keep the last seen date
                 source=old_s.source,

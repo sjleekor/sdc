@@ -2,9 +2,7 @@
 
 Responsibilities:
     1. Determine the set of tickers to process (all active, or a subset).
-    2. For each ticker, determine the start date:
-       - If ``since_listing`` is True: use ``storage.get_listing_date(ticker)``.
-       - Otherwise: use the explicit ``start`` parameter.
+    2. For each ticker, determine the start date (defaults to 2000-01-01).
     3. Chunk the date range into manageable batches to avoid memory issues
        and enable resume/checkpointing.
     4. Fetch daily bars from ``PriceProvider`` with rate limiting.
@@ -39,7 +37,6 @@ def backfill_daily_prices(
     tickers: list[str] | None = None,
     start: date | None = None,
     end: date | None = None,
-    since_listing: bool = True,
     rate_limit_seconds: float = 0.2,
 ) -> BackfillResult:
     """Backfill daily OHLCV bars from *provider* into *storage*."""
@@ -52,7 +49,6 @@ def backfill_daily_prices(
             "tickers": tickers,
             "start": str(start) if start else None,
             "end": str(end) if end else None,
-            "since_listing": since_listing,
             "rate_limit": rate_limit_seconds,
         },
     )
@@ -68,9 +64,6 @@ def backfill_daily_prices(
             ticker_set = set(tickers)
             target_stocks = [s for s in all_active if s.ticker in ticker_set]
             if not target_stocks:
-                # If they provided explicit tickers but we found none in active,
-                # we could either fail or try to create dummy stocks.
-                # The prompt implies we only process active tickers from stock_master.
                 logger.warning("None of the provided tickers were found as ACTIVE in stock_master.")
         else:
             target_stocks = storage.get_active_stocks(market)
@@ -91,22 +84,11 @@ def backfill_daily_prices(
             result.tickers_processed += 1
 
             # Determine start date
-            resolved_start = start
-            if since_listing:
-                listing_date = storage.get_listing_date(ticker)
-                if listing_date:
-                    resolved_start = listing_date
-                elif not resolved_start:
-                    # fallback if no start and no listing date
-                    resolved_start = date(2000, 1, 1) # arbitrary early date for pykrx
-
-            if not resolved_start:
-                resolved_start = date(2000, 1, 1)
+            resolved_start = start or date(2000, 1, 1) # arbitrary early date for pykrx
 
             if resolved_start > resolved_end:
                 logger.warning("Start date > end date for %s. Skipping.", ticker)
                 continue
-
             try:
                 # To be robust, we could query missing days, or chunk by year.
                 # For pykrx, querying long ranges at once is fine but chunking is safer.

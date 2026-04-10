@@ -65,20 +65,17 @@ class PykrxUniverseProvider:
 
                 for ticker in tickers:
                     name = stock.get_market_ticker_name(ticker)
-                    # Note: pykrx does not readily expose listing dates in this API.
 
                     records.append(
                         Stock(
                             ticker=ticker,
                             market=market,
                             name=name,
-                            listing_date=None,
                             status=ListingStatus.ACTIVE,
                             last_seen_date=reference_date,
                             source=Source.PYKRX,
                         )
                     )
-
             snapshot = StockUniverseSnapshot(
                 snapshot_id=str(uuid.uuid4()),
                 as_of_date=reference_date,
