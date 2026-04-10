@@ -35,12 +35,19 @@ uv run krx-collector db init
 # 4. 종목 유니버스 동기화
 uv run krx-collector universe sync --source fdr --markets kospi,kosdaq
 
-# 5. 일봉(OHLCV) 데이터 백필(수집)
+# 5. 일봉(OHLCV) 데이터 백필(수집) — 최초 1회: 전체 히스토리 수집
 uv run krx-collector prices backfill --market all
+
+# 5-1. 일봉 데이터 일일 증분 수집 — 두 번째 이후 실행: 마지막 저장일 이후만
+uv run krx-collector prices backfill --market all --incremental
 
 # 6. 데이터 정합성 검증 실행
 uv run krx-collector validate --date 2025-01-15 --market all
 ```
+
+> **백필 모드 요약**
+> - **기본 모드** (gap detection): 거래일 캘린더 기준으로 누락된 모든 영업일을 찾아 채웁니다. 최초 백필이나 히스토리 보강에 적합합니다. 각 티커마다 `MIN(trade_date)`로 자동 클램핑되어 상장 이전(또는 pykrx가 제공하지 못하는 과거) 구간을 매번 재요청하지 않습니다.
+> - **`--incremental` 모드**: 각 티커의 `MAX(trade_date)` 이후만 단일 연속 구간으로 수집합니다. gap 검출을 건너뛰므로 매일 돌리는 catch-up 작업에 가장 빠릅니다.
 
 ### `python -m`으로 실행하기
 

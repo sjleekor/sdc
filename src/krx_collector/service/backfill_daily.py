@@ -42,8 +42,18 @@ def backfill_daily_prices(
     rate_limit_seconds: float = 0.2,
     long_rest_interval: int = 100,
     long_rest_seconds: float = 10.0,
+    incremental: bool = False,
 ) -> BackfillResult:
-    """Backfill daily OHLCV bars from *provider* into *storage*."""
+    """Backfill daily OHLCV bars from *provider* into *storage*.
+
+    Args:
+        incremental: If ``True``, skip per-day gap detection and instead
+            fetch a single contiguous range starting from
+            ``MAX(trade_date) + 1`` for each ticker. This trusts that
+            historical data is already complete and is intended for
+            fast daily catch-up runs. Tickers with no stored rows fall
+            back to ``start`` (or the default early date).
+    """
     run = IngestionRun(
         run_type=RunType.DAILY_BACKFILL,
         started_at=now_kst(),
@@ -56,6 +66,7 @@ def backfill_daily_prices(
             "rate_limit": rate_limit_seconds,
             "long_rest_interval": long_rest_interval,
             "long_rest_seconds": long_rest_seconds,
+            "incremental": incremental,
         },
     )
     storage.record_run(run)
@@ -101,30 +112,64 @@ def backfill_daily_prices(
             # Determine start date
             resolved_start = start or date(2000, 1, 1) # arbitrary early date for pykrx
 
+            if incremental:
+                # Incremental mode: start strictly after the last stored
+                # trade date. Skips gap detection entirely — trusts that
+                # historical data is already complete.
+                max_stored = storage.get_max_trade_date(ticker)
+                if max_stored:
+                    next_date = max_stored + timedelta(days=1)
+                    if next_date > resolved_start:
+                        logger.debug(
+                            "Incremental: %s starts at %s (after last stored %s)",
+                            ticker, next_date, max_stored,
+                        )
+                        resolved_start = next_date
+            else:
+                # Clamp start to the ticker's earliest stored trade date (if any).
+                # This avoids re-requesting pre-listing / pre-data-start ranges
+                # that the provider will never return on subsequent runs.
+                min_stored = storage.get_min_trade_date(ticker)
+                if min_stored and min_stored > resolved_start:
+                    logger.debug(
+                        "Clamping start for %s from %s to %s (earliest stored trade date)",
+                        ticker, resolved_start, min_stored,
+                    )
+                    resolved_start = min_stored
+
             if resolved_start > resolved_end:
-                logger.warning("Start date > end date for %s. Skipping.", ticker)
+                logger.info(
+                    "Nothing to fetch for %s (start=%s > end=%s). Skipping.",
+                    ticker, resolved_start, resolved_end,
+                )
                 continue
             try:
-                # 1. Query missing days to optimize fetching
-                missing_days = storage.query_missing_days(ticker, resolved_start, resolved_end)
-
-                if not missing_days:
-                    logger.debug("No missing days for %s. Skipping.", ticker)
-                    continue
-
-                # 2. Group missing days into continuous date ranges
                 ranges: list[tuple[date, date]] = []
-                current_range_start = missing_days[0]
-                current_range_end = missing_days[0]
+                if incremental:
+                    # Single contiguous range from resolved_start to resolved_end.
+                    ranges.append((resolved_start, resolved_end))
+                else:
+                    # 1. Query missing days to optimize fetching
+                    missing_days = storage.query_missing_days(
+                        ticker, resolved_start, resolved_end
+                    )
 
-                for d in missing_days[1:]:
-                    if d == current_range_end + timedelta(days=1):
-                        current_range_end = d
-                    else:
-                        ranges.append((current_range_start, current_range_end))
-                        current_range_start = d
-                        current_range_end = d
-                ranges.append((current_range_start, current_range_end))
+                    if not missing_days:
+                        logger.debug("No missing days for %s. Skipping.", ticker)
+                        continue
+
+                    # 2. Group missing days into continuous date ranges
+                    current_range_start = missing_days[0]
+                    current_range_end = missing_days[0]
+
+                    for d in missing_days[1:]:
+                        if d == current_range_end + timedelta(days=1):
+                            current_range_end = d
+                        else:
+                            ranges.append((current_range_start, current_range_end))
+                            current_range_start = d
+                            current_range_end = d
+                    ranges.append((current_range_start, current_range_end))
 
                 # 3. Fetch and upsert for each range
                 for r_start, r_end in ranges:

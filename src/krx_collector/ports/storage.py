@@ -135,3 +135,34 @@ class Storage(Protocol):
             Sorted list of missing dates.
         """
         ...
+
+    def get_min_trade_date(self, ticker: str) -> date | None:
+        """Return the earliest stored ``trade_date`` for *ticker*.
+
+        Used by the backfill service to clamp the effective start date
+        so that ranges before the ticker's known data start are not
+        re-requested on every run.
+
+        Args:
+            ticker: 6-digit KRX ticker code.
+
+        Returns:
+            The minimum stored ``trade_date`` for the ticker, or ``None``
+            if no rows exist yet.
+        """
+        ...
+
+    def get_max_trade_date(self, ticker: str) -> date | None:
+        """Return the latest stored ``trade_date`` for *ticker*.
+
+        Used by the backfill service in incremental mode to fetch only
+        days after the ticker's last known trade date.
+
+        Args:
+            ticker: 6-digit KRX ticker code.
+
+        Returns:
+            The maximum stored ``trade_date`` for the ticker, or ``None``
+            if no rows exist yet.
+        """
+        ...

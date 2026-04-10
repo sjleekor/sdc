@@ -20,6 +20,7 @@ from krx_collector.domain.models import (
     StockUniverseSnapshot,
     UpsertResult,
 )
+from krx_collector.infra.calendar.trading_days import get_trading_days
 from krx_collector.infra.db_postgres.connection import get_connection
 
 logger = logging.getLogger(__name__)
@@ -288,20 +289,68 @@ class PostgresStorage:
         start: date,
         end: date,
     ) -> list[date]:
-        """Return trade dates without stored bars."""
-        missing = []
+        """Return KRX trading days in [start, end] without stored bars.
+
+        Uses the trading-day calendar to enumerate expected sessions
+        (excluding weekends and known holidays), then subtracts the
+        ``trade_date`` values already present in ``daily_ohlcv`` for the
+        given ticker. This avoids ever flagging weekends/holidays as
+        "missing", which would otherwise trigger pointless re-fetches on
+        every backfill run.
+        """
+        if start > end:
+            return []
+
+        expected = get_trading_days(start, end)
+        if not expected:
+            return []
+
         with get_connection(self._dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT d::date
-                    FROM generate_series(%s::date, %s::date, '1 day'::interval) d
-                    LEFT JOIN daily_ohlcv t ON t.trade_date = d AND t.ticker = %s
-                    WHERE t.trade_date IS NULL
-                    ORDER BY d
+                    SELECT trade_date
+                    FROM daily_ohlcv
+                    WHERE ticker = %s
+                      AND trade_date BETWEEN %s AND %s
                     """,
-                    (start, end, ticker)
+                    (ticker, start, end),
                 )
-                for row in cur.fetchall():
-                    missing.append(row[0])
-        return missing
+                stored = {row[0] for row in cur.fetchall()}
+
+        return [d for d in expected if d not in stored]
+
+    def get_min_trade_date(self, ticker: str) -> date | None:
+        """Return the earliest stored ``trade_date`` for *ticker*, if any.
+
+        Used by the backfill service as a lower-bound clamp so that
+        date ranges before the ticker's known data start are not
+        re-requested on every run.
+        """
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT MIN(trade_date) FROM daily_ohlcv WHERE ticker = %s",
+                    (ticker,),
+                )
+                row = cur.fetchone()
+        if not row or row[0] is None:
+            return None
+        return row[0]
+
+    def get_max_trade_date(self, ticker: str) -> date | None:
+        """Return the latest stored ``trade_date`` for *ticker*, if any.
+
+        Used by the backfill service in incremental mode to fetch only
+        days strictly after this date.
+        """
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT MAX(trade_date) FROM daily_ohlcv WHERE ticker = %s",
+                    (ticker,),
+                )
+                row = cur.fetchone()
+        if not row or row[0] is None:
+            return None
+        return row[0]

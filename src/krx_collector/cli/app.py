@@ -113,7 +113,7 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
     print(
         f"→ prices backfill: market={args.market}, tickers={args.tickers}, "
         f"start={args.start}, end={args.end}, "
-        f"rate_limit={args.rate_limit_seconds}"
+        f"rate_limit={args.rate_limit_seconds}, incremental={args.incremental}"
     )
 
     from krx_collector.domain.enums import Market
@@ -152,6 +152,7 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
         start=args.start,
         end=args.end,
         rate_limit_seconds=rate_limit,
+        incremental=args.incremental,
     )
 
     if result.errors:
@@ -284,6 +285,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Seconds between API calls (default: from config).",
+    )
+    prices_backfill.add_argument(
+        "--incremental",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip per-day gap detection and fetch only days after each "
+            "ticker's MAX(trade_date). Intended for fast daily catch-up runs."
+        ),
     )
     prices_backfill.set_defaults(handler=_handle_prices_backfill)
 

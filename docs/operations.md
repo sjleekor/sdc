@@ -16,8 +16,9 @@ KRX 정규장 시간: 09:00–15:30 KST. 당일의 온전한 데이터를 확보
 # 종목 유니버스 동기화 — 매일 16:00 KST (평일)
   0  16  *  *  1-5  cd /opt/krx-data-pipeline && uv run krx-collector universe sync --source fdr
 
-# 일봉 OHLCV 수집 — 매일 16:30 KST (평일)
-  30 16  *  *  1-5  cd /opt/krx-data-pipeline && uv run krx-collector prices backfill --market all
+# 일봉 OHLCV 수집 (증분) — 매일 16:30 KST (평일)
+# --incremental: 각 티커의 MAX(trade_date) 이후만 가져오므로 일일 catch-up이 빠릅니다.
+  30 16  *  *  1-5  cd /opt/krx-data-pipeline && uv run krx-collector prices backfill --market all --incremental
 
 # 데이터 정합성 검증 — 매일 17:00 KST (평일)
   0  17  *  *  1-5  cd /opt/krx-data-pipeline && uv run krx-collector validate --market all
@@ -39,6 +40,32 @@ uv run krx-collector prices backfill --tickers 005930 --start 2024-01-01 --end 2
 # 특정 시장의 모든 종목 처음부터 다시 백필하기
 uv run krx-collector prices backfill --market kospi
 ```
+
+### 백필 모드: 기본(gap detection) vs `--incremental`
+
+| 모드 | 시작일 결정 | 조회 범위 | 주 용도 |
+|---|---|---|---|
+| **기본** | `--start` (또는 2000-01-01), 각 티커의 `MIN(trade_date)`로 자동 클램핑 | 거래일 캘린더 기준 누락된 모든 영업일을 구간으로 묶어 fetch | 최초 백필, 히스토리 보강, 중간 구멍(holes) 메우기 |
+| **`--incremental`** | 각 티커의 `MAX(trade_date) + 1` (또는 `--start` 중 더 늦은 날) | 시작일 ~ `--end`까지 단일 연속 구간 | 매일 돌리는 catch-up cron |
+
+**언제 어떤 모드를 써야 하나?**
+
+- **매일 돌리는 자동화 작업** → `--incremental` 사용. gap 검출 쿼리를 건너뛰고 티커당 한 번의 가벼운 `MAX()` 조회 후 신규 영업일만 가져오므로 가장 빠릅니다.
+- **최초 백필** 또는 **장기 히스토리 보강** → 기본 모드. 누락된 모든 거래일을 거래일 캘린더 기준으로 찾아 채웁니다.
+- **데이터 중간에 구멍이 생긴 티커 복구** → 기본 모드. `--incremental`은 tail만 보므로 중간 구멍을 못 채웁니다.
+
+```bash
+# 일일 증분 수집 (cron 권장)
+uv run krx-collector prices backfill --market all --incremental
+
+# 특정 종목만 증분
+uv run krx-collector prices backfill --tickers 005930,000660 --incremental
+
+# 기본 모드 (최초 백필 또는 hole 보강)
+uv run krx-collector prices backfill --market all
+```
+
+> **메모**: 두 모드 모두 주말·공휴일은 `query_missing_days` / 단일 구간 fetch 단계에서 자연스럽게 배제됩니다. 또한 기본 모드에서는 `MIN(trade_date)` 클램프 덕분에 005930처럼 pykrx가 제공하지 못하는 과거 구간(예: 2014-01-20 이전)을 매 실행마다 헛스캔하지 않습니다.
 
 ### 종목 유니버스 전체 갱신 (Full Refresh)
 
