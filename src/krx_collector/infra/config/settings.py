@@ -63,6 +63,9 @@ class Settings(BaseSettings):
         run_mode: dev or prod.
         universe_source_default: Default source for universe sync.
         rate_limit_seconds: Delay between API calls (seconds).
+        long_rest_interval: Number of API requests between long rests
+            (0 disables long rests).
+        long_rest_seconds: Duration of each long rest, in seconds.
     """
 
     model_config = SettingsConfigDict(
@@ -92,6 +95,8 @@ class Settings(BaseSettings):
 
     # Rate limiting
     rate_limit_seconds: float = 0.2
+    long_rest_interval: int = 100
+    long_rest_seconds: float = 10.0
 
     @model_validator(mode="after")
     def _compute_dsn(self) -> Settings:

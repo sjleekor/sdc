@@ -55,6 +55,70 @@ uv run krx-collector validate --date 2025-01-15 --market all
 uv run python -m krx_collector universe sync --source pykrx
 ```
 
+## Docker로 실행하기
+
+### 필수 조건
+
+- Docker
+- Docker Compose Plugin (`docker compose`)
+
+### Docker 이미지 빌드
+
+```bash
+docker build -t ghcr.io/sjleekor/sdc:latest .
+```
+
+`main` 브랜치에 push 하면 GitHub Actions가 동일 이미지를 `ghcr.io/sjleekor/sdc`로 자동 build/push 하도록 설정되어 있습니다. workflow 파일은 [`.github/workflows/docker.yml`](.github/workflows/docker.yml)입니다.
+
+### 단일 컨테이너로 실행
+
+기존 PostgreSQL이 이미 떠 있다면 `.env`의 `DB_DSN` 또는 `DB_HOST`/`DB_PORT` 값을 맞춘 뒤 다음처럼 실행할 수 있습니다.
+
+```bash
+docker run --rm --env-file .env ghcr.io/sjleekor/sdc:latest db init
+docker run --rm --env-file .env ghcr.io/sjleekor/sdc:latest universe sync --source fdr --markets kospi,kosdaq
+docker run --rm --env-file .env ghcr.io/sjleekor/sdc:latest prices backfill --market all --incremental
+```
+
+### Docker Compose로 실행
+
+이 저장소에는 PostgreSQL과 collector 실행을 위한 [`docker-compose.yml`](docker-compose.yml)이 포함되어 있습니다.
+
+```bash
+# 1. 환경 변수 파일 준비
+cp .env.example .env
+```
+
+`docker-compose.yml`은 DB 컨테이너 내부 호스트명을 사용하므로, `.env`에서 `DB_DSN`을 비우거나 아래처럼 맞추는 것을 권장합니다.
+
+```env
+DB_DSN=
+DB_HOST=db
+DB_PORT=5432
+DB_NAME=krx_data
+DB_USER=krx_user
+DB_PASSWORD=changeme
+```
+
+```bash
+# 2. PostgreSQL 시작
+docker compose up -d
+
+# 3. 스키마 초기화
+docker compose run --rm collector db init
+
+# 4. 종목 유니버스 동기화
+docker compose run --rm collector universe sync --source fdr --markets kospi,kosdaq
+
+# 5. 일봉 증분 수집
+docker compose run --rm collector prices backfill --market all --incremental
+
+# 6. 검증
+docker compose run --rm collector validate --market all
+```
+
+`collector` 서비스는 배치 실행용이므로 `docker compose up -d` 시에는 기본적으로 `db`만 상시 실행됩니다.
+
 ### 개발 환경 (Development)
 
 ```bash

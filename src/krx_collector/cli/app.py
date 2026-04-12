@@ -110,10 +110,25 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
     """Handle ``krx-collector prices backfill``."""
     settings = get_settings()
 
+    rate_limit = args.rate_limit_seconds
+    if rate_limit is None:
+        rate_limit = settings.rate_limit_seconds
+
+    long_rest_interval = args.long_rest_interval
+    if long_rest_interval is None:
+        long_rest_interval = settings.long_rest_interval
+
+    long_rest_seconds = args.long_rest_seconds
+    if long_rest_seconds is None:
+        long_rest_seconds = settings.long_rest_seconds
+
     print(
         f"→ prices backfill: market={args.market}, tickers={args.tickers}, "
         f"start={args.start}, end={args.end}, "
-        f"rate_limit={args.rate_limit_seconds}, incremental={args.incremental}"
+        f"rate_limit={rate_limit}, "
+        f"long_rest_interval={long_rest_interval}, "
+        f"long_rest_seconds={long_rest_seconds}, "
+        f"incremental={args.incremental}"
     )
 
     from krx_collector.domain.enums import Market
@@ -133,10 +148,6 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
     if args.tickers:
         tickers_list = [t.strip() for t in args.tickers.split(",")]
 
-    rate_limit = args.rate_limit_seconds
-    if rate_limit is None:
-        rate_limit = settings.rate_limit_seconds
-
     from krx_collector.adapters.prices_pykrx.provider import PykrxDailyPriceProvider
     provider = PykrxDailyPriceProvider()
 
@@ -152,6 +163,8 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
         start=args.start,
         end=args.end,
         rate_limit_seconds=rate_limit,
+        long_rest_interval=long_rest_interval,
+        long_rest_seconds=long_rest_seconds,
         incremental=args.incremental,
     )
 
@@ -285,6 +298,21 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Seconds between API calls (default: from config).",
+    )
+    prices_backfill.add_argument(
+        "--long-rest-interval",
+        type=int,
+        default=None,
+        help=(
+            "Number of API requests between long rests "
+            "(0 disables; default: from config)."
+        ),
+    )
+    prices_backfill.add_argument(
+        "--long-rest-seconds",
+        type=float,
+        default=None,
+        help="Duration of each long rest in seconds (default: from config).",
     )
     prices_backfill.add_argument(
         "--incremental",
