@@ -99,6 +99,40 @@ uv run krx-collector validate
 uv run krx-collector db init
 ```
 
+### 계정/수급/사업 KPI 파이프라인 실행
+
+```bash
+# 1) OpenDART corp_code 마스터 동기화
+uv run krx-collector dart sync-corp
+
+# 2) 재무 raw 적재
+uv run krx-collector dart sync-financials --tickers 005930 --bsns-years 2025 --reprt-codes 11011 --fs-divs CFS
+
+# 3) 주식수 / 배당 / 자사주 raw 적재
+uv run krx-collector dart sync-share-info --tickers 005930 --bsns-years 2025 --reprt-codes 11011
+
+# 4) XBRL 원문 파싱
+uv run krx-collector dart sync-xbrl --tickers 005930 --bsns-years 2025 --reprt-codes 11011
+
+# 5) canonical metric 정규화
+uv run krx-collector metrics normalize --tickers 005930 --bsns-years 2025 --reprt-codes 11011
+
+# 6) 수급 raw 적재
+uv run krx-collector flows sync --tickers 005930 --start 2026-04-17 --end 2026-04-17
+
+# 7) 사업 KPI 파일럿 문서 처리
+uv run krx-collector operating process-document \
+  --ticker 009540 \
+  --market KOSPI \
+  --sector-key shipbuilding_defense \
+  --document-type manual_text \
+  --title "조선 방산 수주 샘플" \
+  --document-date 2026-04-19 \
+  --period-end 2025-12-31 \
+  --source-system LOCAL \
+  --text-file tests/fixtures/operating/shipbuilding_defense_sample.txt
+```
+
 ### 데이터 수집 이력 조회
 
 ```sql
@@ -108,15 +142,31 @@ FROM ingestion_runs
 ORDER BY started_at DESC
 LIMIT 10;
 
--- 실패한 실행 이력 확인
-SELECT * FROM ingestion_runs WHERE status = 'failed' ORDER BY started_at DESC;
+-- 실패 또는 부분 실패 이력 확인
+SELECT *
+FROM ingestion_runs
+WHERE status IN ('failed', 'partial')
+ORDER BY started_at DESC;
 ```
+
+`ingestion_runs.status` 해석:
+
+- `running`: 아직 실행 중
+- `success`: 모든 요청 성공 또는 no-data
+- `partial`: 파이프라인 자체는 완료됐지만 일부 요청이 실패
+- `failed`: 파이프라인이 중간에 중단됨
+
+`counts` 공통 필드:
+
+- `error_count`: 실패한 요청 수
+- `partial_failure_count`: 부분 실패 수
+- `completed_request_count`: 오류 없이 끝난 요청 수
 
 ## 모니터링
 
 ### 추적해야 할 주요 지표
 
-- 일별 `ingestion_runs.status = 'failed'` 발생 건수.
+- 일별 `ingestion_runs.status IN ('failed', 'partial')` 발생 건수.
 - `stock_master` 전체 행 개수 (평소 대비 ± 5% 내로 안정적인지 확인).
 - `daily_ohlcv` 일별 데이터 증가량 (거래일 기준 매일 약 2,500건 내외의 새로운 행이 추가되어야 함).
 - 백필에 소요된 시간.
@@ -124,6 +174,7 @@ SELECT * FROM ingestion_runs WHERE status = 'failed' ORDER BY started_at DESC;
 ### 알림(Alerting) 권장 사항
 
 - `ingestion_runs` 테이블에 `status = 'failed'`가 기록되면 즉시 알림.
+- `ingestion_runs` 테이블에 `status = 'partial'`가 반복 기록되면 경고 알림.
 - 유니버스 동기화 시 수집된 종목 수(`record_count`)가 평소 대비 10% 이상 감소하면 알림.
 - 영업일(주말, 공휴일 아님)인데 `daily_ohlcv`에 새로운 행이 전혀 없다면 알림.
 
@@ -136,3 +187,6 @@ SELECT * FROM ingestion_runs WHERE status = 'failed' ORDER BY started_at DESC;
 | KRX 접근 차단 (Rate-limited) | 너무 빠른 속도로 많은 요청을 보냄 | `.env`에서 `RATE_LIMIT_SECONDS` 값을 더 높게 설정 |
 | 검증 시 휴장일이 정상 거래일로 인식됨 | `docs/holidays_krx.csv` 파일이 비어있음 | CSV 파일에 KRX 휴장일 날짜를 추가 |
 | 수집 중 `JSONDecodeError` 발생 | KRX 웹사이트가 개편되었거나 IP가 차단됨 | 프록시를 사용하거나 `pykrx`, `FinanceDataReader` 라이브러리의 최신 패치가 올라올 때까지 대기 |
+| `ingestion_runs.status = 'partial'` 발생 | 외부 API 일부 요청 실패, 타임아웃, 개별 종목 no-response | 같은 파라미터로 재실행하고 `error_summary`, `counts.error_count` 및 샘플 request key를 확인 |
+| `flows sync`에서 20초 timeout 반복 | KRX / pykrx 응답 정체 또는 차단 | 종목 수와 기간을 줄여 재실행하고 `--rate-limit-seconds`를 높인 뒤, 계속 실패하면 KRX 응답 상태를 점검 |
+| OpenDART raw/XBRL 단계가 부분 실패 | 일시적 OpenDART 응답 오류 | 동일 파라미터로 재실행. 공통 재시도 로직이 3회까지 복구를 시도하므로 반복 실패 종목만 선별 재처리 |

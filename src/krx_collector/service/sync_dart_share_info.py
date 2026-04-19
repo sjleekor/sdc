@@ -1,0 +1,138 @@
+"""Use-case: Sync OpenDART share-count and shareholder-return raw rows."""
+
+from __future__ import annotations
+
+import logging
+
+from krx_collector.domain.enums import RunStatus, RunType
+from krx_collector.domain.models import DartShareInfoSyncResult, IngestionRun
+from krx_collector.ports.share_info import ShareCountProvider, ShareholderReturnProvider
+from krx_collector.ports.storage import Storage
+from krx_collector.util.pipeline import (
+    build_run_counts,
+    call_with_retry,
+    complete_run,
+    fail_run,
+    sleep_with_jitter,
+)
+from krx_collector.util.time import now_kst
+
+logger = logging.getLogger(__name__)
+
+
+def sync_dart_share_info(
+    share_count_provider: ShareCountProvider,
+    shareholder_return_provider: ShareholderReturnProvider,
+    storage: Storage,
+    bsns_years: list[int],
+    reprt_codes: list[str],
+    tickers: list[str] | None = None,
+    rate_limit_seconds: float = 0.2,
+) -> DartShareInfoSyncResult:
+    """Synchronise OpenDART share-count/dividend/treasury-stock raw rows."""
+    run = IngestionRun(
+        run_type=RunType.DART_SHARE_INFO_SYNC,
+        started_at=now_kst(),
+        status=RunStatus.RUNNING,
+        params={
+            "bsns_years": bsns_years,
+            "reprt_codes": reprt_codes,
+            "tickers": tickers,
+            "rate_limit_seconds": rate_limit_seconds,
+        },
+    )
+    storage.record_run(run)
+
+    result = DartShareInfoSyncResult()
+    try:
+        targets = storage.get_dart_corp_master(active_only=True, tickers=tickers)
+        if not targets:
+            raise RuntimeError("No active OpenDART corp mappings found. Run `dart sync-corp` first.")
+
+        for corp in targets:
+            result.targets_processed += 1
+            for bsns_year in bsns_years:
+                for reprt_code in reprt_codes:
+                    request_prefix = f"{corp.ticker}:{bsns_year}:{reprt_code}"
+
+                    result.requests_attempted += 1
+                    share_count_result = call_with_retry(
+                        lambda: share_count_provider.fetch_share_count(
+                            corp=corp,
+                            bsns_year=bsns_year,
+                            reprt_code=reprt_code,
+                        ),
+                        request_label=f"{request_prefix}:share_count",
+                        logger_instance=logger,
+                    )
+                    if share_count_result.error:
+                        result.errors[f"{request_prefix}:share_count"] = share_count_result.error
+                    elif share_count_result.no_data:
+                        result.no_data_requests += 1
+                    elif share_count_result.records:
+                        upsert = storage.upsert_dart_share_count_raw(share_count_result.records)
+                        result.share_count_upsert.updated += upsert.updated
+                        result.share_count_upsert.errors += upsert.errors
+                        result.share_count_rows_upserted += upsert.updated
+
+                    result.requests_attempted += 1
+                    dividend_result = call_with_retry(
+                        lambda: shareholder_return_provider.fetch_dividend(
+                            corp=corp,
+                            bsns_year=bsns_year,
+                            reprt_code=reprt_code,
+                        ),
+                        request_label=f"{request_prefix}:dividend",
+                        logger_instance=logger,
+                    )
+                    if dividend_result.error:
+                        result.errors[f"{request_prefix}:dividend"] = dividend_result.error
+                    elif dividend_result.no_data:
+                        result.no_data_requests += 1
+                    elif dividend_result.records:
+                        upsert = storage.upsert_dart_shareholder_return_raw(dividend_result.records)
+                        result.shareholder_return_upsert.updated += upsert.updated
+                        result.shareholder_return_upsert.errors += upsert.errors
+                        result.shareholder_return_rows_upserted += upsert.updated
+
+                    result.requests_attempted += 1
+                    treasury_result = call_with_retry(
+                        lambda: shareholder_return_provider.fetch_treasury_stock(
+                            corp=corp,
+                            bsns_year=bsns_year,
+                            reprt_code=reprt_code,
+                        ),
+                        request_label=f"{request_prefix}:treasury_stock",
+                        logger_instance=logger,
+                    )
+                    if treasury_result.error:
+                        result.errors[f"{request_prefix}:treasury_stock"] = treasury_result.error
+                    elif treasury_result.no_data:
+                        result.no_data_requests += 1
+                    elif treasury_result.records:
+                        upsert = storage.upsert_dart_shareholder_return_raw(treasury_result.records)
+                        result.shareholder_return_upsert.updated += upsert.updated
+                        result.shareholder_return_upsert.errors += upsert.errors
+                        result.shareholder_return_rows_upserted += upsert.updated
+
+                    sleep_with_jitter(rate_limit_seconds)
+
+        complete_run(
+            storage,
+            run,
+            counts=build_run_counts(
+                targets_processed=result.targets_processed,
+                requests_attempted=result.requests_attempted,
+                share_count_rows_upserted=result.share_count_rows_upserted,
+                shareholder_return_rows_upserted=result.shareholder_return_rows_upserted,
+                no_data_requests=result.no_data_requests,
+            ),
+            errors=result.errors,
+            partial_subject="share info requests",
+        )
+        return result
+    except Exception as exc:
+        logger.exception("OpenDART share info sync failed")
+        fail_run(storage, run, exc)
+        result.errors["pipeline"] = str(exc)
+        return result

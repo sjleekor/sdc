@@ -6,6 +6,7 @@ data providers (FDR, pykrx) to avoid network flakiness and rate limits.
 
 import uuid
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +14,7 @@ from krx_collector.domain.enums import ListingStatus, Market, Source
 from krx_collector.domain.models import (
     DailyBar,
     DailyPriceResult,
+    OperatingSourceDocument,
     Stock,
     StockUniverseSnapshot,
     UniverseResult,
@@ -20,9 +22,19 @@ from krx_collector.domain.models import (
 from krx_collector.infra.config.settings import get_settings
 from krx_collector.infra.db_postgres.repositories import PostgresStorage
 from krx_collector.service.backfill_daily import backfill_daily_prices
+from krx_collector.service.default_operating_registry import build_default_operating_registry
+from krx_collector.service.process_operating_document import (
+    build_operating_document_key,
+    process_operating_document,
+)
 from krx_collector.service.sync_universe import sync_universe
 from krx_collector.service.validate import validate
 from krx_collector.util.time import now_kst
+
+
+OPERATING_FIXTURE_PATH = (
+    Path(__file__).resolve().parent.parent / "fixtures" / "operating" / "shipbuilding_defense_sample.txt"
+)
 
 
 class MockUniverseProvider:
@@ -98,7 +110,8 @@ def clean_db(storage: PostgresStorage) -> None:
         with get_connection(storage._dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "TRUNCATE TABLE daily_ohlcv, stock_master, "
+                    "TRUNCATE TABLE operating_metric_fact, operating_source_document, "
+                    "daily_ohlcv, stock_master, "
                     "stock_master_snapshot_items, stock_master_snapshot, "
                     "ingestion_runs CASCADE;"
                 )
@@ -154,3 +167,47 @@ def test_end_to_end_pipeline(storage: PostgresStorage) -> None:
     # but the KOSPI stock should pass.
     # Validation service doesn't return anything, but it shouldn't crash.
     validate(storage=storage, market=Market.KOSPI, target_date=test_date)
+
+
+def test_operating_document_pipeline(storage: PostgresStorage) -> None:
+    """Test the operating KPI pipeline: persist source doc -> extract -> query facts."""
+    content_text = OPERATING_FIXTURE_PATH.read_text(encoding="utf-8")
+    document = OperatingSourceDocument(
+        document_key=build_operating_document_key(
+            ticker="009540",
+            sector_key="shipbuilding_defense",
+            document_type="manual_text",
+            title="조선 방산 수주 샘플",
+            period_end="2025-12-31",
+            content_text=content_text,
+        ),
+        ticker="009540",
+        market=Market.KOSPI,
+        sector_key="shipbuilding_defense",
+        document_type="manual_text",
+        title="조선 방산 수주 샘플",
+        document_date=date(2026, 4, 19),
+        period_end=date(2025, 12, 31),
+        source_system="LOCAL",
+        source_url="",
+        language="ko",
+        content_text=content_text,
+        fetched_at=now_kst(),
+        raw_payload={},
+    )
+
+    result = process_operating_document(
+        storage=storage,
+        registry=build_default_operating_registry(),
+        document=document,
+    )
+
+    assert result.errors == {}
+    assert result.documents_processed == 1
+    assert result.facts_upserted == 2
+
+    facts = storage.get_operating_metric_facts(tickers=["009540"], sector_keys=["shipbuilding_defense"])
+    fact_map = {fact.metric_code: fact for fact in facts}
+    assert sorted(fact_map) == ["order_backlog_amount", "order_intake_amount"]
+    assert str(fact_map["order_intake_amount"].value_numeric) == "3250000000000.0000"
+    assert str(fact_map["order_backlog_amount"].value_numeric) == "24130000000000.0000"

@@ -15,6 +15,18 @@ import psycopg2.extras
 from krx_collector.domain.enums import ListingStatus, Market, Source
 from krx_collector.domain.models import (
     DailyBar,
+    DartCorp,
+    DartFinancialStatementLine,
+    OperatingMetricFact,
+    OperatingSourceDocument,
+    SecurityFlowLine,
+    DartXbrlDocument,
+    DartXbrlFactLine,
+    MetricCatalogEntry,
+    MetricMappingRule,
+    StockMetricFact,
+    DartShareCountLine,
+    DartShareholderReturnLine,
     IngestionRun,
     Stock,
     StockUniverseSnapshot,
@@ -168,6 +180,1382 @@ class PostgresStorage:
                         )
                     )
         return stocks
+
+    def upsert_dart_corp_master(self, records: list[DartCorp]) -> UpsertResult:
+        """Upsert OpenDART corp-code master rows."""
+        if not records:
+            return UpsertResult()
+
+        result = UpsertResult()
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        record.corp_code,
+                        record.ticker,
+                        record.corp_name,
+                        record.market.value if record.market else None,
+                        record.stock_name,
+                        record.modify_date,
+                        record.is_active,
+                        record.source.value,
+                        record.fetched_at,
+                    )
+                    for record in records
+                ]
+
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO dart_corp_master (
+                        corp_code,
+                        ticker,
+                        corp_name,
+                        market,
+                        stock_name,
+                        modify_date,
+                        is_active,
+                        source,
+                        fetched_at
+                    )
+                    VALUES %s
+                    ON CONFLICT (corp_code) DO UPDATE SET
+                        ticker = EXCLUDED.ticker,
+                        corp_name = EXCLUDED.corp_name,
+                        market = EXCLUDED.market,
+                        stock_name = EXCLUDED.stock_name,
+                        modify_date = EXCLUDED.modify_date,
+                        is_active = EXCLUDED.is_active,
+                        source = EXCLUDED.source,
+                        fetched_at = EXCLUDED.fetched_at,
+                        updated_at = now()
+                    """,
+                    args,
+                    page_size=1000,
+                )
+                result.updated = cur.rowcount
+
+        return result
+
+    def get_dart_corp_master(
+        self,
+        active_only: bool = True,
+        tickers: list[str] | None = None,
+    ) -> list[DartCorp]:
+        """Return OpenDART corp master rows mapped to local tickers."""
+        records: list[DartCorp] = []
+        with get_connection(self._dsn) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                sql = "SELECT * FROM dart_corp_master"
+                conditions: list[str] = []
+                params: list[object] = []
+
+                if active_only:
+                    conditions.append("is_active = TRUE")
+                if tickers:
+                    conditions.append("ticker = ANY(%s)")
+                    params.append(tickers)
+
+                if conditions:
+                    sql += " WHERE " + " AND ".join(conditions)
+                sql += " ORDER BY ticker NULLS LAST, corp_code"
+
+                cur.execute(sql, params)
+                for row in cur.fetchall():
+                    records.append(
+                        DartCorp(
+                            corp_code=row["corp_code"],
+                            corp_name=row["corp_name"],
+                            ticker=row["ticker"],
+                            market=Market(row["market"]) if row["market"] else None,
+                            stock_name=row["stock_name"],
+                            modify_date=row["modify_date"],
+                            is_active=row["is_active"],
+                            source=Source(row["source"]),
+                            fetched_at=row["fetched_at"],
+                        )
+                    )
+        return records
+
+    def upsert_dart_financial_statement_raw(
+        self,
+        records: list[DartFinancialStatementLine],
+    ) -> UpsertResult:
+        """Upsert OpenDART financial-statement raw rows."""
+        if not records:
+            return UpsertResult()
+
+        result = UpsertResult()
+        deduped_records = {
+            (
+                record.corp_code,
+                record.bsns_year,
+                record.reprt_code,
+                record.fs_div,
+                record.sj_div,
+                record.account_id,
+                record.ord,
+                record.rcept_no,
+            ): record
+            for record in records
+        }
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        record.corp_code,
+                        record.ticker,
+                        record.bsns_year,
+                        record.reprt_code,
+                        record.fs_div,
+                        record.sj_div,
+                        record.sj_nm,
+                        record.account_id,
+                        record.account_nm,
+                        record.account_detail,
+                        record.thstrm_nm,
+                        record.thstrm_amount,
+                        record.thstrm_add_amount,
+                        record.frmtrm_nm,
+                        record.frmtrm_amount,
+                        record.frmtrm_q_nm,
+                        record.frmtrm_q_amount,
+                        record.frmtrm_add_amount,
+                        record.bfefrmtrm_nm,
+                        record.bfefrmtrm_amount,
+                        record.ord,
+                        record.currency,
+                        record.rcept_no,
+                        record.source.value,
+                        record.fetched_at,
+                        psycopg2.extras.Json(record.raw_payload),
+                    )
+                    for record in deduped_records.values()
+                ]
+
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO dart_financial_statement_raw (
+                        corp_code,
+                        ticker,
+                        bsns_year,
+                        reprt_code,
+                        fs_div,
+                        sj_div,
+                        sj_nm,
+                        account_id,
+                        account_nm,
+                        account_detail,
+                        thstrm_nm,
+                        thstrm_amount,
+                        thstrm_add_amount,
+                        frmtrm_nm,
+                        frmtrm_amount,
+                        frmtrm_q_nm,
+                        frmtrm_q_amount,
+                        frmtrm_add_amount,
+                        bfefrmtrm_nm,
+                        bfefrmtrm_amount,
+                        ord,
+                        currency,
+                        rcept_no,
+                        source,
+                        fetched_at,
+                        raw_payload
+                    )
+                    VALUES %s
+                    ON CONFLICT (corp_code, bsns_year, reprt_code, fs_div, sj_div, account_id, ord, rcept_no)
+                    DO UPDATE SET
+                        ticker = EXCLUDED.ticker,
+                        sj_nm = EXCLUDED.sj_nm,
+                        account_nm = EXCLUDED.account_nm,
+                        account_detail = EXCLUDED.account_detail,
+                        thstrm_nm = EXCLUDED.thstrm_nm,
+                        thstrm_amount = EXCLUDED.thstrm_amount,
+                        thstrm_add_amount = EXCLUDED.thstrm_add_amount,
+                        frmtrm_nm = EXCLUDED.frmtrm_nm,
+                        frmtrm_amount = EXCLUDED.frmtrm_amount,
+                        frmtrm_q_nm = EXCLUDED.frmtrm_q_nm,
+                        frmtrm_q_amount = EXCLUDED.frmtrm_q_amount,
+                        frmtrm_add_amount = EXCLUDED.frmtrm_add_amount,
+                        bfefrmtrm_nm = EXCLUDED.bfefrmtrm_nm,
+                        bfefrmtrm_amount = EXCLUDED.bfefrmtrm_amount,
+                        ord = EXCLUDED.ord,
+                        currency = EXCLUDED.currency,
+                        source = EXCLUDED.source,
+                        fetched_at = EXCLUDED.fetched_at,
+                        raw_payload = EXCLUDED.raw_payload
+                    """,
+                    args,
+                    page_size=1000,
+                )
+                result.updated = cur.rowcount
+
+        return result
+
+    def upsert_dart_share_count_raw(
+        self,
+        records: list[DartShareCountLine],
+    ) -> UpsertResult:
+        """Upsert OpenDART share-count raw rows."""
+        if not records:
+            return UpsertResult()
+
+        result = UpsertResult()
+        deduped_records = {
+            (
+                record.corp_code,
+                record.bsns_year,
+                record.reprt_code,
+                record.se,
+                record.rcept_no,
+            ): record
+            for record in records
+        }
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        record.corp_code,
+                        record.ticker,
+                        record.bsns_year,
+                        record.reprt_code,
+                        record.rcept_no,
+                        record.corp_cls,
+                        record.se,
+                        record.isu_stock_totqy,
+                        record.now_to_isu_stock_totqy,
+                        record.now_to_dcrs_stock_totqy,
+                        record.redc,
+                        record.profit_incnr,
+                        record.rdmstk_repy,
+                        record.etc,
+                        record.istc_totqy,
+                        record.tesstk_co,
+                        record.distb_stock_co,
+                        record.stlm_dt,
+                        record.source.value,
+                        record.fetched_at,
+                        psycopg2.extras.Json(record.raw_payload),
+                    )
+                    for record in deduped_records.values()
+                ]
+
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO dart_share_count_raw (
+                        corp_code,
+                        ticker,
+                        bsns_year,
+                        reprt_code,
+                        rcept_no,
+                        corp_cls,
+                        se,
+                        isu_stock_totqy,
+                        now_to_isu_stock_totqy,
+                        now_to_dcrs_stock_totqy,
+                        redc,
+                        profit_incnr,
+                        rdmstk_repy,
+                        etc,
+                        istc_totqy,
+                        tesstk_co,
+                        distb_stock_co,
+                        stlm_dt,
+                        source,
+                        fetched_at,
+                        raw_payload
+                    )
+                    VALUES %s
+                    ON CONFLICT (corp_code, bsns_year, reprt_code, se, rcept_no)
+                    DO UPDATE SET
+                        ticker = EXCLUDED.ticker,
+                        corp_cls = EXCLUDED.corp_cls,
+                        isu_stock_totqy = EXCLUDED.isu_stock_totqy,
+                        now_to_isu_stock_totqy = EXCLUDED.now_to_isu_stock_totqy,
+                        now_to_dcrs_stock_totqy = EXCLUDED.now_to_dcrs_stock_totqy,
+                        redc = EXCLUDED.redc,
+                        profit_incnr = EXCLUDED.profit_incnr,
+                        rdmstk_repy = EXCLUDED.rdmstk_repy,
+                        etc = EXCLUDED.etc,
+                        istc_totqy = EXCLUDED.istc_totqy,
+                        tesstk_co = EXCLUDED.tesstk_co,
+                        distb_stock_co = EXCLUDED.distb_stock_co,
+                        stlm_dt = EXCLUDED.stlm_dt,
+                        source = EXCLUDED.source,
+                        fetched_at = EXCLUDED.fetched_at,
+                        raw_payload = EXCLUDED.raw_payload
+                    """,
+                    args,
+                    page_size=1000,
+                )
+                result.updated = cur.rowcount
+
+        return result
+
+    def upsert_dart_shareholder_return_raw(
+        self,
+        records: list[DartShareholderReturnLine],
+    ) -> UpsertResult:
+        """Upsert OpenDART dividend / treasury-stock flattened raw rows."""
+        if not records:
+            return UpsertResult()
+
+        result = UpsertResult()
+        deduped_records = {
+            (
+                record.corp_code,
+                record.bsns_year,
+                record.reprt_code,
+                record.statement_type,
+                record.row_name,
+                record.stock_knd,
+                record.dim1,
+                record.dim2,
+                record.dim3,
+                record.metric_code,
+                record.rcept_no,
+            ): record
+            for record in records
+        }
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        record.corp_code,
+                        record.ticker,
+                        record.bsns_year,
+                        record.reprt_code,
+                        record.statement_type,
+                        record.row_name,
+                        record.stock_knd,
+                        record.dim1,
+                        record.dim2,
+                        record.dim3,
+                        record.metric_code,
+                        record.metric_name,
+                        record.value_numeric,
+                        record.value_text,
+                        record.unit,
+                        record.rcept_no,
+                        record.stlm_dt,
+                        record.source.value,
+                        record.fetched_at,
+                        psycopg2.extras.Json(record.raw_payload),
+                    )
+                    for record in deduped_records.values()
+                ]
+
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO dart_shareholder_return_raw (
+                        corp_code,
+                        ticker,
+                        bsns_year,
+                        reprt_code,
+                        statement_type,
+                        row_name,
+                        stock_knd,
+                        dim1,
+                        dim2,
+                        dim3,
+                        metric_code,
+                        metric_name,
+                        value_numeric,
+                        value_text,
+                        unit,
+                        rcept_no,
+                        stlm_dt,
+                        source,
+                        fetched_at,
+                        raw_payload
+                    )
+                    VALUES %s
+                    ON CONFLICT (
+                        corp_code,
+                        bsns_year,
+                        reprt_code,
+                        statement_type,
+                        row_name,
+                        stock_knd,
+                        dim1,
+                        dim2,
+                        dim3,
+                        metric_code,
+                        rcept_no
+                    )
+                    DO UPDATE SET
+                        ticker = EXCLUDED.ticker,
+                        metric_name = EXCLUDED.metric_name,
+                        value_numeric = EXCLUDED.value_numeric,
+                        value_text = EXCLUDED.value_text,
+                        unit = EXCLUDED.unit,
+                        stlm_dt = EXCLUDED.stlm_dt,
+                        source = EXCLUDED.source,
+                        fetched_at = EXCLUDED.fetched_at,
+                        raw_payload = EXCLUDED.raw_payload
+                    """,
+                    args,
+                    page_size=1000,
+                )
+                result.updated = cur.rowcount
+
+        return result
+
+    def upsert_dart_xbrl_documents(
+        self,
+        records: list[DartXbrlDocument],
+    ) -> UpsertResult:
+        """Upsert parsed OpenDART XBRL document metadata."""
+        if not records:
+            return UpsertResult()
+
+        result = UpsertResult()
+        deduped_records = {
+            (record.corp_code, record.bsns_year, record.reprt_code, record.rcept_no): record
+            for record in records
+        }
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        record.corp_code,
+                        record.ticker,
+                        record.bsns_year,
+                        record.reprt_code,
+                        record.rcept_no,
+                        record.zip_entry_count,
+                        record.instance_document_name,
+                        record.label_ko_document_name,
+                        record.source.value,
+                        record.fetched_at,
+                        psycopg2.extras.Json(record.raw_payload),
+                    )
+                    for record in deduped_records.values()
+                ]
+
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO dart_xbrl_document (
+                        corp_code,
+                        ticker,
+                        bsns_year,
+                        reprt_code,
+                        rcept_no,
+                        zip_entry_count,
+                        instance_document_name,
+                        label_ko_document_name,
+                        source,
+                        fetched_at,
+                        raw_payload
+                    )
+                    VALUES %s
+                    ON CONFLICT (corp_code, bsns_year, reprt_code, rcept_no)
+                    DO UPDATE SET
+                        ticker = EXCLUDED.ticker,
+                        zip_entry_count = EXCLUDED.zip_entry_count,
+                        instance_document_name = EXCLUDED.instance_document_name,
+                        label_ko_document_name = EXCLUDED.label_ko_document_name,
+                        source = EXCLUDED.source,
+                        fetched_at = EXCLUDED.fetched_at,
+                        raw_payload = EXCLUDED.raw_payload
+                    """,
+                    args,
+                    page_size=1000,
+                )
+                result.updated = cur.rowcount
+
+        return result
+
+    def upsert_dart_xbrl_fact_raw(
+        self,
+        records: list[DartXbrlFactLine],
+    ) -> UpsertResult:
+        """Upsert parsed OpenDART XBRL fact rows."""
+        if not records:
+            return UpsertResult()
+
+        result = UpsertResult()
+        deduped_records = {
+            (
+                record.corp_code,
+                record.bsns_year,
+                record.reprt_code,
+                record.rcept_no,
+                record.context_id,
+                record.concept_id,
+            ): record
+            for record in records
+        }
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        record.corp_code,
+                        record.ticker,
+                        record.bsns_year,
+                        record.reprt_code,
+                        record.rcept_no,
+                        record.concept_id,
+                        record.concept_name,
+                        record.namespace_uri,
+                        record.context_id,
+                        record.context_type,
+                        record.period_start,
+                        record.period_end,
+                        record.instant_date,
+                        psycopg2.extras.Json(record.dimensions),
+                        record.unit_id,
+                        record.unit_measure,
+                        record.decimals,
+                        record.value_numeric,
+                        record.value_text,
+                        record.is_nil,
+                        record.label_ko,
+                        record.source.value,
+                        record.fetched_at,
+                        psycopg2.extras.Json(record.raw_payload),
+                    )
+                    for record in deduped_records.values()
+                ]
+
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO dart_xbrl_fact_raw (
+                        corp_code,
+                        ticker,
+                        bsns_year,
+                        reprt_code,
+                        rcept_no,
+                        concept_id,
+                        concept_name,
+                        namespace_uri,
+                        context_id,
+                        context_type,
+                        period_start,
+                        period_end,
+                        instant_date,
+                        dimensions,
+                        unit_id,
+                        unit_measure,
+                        decimals,
+                        value_numeric,
+                        value_text,
+                        is_nil,
+                        label_ko,
+                        source,
+                        fetched_at,
+                        raw_payload
+                    )
+                    VALUES %s
+                    ON CONFLICT (corp_code, bsns_year, reprt_code, rcept_no, context_id, concept_id)
+                    DO UPDATE SET
+                        ticker = EXCLUDED.ticker,
+                        concept_name = EXCLUDED.concept_name,
+                        namespace_uri = EXCLUDED.namespace_uri,
+                        context_type = EXCLUDED.context_type,
+                        period_start = EXCLUDED.period_start,
+                        period_end = EXCLUDED.period_end,
+                        instant_date = EXCLUDED.instant_date,
+                        dimensions = EXCLUDED.dimensions,
+                        unit_id = EXCLUDED.unit_id,
+                        unit_measure = EXCLUDED.unit_measure,
+                        decimals = EXCLUDED.decimals,
+                        value_numeric = EXCLUDED.value_numeric,
+                        value_text = EXCLUDED.value_text,
+                        is_nil = EXCLUDED.is_nil,
+                        label_ko = EXCLUDED.label_ko,
+                        source = EXCLUDED.source,
+                        fetched_at = EXCLUDED.fetched_at,
+                        raw_payload = EXCLUDED.raw_payload
+                    """,
+                    args,
+                    page_size=1000,
+                )
+                result.updated = cur.rowcount
+
+        return result
+
+    def upsert_krx_security_flow_raw(
+        self,
+        records: list[SecurityFlowLine],
+    ) -> UpsertResult:
+        """Upsert KRX / pykrx security-flow raw rows."""
+        if not records:
+            return UpsertResult()
+
+        result = UpsertResult()
+        deduped_records = {
+            (
+                record.trade_date,
+                record.ticker,
+                record.market.value,
+                record.metric_code,
+                record.source.value,
+            ): record
+            for record in records
+        }
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        record.trade_date,
+                        record.ticker,
+                        record.market.value,
+                        record.metric_code,
+                        record.metric_name,
+                        record.value,
+                        record.unit,
+                        record.source.value,
+                        record.fetched_at,
+                        psycopg2.extras.Json(record.raw_payload),
+                    )
+                    for record in deduped_records.values()
+                ]
+
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO krx_security_flow_raw (
+                        trade_date,
+                        ticker,
+                        market,
+                        metric_code,
+                        metric_name,
+                        value,
+                        unit,
+                        source,
+                        fetched_at,
+                        raw_payload
+                    )
+                    VALUES %s
+                    ON CONFLICT (trade_date, ticker, market, metric_code, source)
+                    DO UPDATE SET
+                        metric_name = EXCLUDED.metric_name,
+                        value = EXCLUDED.value,
+                        unit = EXCLUDED.unit,
+                        fetched_at = EXCLUDED.fetched_at,
+                        raw_payload = EXCLUDED.raw_payload
+                    """,
+                    args,
+                    page_size=1000,
+                )
+                result.updated = cur.rowcount
+
+        return result
+
+    def upsert_operating_source_documents(
+        self,
+        records: list[OperatingSourceDocument],
+    ) -> UpsertResult:
+        """Upsert operating KPI source documents."""
+        if not records:
+            return UpsertResult()
+
+        result = UpsertResult()
+        deduped_records = {record.document_key: record for record in records}
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        record.document_key,
+                        record.ticker,
+                        record.market.value,
+                        record.sector_key,
+                        record.document_type,
+                        record.title,
+                        record.document_date,
+                        record.period_end,
+                        record.source_system,
+                        record.source_url,
+                        record.language,
+                        record.content_text,
+                        record.fetched_at,
+                        psycopg2.extras.Json(record.raw_payload),
+                    )
+                    for record in deduped_records.values()
+                ]
+
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO operating_source_document (
+                        document_key,
+                        ticker,
+                        market,
+                        sector_key,
+                        document_type,
+                        title,
+                        document_date,
+                        period_end,
+                        source_system,
+                        source_url,
+                        language,
+                        content_text,
+                        fetched_at,
+                        raw_payload
+                    )
+                    VALUES %s
+                    ON CONFLICT (document_key) DO UPDATE SET
+                        ticker = EXCLUDED.ticker,
+                        market = EXCLUDED.market,
+                        sector_key = EXCLUDED.sector_key,
+                        document_type = EXCLUDED.document_type,
+                        title = EXCLUDED.title,
+                        document_date = EXCLUDED.document_date,
+                        period_end = EXCLUDED.period_end,
+                        source_system = EXCLUDED.source_system,
+                        source_url = EXCLUDED.source_url,
+                        language = EXCLUDED.language,
+                        content_text = EXCLUDED.content_text,
+                        fetched_at = EXCLUDED.fetched_at,
+                        raw_payload = EXCLUDED.raw_payload,
+                        updated_at = now()
+                    """,
+                    args,
+                    page_size=1000,
+                )
+                result.updated = cur.rowcount
+
+        return result
+
+    def upsert_operating_metric_facts(
+        self,
+        records: list[OperatingMetricFact],
+    ) -> UpsertResult:
+        """Upsert extracted operating KPI facts."""
+        if not records:
+            return UpsertResult()
+
+        result = UpsertResult()
+        deduped_records = {
+            (
+                record.ticker,
+                record.metric_code,
+                record.period_end,
+                record.document_key,
+                record.extractor_code,
+            ): record
+            for record in records
+        }
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        record.ticker,
+                        record.market.value,
+                        record.sector_key,
+                        record.metric_code,
+                        record.metric_name,
+                        record.period_end,
+                        record.value_numeric,
+                        record.value_text,
+                        record.unit,
+                        record.document_key,
+                        record.extractor_code,
+                        record.raw_snippet,
+                        record.fetched_at,
+                        psycopg2.extras.Json(record.raw_payload),
+                    )
+                    for record in deduped_records.values()
+                ]
+
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO operating_metric_fact (
+                        ticker,
+                        market,
+                        sector_key,
+                        metric_code,
+                        metric_name,
+                        period_end,
+                        value_numeric,
+                        value_text,
+                        unit,
+                        document_key,
+                        extractor_code,
+                        raw_snippet,
+                        fetched_at,
+                        raw_payload
+                    )
+                    VALUES %s
+                    ON CONFLICT (ticker, metric_code, period_end, document_key, extractor_code)
+                    DO UPDATE SET
+                        market = EXCLUDED.market,
+                        sector_key = EXCLUDED.sector_key,
+                        metric_name = EXCLUDED.metric_name,
+                        value_numeric = EXCLUDED.value_numeric,
+                        value_text = EXCLUDED.value_text,
+                        unit = EXCLUDED.unit,
+                        raw_snippet = EXCLUDED.raw_snippet,
+                        fetched_at = EXCLUDED.fetched_at,
+                        raw_payload = EXCLUDED.raw_payload,
+                        updated_at = now()
+                    """,
+                    args,
+                    page_size=1000,
+                )
+                result.updated = cur.rowcount
+
+        return result
+
+    def upsert_metric_catalog(self, records: list[MetricCatalogEntry]) -> UpsertResult:
+        """Upsert canonical metric catalog entries."""
+        if not records:
+            return UpsertResult()
+
+        result = UpsertResult()
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        record.metric_code,
+                        record.metric_name,
+                        record.category,
+                        record.unit,
+                        record.description,
+                        record.is_active,
+                    )
+                    for record in records
+                ]
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO metric_catalog (
+                        metric_code, metric_name, category, unit, description, is_active
+                    )
+                    VALUES %s
+                    ON CONFLICT (metric_code) DO UPDATE SET
+                        metric_name = EXCLUDED.metric_name,
+                        category = EXCLUDED.category,
+                        unit = EXCLUDED.unit,
+                        description = EXCLUDED.description,
+                        is_active = EXCLUDED.is_active,
+                        updated_at = now()
+                    """,
+                    args,
+                    page_size=1000,
+                )
+                result.updated = cur.rowcount
+        return result
+
+    def replace_metric_mapping_rules(self, records: list[MetricMappingRule]) -> UpsertResult:
+        """Replace the active metric mapping rules with the provided set."""
+        result = UpsertResult()
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE metric_mapping_rule SET is_active = FALSE, updated_at = now()")
+                if not records:
+                    return result
+
+                args = [
+                    (
+                        record.rule_code,
+                        record.metric_code,
+                        record.source_table,
+                        record.value_selector,
+                        record.priority,
+                        record.statement_type,
+                        record.fs_div,
+                        record.sj_div,
+                        record.account_id,
+                        record.account_nm,
+                        record.row_name,
+                        record.stock_knd,
+                        record.dim1,
+                        record.dim2,
+                        record.dim3,
+                        record.metric_code_match,
+                        record.is_active,
+                    )
+                    for record in records
+                ]
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO metric_mapping_rule (
+                        rule_code,
+                        metric_code,
+                        source_table,
+                        value_selector,
+                        priority,
+                        statement_type,
+                        fs_div,
+                        sj_div,
+                        account_id,
+                        account_nm,
+                        row_name,
+                        stock_knd,
+                        dim1,
+                        dim2,
+                        dim3,
+                        metric_code_match,
+                        is_active
+                    )
+                    VALUES %s
+                    ON CONFLICT (rule_code) DO UPDATE SET
+                        metric_code = EXCLUDED.metric_code,
+                        source_table = EXCLUDED.source_table,
+                        value_selector = EXCLUDED.value_selector,
+                        priority = EXCLUDED.priority,
+                        statement_type = EXCLUDED.statement_type,
+                        fs_div = EXCLUDED.fs_div,
+                        sj_div = EXCLUDED.sj_div,
+                        account_id = EXCLUDED.account_id,
+                        account_nm = EXCLUDED.account_nm,
+                        row_name = EXCLUDED.row_name,
+                        stock_knd = EXCLUDED.stock_knd,
+                        dim1 = EXCLUDED.dim1,
+                        dim2 = EXCLUDED.dim2,
+                        dim3 = EXCLUDED.dim3,
+                        metric_code_match = EXCLUDED.metric_code_match,
+                        is_active = EXCLUDED.is_active,
+                        updated_at = now()
+                    """,
+                    args,
+                    page_size=1000,
+                )
+                result.updated = cur.rowcount
+        return result
+
+    def get_metric_mapping_rules(self) -> list[MetricMappingRule]:
+        """Return active metric mapping rules ordered by priority."""
+        records: list[MetricMappingRule] = []
+        with get_connection(self._dsn) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM metric_mapping_rule
+                    WHERE is_active = TRUE
+                    ORDER BY priority ASC, rule_code
+                    """
+                )
+                for row in cur.fetchall():
+                    records.append(
+                        MetricMappingRule(
+                            rule_code=row["rule_code"],
+                            metric_code=row["metric_code"],
+                            source_table=row["source_table"],
+                            value_selector=row["value_selector"],
+                            priority=row["priority"],
+                            statement_type=row["statement_type"],
+                            fs_div=row["fs_div"],
+                            sj_div=row["sj_div"],
+                            account_id=row["account_id"],
+                            account_nm=row["account_nm"],
+                            row_name=row["row_name"],
+                            stock_knd=row["stock_knd"],
+                            dim1=row["dim1"],
+                            dim2=row["dim2"],
+                            dim3=row["dim3"],
+                            metric_code_match=row["metric_code_match"],
+                            is_active=row["is_active"],
+                        )
+                    )
+        return records
+
+    def get_dart_financial_statement_raw(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str] | None = None,
+    ) -> list[DartFinancialStatementLine]:
+        """Return financial statement raw rows for normalization."""
+        records: list[DartFinancialStatementLine] = []
+        with get_connection(self._dsn) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                sql = """
+                    SELECT *
+                    FROM dart_financial_statement_raw
+                    WHERE bsns_year = ANY(%s)
+                      AND reprt_code = ANY(%s)
+                """
+                params: list[object] = [bsns_years, reprt_codes]
+                if tickers:
+                    sql += " AND ticker = ANY(%s)"
+                    params.append(tickers)
+                sql += " ORDER BY ticker, bsns_year, reprt_code, fs_div, sj_div, ord"
+                cur.execute(sql, params)
+                for row in cur.fetchall():
+                    records.append(
+                        DartFinancialStatementLine(
+                            corp_code=row["corp_code"],
+                            ticker=row["ticker"],
+                            bsns_year=row["bsns_year"],
+                            reprt_code=row["reprt_code"],
+                            fs_div=row["fs_div"],
+                            sj_div=row["sj_div"],
+                            sj_nm=row["sj_nm"],
+                            account_id=row["account_id"],
+                            account_nm=row["account_nm"],
+                            account_detail=row["account_detail"],
+                            thstrm_nm=row["thstrm_nm"],
+                            thstrm_amount=row["thstrm_amount"],
+                            thstrm_add_amount=row["thstrm_add_amount"],
+                            frmtrm_nm=row["frmtrm_nm"],
+                            frmtrm_amount=row["frmtrm_amount"],
+                            frmtrm_q_nm=row["frmtrm_q_nm"],
+                            frmtrm_q_amount=row["frmtrm_q_amount"],
+                            frmtrm_add_amount=row["frmtrm_add_amount"],
+                            bfefrmtrm_nm=row["bfefrmtrm_nm"],
+                            bfefrmtrm_amount=row["bfefrmtrm_amount"],
+                            ord=row["ord"],
+                            currency=row["currency"] or "",
+                            rcept_no=row["rcept_no"],
+                            source=Source(row["source"]),
+                            fetched_at=row["fetched_at"],
+                            raw_payload=row["raw_payload"],
+                        )
+                    )
+        return records
+
+    def get_dart_share_count_raw(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str] | None = None,
+    ) -> list[DartShareCountLine]:
+        """Return share-count raw rows for normalization."""
+        records: list[DartShareCountLine] = []
+        with get_connection(self._dsn) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                sql = """
+                    SELECT *
+                    FROM dart_share_count_raw
+                    WHERE bsns_year = ANY(%s)
+                      AND reprt_code = ANY(%s)
+                """
+                params: list[object] = [bsns_years, reprt_codes]
+                if tickers:
+                    sql += " AND ticker = ANY(%s)"
+                    params.append(tickers)
+                sql += " ORDER BY ticker, bsns_year, reprt_code, se"
+                cur.execute(sql, params)
+                for row in cur.fetchall():
+                    records.append(
+                        DartShareCountLine(
+                            corp_code=row["corp_code"],
+                            ticker=row["ticker"],
+                            bsns_year=row["bsns_year"],
+                            reprt_code=row["reprt_code"],
+                            rcept_no=row["rcept_no"],
+                            corp_cls=row["corp_cls"],
+                            se=row["se"],
+                            isu_stock_totqy=row["isu_stock_totqy"],
+                            now_to_isu_stock_totqy=row["now_to_isu_stock_totqy"],
+                            now_to_dcrs_stock_totqy=row["now_to_dcrs_stock_totqy"],
+                            redc=row["redc"],
+                            profit_incnr=row["profit_incnr"],
+                            rdmstk_repy=row["rdmstk_repy"],
+                            etc=row["etc"],
+                            istc_totqy=row["istc_totqy"],
+                            tesstk_co=row["tesstk_co"],
+                            distb_stock_co=row["distb_stock_co"],
+                            stlm_dt=row["stlm_dt"],
+                            source=Source(row["source"]),
+                            fetched_at=row["fetched_at"],
+                            raw_payload=row["raw_payload"],
+                        )
+                    )
+        return records
+
+    def get_dart_shareholder_return_raw(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str] | None = None,
+    ) -> list[DartShareholderReturnLine]:
+        """Return dividend / treasury-stock raw rows for normalization."""
+        records: list[DartShareholderReturnLine] = []
+        with get_connection(self._dsn) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                sql = """
+                    SELECT *
+                    FROM dart_shareholder_return_raw
+                    WHERE bsns_year = ANY(%s)
+                      AND reprt_code = ANY(%s)
+                """
+                params: list[object] = [bsns_years, reprt_codes]
+                if tickers:
+                    sql += " AND ticker = ANY(%s)"
+                    params.append(tickers)
+                sql += " ORDER BY ticker, bsns_year, reprt_code, statement_type, row_name"
+                cur.execute(sql, params)
+                for row in cur.fetchall():
+                    records.append(
+                        DartShareholderReturnLine(
+                            corp_code=row["corp_code"],
+                            ticker=row["ticker"],
+                            bsns_year=row["bsns_year"],
+                            reprt_code=row["reprt_code"],
+                            statement_type=row["statement_type"],
+                            row_name=row["row_name"],
+                            stock_knd=row["stock_knd"],
+                            dim1=row["dim1"],
+                            dim2=row["dim2"],
+                            dim3=row["dim3"],
+                            metric_code=row["metric_code"],
+                            metric_name=row["metric_name"],
+                            value_numeric=row["value_numeric"],
+                            value_text=row["value_text"],
+                            unit=row["unit"] or "",
+                            rcept_no=row["rcept_no"],
+                            stlm_dt=row["stlm_dt"],
+                            source=Source(row["source"]),
+                            fetched_at=row["fetched_at"],
+                            raw_payload=row["raw_payload"],
+                        )
+                    )
+        return records
+
+    def get_dart_xbrl_fact_raw(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str] | None = None,
+    ) -> list[DartXbrlFactLine]:
+        """Return parsed OpenDART XBRL fact rows for normalization."""
+        records: list[DartXbrlFactLine] = []
+        with get_connection(self._dsn) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                sql = """
+                    SELECT *
+                    FROM dart_xbrl_fact_raw
+                    WHERE bsns_year = ANY(%s)
+                      AND reprt_code = ANY(%s)
+                """
+                params: list[object] = [bsns_years, reprt_codes]
+                if tickers:
+                    sql += " AND ticker = ANY(%s)"
+                    params.append(tickers)
+                sql += " ORDER BY ticker, bsns_year, reprt_code, concept_id, context_id"
+                cur.execute(sql, params)
+                for row in cur.fetchall():
+                    records.append(
+                        DartXbrlFactLine(
+                            corp_code=row["corp_code"],
+                            ticker=row["ticker"],
+                            bsns_year=row["bsns_year"],
+                            reprt_code=row["reprt_code"],
+                            rcept_no=row["rcept_no"],
+                            concept_id=row["concept_id"],
+                            concept_name=row["concept_name"],
+                            namespace_uri=row["namespace_uri"],
+                            context_id=row["context_id"],
+                            context_type=row["context_type"],
+                            period_start=row["period_start"],
+                            period_end=row["period_end"],
+                            instant_date=row["instant_date"],
+                            dimensions=list(row["dimensions"] or []),
+                            unit_id=row["unit_id"],
+                            unit_measure=row["unit_measure"],
+                            decimals=row["decimals"],
+                            value_numeric=row["value_numeric"],
+                            value_text=row["value_text"],
+                            is_nil=row["is_nil"],
+                            label_ko=row["label_ko"],
+                            source=Source(row["source"]),
+                            fetched_at=row["fetched_at"],
+                            raw_payload=row["raw_payload"],
+                        )
+                    )
+        return records
+
+    def upsert_stock_metric_facts(self, records: list[StockMetricFact]) -> UpsertResult:
+        """Upsert normalized canonical metric facts."""
+        if not records:
+            return UpsertResult()
+
+        result = UpsertResult()
+        deduped_records = {
+            (record.ticker, record.metric_code, record.bsns_year, record.reprt_code): record
+            for record in records
+        }
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        record.ticker,
+                        record.market.value,
+                        record.corp_code,
+                        record.metric_code,
+                        record.period_type,
+                        record.period_end,
+                        record.bsns_year,
+                        record.reprt_code,
+                        record.fs_div,
+                        record.value_numeric,
+                        record.value_text,
+                        record.unit,
+                        record.source_table,
+                        record.source_key,
+                        record.mapping_rule_code,
+                        record.fetched_at,
+                    )
+                    for record in deduped_records.values()
+                ]
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO stock_metric_fact (
+                        ticker,
+                        market,
+                        corp_code,
+                        metric_code,
+                        period_type,
+                        period_end,
+                        bsns_year,
+                        reprt_code,
+                        fs_div,
+                        value_numeric,
+                        value_text,
+                        unit,
+                        source_table,
+                        source_key,
+                        mapping_rule_code,
+                        fetched_at
+                    )
+                    VALUES %s
+                    ON CONFLICT (ticker, metric_code, bsns_year, reprt_code)
+                    DO UPDATE SET
+                        market = EXCLUDED.market,
+                        corp_code = EXCLUDED.corp_code,
+                        period_type = EXCLUDED.period_type,
+                        period_end = EXCLUDED.period_end,
+                        fs_div = EXCLUDED.fs_div,
+                        value_numeric = EXCLUDED.value_numeric,
+                        value_text = EXCLUDED.value_text,
+                        unit = EXCLUDED.unit,
+                        source_table = EXCLUDED.source_table,
+                        source_key = EXCLUDED.source_key,
+                        mapping_rule_code = EXCLUDED.mapping_rule_code,
+                        fetched_at = EXCLUDED.fetched_at,
+                        updated_at = now()
+                    """,
+                    args,
+                    page_size=1000,
+                )
+                result.updated = cur.rowcount
+        return result
+
+    def get_metric_catalog_entries(self) -> list[MetricCatalogEntry]:
+        """Return active canonical metric catalog entries."""
+        records: list[MetricCatalogEntry] = []
+        with get_connection(self._dsn) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM metric_catalog
+                    WHERE is_active = TRUE
+                    ORDER BY metric_code
+                    """
+                )
+                for row in cur.fetchall():
+                    records.append(
+                        MetricCatalogEntry(
+                            metric_code=row["metric_code"],
+                            metric_name=row["metric_name"],
+                            category=row["category"],
+                            unit=row["unit"],
+                            description=row["description"],
+                            is_active=row["is_active"],
+                        )
+                    )
+        return records
+
+    def get_stock_metric_facts(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str] | None = None,
+    ) -> list[StockMetricFact]:
+        """Return normalized canonical metric facts."""
+        records: list[StockMetricFact] = []
+        with get_connection(self._dsn) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                sql = """
+                    SELECT *
+                    FROM stock_metric_fact
+                    WHERE bsns_year = ANY(%s)
+                      AND reprt_code = ANY(%s)
+                """
+                params: list[object] = [bsns_years, reprt_codes]
+                if tickers:
+                    sql += " AND ticker = ANY(%s)"
+                    params.append(tickers)
+                sql += " ORDER BY ticker, bsns_year, reprt_code, metric_code"
+                cur.execute(sql, params)
+                for row in cur.fetchall():
+                    records.append(
+                        StockMetricFact(
+                            ticker=row["ticker"],
+                            market=Market(row["market"]),
+                            corp_code=row["corp_code"],
+                            metric_code=row["metric_code"],
+                            period_type=row["period_type"],
+                            period_end=row["period_end"],
+                            bsns_year=row["bsns_year"],
+                            reprt_code=row["reprt_code"],
+                            fs_div=row["fs_div"],
+                            value_numeric=row["value_numeric"],
+                            value_text=row["value_text"],
+                            unit=row["unit"],
+                            source_table=row["source_table"],
+                            source_key=row["source_key"],
+                            mapping_rule_code=row["mapping_rule_code"],
+                            fetched_at=row["fetched_at"],
+                        )
+                    )
+        return records
+
+    def get_operating_metric_facts(
+        self,
+        tickers: list[str] | None = None,
+        sector_keys: list[str] | None = None,
+    ) -> list[OperatingMetricFact]:
+        """Return extracted operating KPI facts."""
+        records: list[OperatingMetricFact] = []
+        with get_connection(self._dsn) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                sql = "SELECT * FROM operating_metric_fact WHERE 1=1"
+                params: list[object] = []
+                if tickers:
+                    sql += " AND ticker = ANY(%s)"
+                    params.append(tickers)
+                if sector_keys:
+                    sql += " AND sector_key = ANY(%s)"
+                    params.append(sector_keys)
+                sql += " ORDER BY ticker, sector_key, metric_code, period_end DESC NULLS LAST"
+                cur.execute(sql, params)
+                for row in cur.fetchall():
+                    records.append(
+                        OperatingMetricFact(
+                            ticker=row["ticker"],
+                            market=Market(row["market"]),
+                            sector_key=row["sector_key"],
+                            metric_code=row["metric_code"],
+                            metric_name=row["metric_name"],
+                            period_end=row["period_end"],
+                            value_numeric=row["value_numeric"],
+                            value_text=row["value_text"],
+                            unit=row["unit"],
+                            document_key=row["document_key"],
+                            extractor_code=row["extractor_code"],
+                            raw_snippet=row["raw_snippet"],
+                            fetched_at=row["fetched_at"],
+                            raw_payload=row["raw_payload"],
+                        )
+                    )
+        return records
 
     # -- Daily OHLCV ----------------------------------------------------------
 

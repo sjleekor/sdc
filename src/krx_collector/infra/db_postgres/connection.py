@@ -24,28 +24,37 @@ import psycopg2.pool
 
 logger = logging.getLogger(__name__)
 
-# Module-level connection pool (singleton).
-_POOL: psycopg2.pool.ThreadedConnectionPool | None = None
+# Module-level connection pools keyed by DSN.
+_POOLS: dict[str, psycopg2.pool.ThreadedConnectionPool] = {}
+
+
+def _mask_dsn(dsn: str) -> str:
+    """Return a log-safe representation of a DSN."""
+    at_index = dsn.rfind("@")
+    if at_index == -1:
+        return "***"
+    return dsn[: at_index + 1] + "***"
 
 
 def _get_pool(dsn: str) -> psycopg2.pool.ThreadedConnectionPool:
-    """Return the global connection pool, creating it on first call.
+    """Return the DSN-specific connection pool, creating it on first call.
 
     Args:
         dsn: PostgreSQL connection string.
 
     Returns:
-        The singleton ``ThreadedConnectionPool``.
+        The cached ``ThreadedConnectionPool`` for the DSN.
     """
-    global _POOL
-    if _POOL is None or _POOL.closed:
-        logger.info("Creating new connection pool for DSN: %s", dsn[:dsn.rfind("@") + 1] + "***")
-        _POOL = psycopg2.pool.ThreadedConnectionPool(
+    pool = _POOLS.get(dsn)
+    if pool is None or pool.closed:
+        logger.info("Creating new connection pool for DSN: %s", _mask_dsn(dsn))
+        pool = psycopg2.pool.ThreadedConnectionPool(
             minconn=1,
             maxconn=10,
             dsn=dsn,
         )
-    return _POOL
+        _POOLS[dsn] = pool
+    return pool
 
 
 @contextlib.contextmanager

@@ -1,7 +1,7 @@
 [project]
 name = "krx-data-pipeline"
-version = "0.1.0"
-description = "Maintainable Korean stock data pipeline: KOSPI/KOSDAQ universe sync and daily OHLCV collection."
+version = "0.2.0"
+description = "Maintainable Korean stock data pipeline: universe sync, daily OHLCV, OpenDART financials/XBRL, KRX flows, and sector-specific operating KPIs."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }

@@ -62,10 +62,17 @@ class Settings(BaseSettings):
         log_dir: Optional directory for rotating file logs.
         run_mode: dev or prod.
         universe_source_default: Default source for universe sync.
+        opendart_api_key: Optional OpenDART API key for future DART-based
+            ingestion features.
         rate_limit_seconds: Delay between API calls (seconds).
         long_rest_interval: Number of API requests between long rests
             (0 disables long rests).
         long_rest_seconds: Duration of each long rest, in seconds.
+        remote_db_info_path: Path to the remote DB metadata file.
+        remote_db_batch_size: Batch size for remote-to-local DB sync.
+        remote_db_host_override: Optional hostname override for the remote DB.
+        remote_db_ssh_host: Optional SSH host for local port forwarding.
+        remote_db_ssh_local_port: Optional fixed local port for SSH tunnel.
     """
 
     model_config = SettingsConfigDict(
@@ -92,11 +99,19 @@ class Settings(BaseSettings):
 
     # Universe
     universe_source_default: UniverseSourceDefault = UniverseSourceDefault.FDR
+    opendart_api_key: str = ""
 
     # Rate limiting
     rate_limit_seconds: float = 0.2
     long_rest_interval: int = 100
     long_rest_seconds: float = 10.0
+
+    # Remote DB sync
+    remote_db_info_path: Path = Path("/Users/whishaw/wss_p/stock_data_collector_secrets/db_info")
+    remote_db_batch_size: int = 50000
+    remote_db_host_override: str | None = None
+    remote_db_ssh_host: str | None = None
+    remote_db_ssh_local_port: int | None = None
 
     @model_validator(mode="after")
     def _compute_dsn(self) -> Settings:

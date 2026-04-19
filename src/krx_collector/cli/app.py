@@ -3,6 +3,7 @@
 Subcommands::
 
     krx-collector db init
+    krx-collector db sync-remote [--db-info-path ...] [--ssh-host ...] [--full-refresh]
     krx-collector universe sync  [--source fdr|pykrx] [--markets ...]
     krx-collector prices backfill [--market ...] [--tickers ...] [--start ...]
     krx-collector validate       [--date ...] [--market ...]
@@ -17,7 +18,8 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from datetime import date
+from datetime import date, timedelta
+from pathlib import Path
 
 from krx_collector.infra.config.settings import get_settings
 from krx_collector.infra.logging.setup import setup_logging
@@ -42,6 +44,379 @@ def _handle_db_init(args: argparse.Namespace) -> None:
     except Exception as exc:
         print(f"❌ Schema initialisation failed: {exc}", file=sys.stderr)
         sys.exit(1)
+
+
+def _handle_db_sync_remote(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector db sync-remote``."""
+    settings = get_settings()
+
+    db_info_path = args.db_info_path or str(settings.remote_db_info_path)
+    batch_size = args.batch_size or settings.remote_db_batch_size
+    remote_host_override = args.remote_host or settings.remote_db_host_override
+    ssh_host = args.ssh_host or settings.remote_db_ssh_host
+    ssh_local_port = args.ssh_local_port or settings.remote_db_ssh_local_port
+
+    print(
+        f"→ db sync-remote: db_info_path={db_info_path}, "
+        f"batch_size={batch_size}, full_refresh={args.full_refresh}, "
+        f"remote_host_override={remote_host_override}, ssh_host={ssh_host}, "
+        f"ssh_local_port={ssh_local_port}"
+    )
+
+    from krx_collector.service.sync_local_db import sync_remote_db_to_local
+
+    result = sync_remote_db_to_local(
+        local_dsn=settings.db_dsn,
+        remote_db_info_path=db_info_path,
+        batch_size=batch_size,
+        full_refresh=args.full_refresh,
+        remote_host_override=remote_host_override,
+        ssh_host=ssh_host,
+        ssh_local_port=ssh_local_port,
+    )
+
+    if result.error:
+        print(f"❌ Remote DB sync failed: {result.error}", file=sys.stderr)
+        sys.exit(1)
+
+    print("✅ Remote DB sync completed.")
+    print(f"   - Remote host: {result.remote_host}")
+    print(f"   - Total rows synced: {result.total_rows}")
+    for table_name, row_count in result.table_counts.items():
+        print(f"   - {table_name}: {row_count}")
+
+
+def _handle_dart_sync_corp(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector dart sync-corp``."""
+    settings = get_settings()
+
+    print("→ dart sync-corp: downloading OpenDART corp master and validating ticker mappings")
+
+    from krx_collector.adapters.opendart_corp.provider import OpenDartCorpCodeProvider
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.sync_dart_corp import sync_dart_corp_master
+
+    provider = OpenDartCorpCodeProvider(api_key=settings.opendart_api_key)
+    storage = PostgresStorage(settings.db_dsn)
+    result = sync_dart_corp_master(provider=provider, storage=storage)
+
+    if result.error:
+        print(f"❌ OpenDART corp sync failed: {result.error}", file=sys.stderr)
+        sys.exit(1)
+
+    print("✅ OpenDART corp sync completed.")
+    print(f"   - Total records fetched: {result.total_records}")
+    print(f"   - Active tickers matched: {result.matched_active_tickers}")
+    print(f"   - Active tickers unmatched: {len(result.unmatched_active_tickers)}")
+    print(f"   - DART listed tickers missing in stock_master: {len(result.unmatched_dart_tickers)}")
+
+    if result.unmatched_active_tickers:
+        preview = ", ".join(result.unmatched_active_tickers[:10])
+        print(f"   - Sample unmatched active tickers: {preview}")
+
+
+def _handle_dart_sync_financials(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector dart sync-financials``."""
+    settings = get_settings()
+    bsns_years = [int(value.strip()) for value in args.bsns_years.split(",") if value.strip()]
+    reprt_codes = [value.strip() for value in args.reprt_codes.split(",") if value.strip()]
+    fs_divs = [value.strip().upper() for value in args.fs_divs.split(",") if value.strip()]
+    tickers = [value.strip() for value in args.tickers.split(",")] if args.tickers else None
+
+    print(
+        f"→ dart sync-financials: years={bsns_years}, reprt_codes={reprt_codes}, "
+        f"fs_divs={fs_divs}, tickers={tickers}, rate_limit={args.rate_limit_seconds}"
+    )
+
+    from krx_collector.adapters.opendart_financials.provider import (
+        OpenDartFinancialStatementProvider,
+    )
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.sync_dart_financials import sync_dart_financial_statements
+
+    provider = OpenDartFinancialStatementProvider(api_key=settings.opendart_api_key)
+    storage = PostgresStorage(settings.db_dsn)
+    result = sync_dart_financial_statements(
+        provider=provider,
+        storage=storage,
+        bsns_years=bsns_years,
+        reprt_codes=reprt_codes,
+        fs_divs=fs_divs,
+        tickers=tickers,
+        rate_limit_seconds=args.rate_limit_seconds,
+    )
+
+    if result.errors:
+        print(f"⚠ Financial sync completed with {len(result.errors)} errors.", file=sys.stderr)
+    else:
+        print("✅ OpenDART financial sync completed.")
+
+    print(f"   - Targets processed: {result.targets_processed}")
+    print(f"   - Requests attempted: {result.requests_attempted}")
+    print(f"   - Rows upserted: {result.rows_upserted}")
+    print(f"   - No-data requests: {result.no_data_requests}")
+    if result.errors:
+        for request_key, error in list(result.errors.items())[:10]:
+            print(f"   - Error {request_key}: {error}")
+
+
+def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector dart sync-share-info``."""
+    settings = get_settings()
+    bsns_years = [int(value.strip()) for value in args.bsns_years.split(",") if value.strip()]
+    reprt_codes = [value.strip() for value in args.reprt_codes.split(",") if value.strip()]
+    tickers = [value.strip() for value in args.tickers.split(",")] if args.tickers else None
+
+    print(
+        f"→ dart sync-share-info: years={bsns_years}, reprt_codes={reprt_codes}, "
+        f"tickers={tickers}, rate_limit={args.rate_limit_seconds}"
+    )
+
+    from krx_collector.adapters.opendart_share_info.provider import OpenDartShareInfoProvider
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.sync_dart_share_info import sync_dart_share_info
+
+    provider = OpenDartShareInfoProvider(api_key=settings.opendart_api_key)
+    storage = PostgresStorage(settings.db_dsn)
+    result = sync_dart_share_info(
+        share_count_provider=provider,
+        shareholder_return_provider=provider,
+        storage=storage,
+        bsns_years=bsns_years,
+        reprt_codes=reprt_codes,
+        tickers=tickers,
+        rate_limit_seconds=args.rate_limit_seconds,
+    )
+
+    if result.errors:
+        print(f"⚠ Share info sync completed with {len(result.errors)} errors.", file=sys.stderr)
+    else:
+        print("✅ OpenDART share info sync completed.")
+
+    print(f"   - Targets processed: {result.targets_processed}")
+    print(f"   - Requests attempted: {result.requests_attempted}")
+    print(f"   - Share count rows upserted: {result.share_count_rows_upserted}")
+    print(f"   - Shareholder return rows upserted: {result.shareholder_return_rows_upserted}")
+    print(f"   - No-data requests: {result.no_data_requests}")
+    if result.errors:
+        for request_key, error in list(result.errors.items())[:10]:
+            print(f"   - Error {request_key}: {error}")
+
+
+def _handle_dart_sync_xbrl(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector dart sync-xbrl``."""
+    settings = get_settings()
+    bsns_years = [int(value.strip()) for value in args.bsns_years.split(",") if value.strip()]
+    reprt_codes = [value.strip() for value in args.reprt_codes.split(",") if value.strip()]
+    tickers = [value.strip() for value in args.tickers.split(",")] if args.tickers else None
+
+    print(
+        f"→ dart sync-xbrl: years={bsns_years}, reprt_codes={reprt_codes}, "
+        f"tickers={tickers}, rate_limit={args.rate_limit_seconds}"
+    )
+
+    from krx_collector.adapters.opendart_xbrl.provider import OpenDartXbrlProvider
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.sync_dart_xbrl import sync_dart_xbrl
+
+    provider = OpenDartXbrlProvider(api_key=settings.opendart_api_key)
+    storage = PostgresStorage(settings.db_dsn)
+    result = sync_dart_xbrl(
+        provider=provider,
+        storage=storage,
+        bsns_years=bsns_years,
+        reprt_codes=reprt_codes,
+        tickers=tickers,
+        rate_limit_seconds=args.rate_limit_seconds,
+    )
+
+    if result.errors:
+        print(f"⚠ XBRL sync completed with {len(result.errors)} errors.", file=sys.stderr)
+    else:
+        print("✅ OpenDART XBRL sync completed.")
+
+    print(f"   - Targets processed: {result.targets_processed}")
+    print(f"   - Requests attempted: {result.requests_attempted}")
+    print(f"   - Documents upserted: {result.documents_upserted}")
+    print(f"   - Facts upserted: {result.facts_upserted}")
+    print(f"   - No-data requests: {result.no_data_requests}")
+    if result.errors:
+        for request_key, error in list(result.errors.items())[:10]:
+            print(f"   - Error {request_key}: {error}")
+
+
+def _handle_metrics_normalize(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector metrics normalize``."""
+    bsns_years = [int(value.strip()) for value in args.bsns_years.split(",") if value.strip()]
+    reprt_codes = [value.strip() for value in args.reprt_codes.split(",") if value.strip()]
+    tickers = [value.strip() for value in args.tickers.split(",")] if args.tickers else None
+
+    print(
+        f"→ metrics normalize: years={bsns_years}, reprt_codes={reprt_codes}, tickers={tickers}"
+    )
+
+    from krx_collector.infra.config.settings import get_settings as _get_settings
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.normalize_metrics import normalize_stock_metrics
+
+    settings = _get_settings()
+    storage = PostgresStorage(settings.db_dsn)
+    result = normalize_stock_metrics(
+        storage=storage,
+        bsns_years=bsns_years,
+        reprt_codes=reprt_codes,
+        tickers=tickers,
+    )
+
+    if result.errors:
+        print(f"⚠ Metric normalization completed with {len(result.errors)} errors.", file=sys.stderr)
+        for error_key, error_value in list(result.errors.items())[:10]:
+            print(f"   - Error {error_key}: {error_value}")
+    else:
+        print("✅ Metric normalization completed.")
+
+    print(f"   - Targets processed: {result.targets_processed}")
+    print(f"   - Metric catalog upserted: {result.catalog_upsert.updated}")
+    print(f"   - Mapping rules upserted: {result.rule_upsert.updated}")
+    print(f"   - Facts written: {result.facts_written}")
+
+
+def _handle_metrics_coverage_report(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector metrics coverage-report``."""
+    bsns_years = [int(value.strip()) for value in args.bsns_years.split(",") if value.strip()]
+    reprt_codes = [value.strip() for value in args.reprt_codes.split(",") if value.strip()]
+    tickers = [value.strip() for value in args.tickers.split(",")] if args.tickers else None
+
+    print(
+        f"→ metrics coverage-report: years={bsns_years}, reprt_codes={reprt_codes}, "
+        f"tickers={tickers}"
+    )
+
+    from krx_collector.infra.config.settings import get_settings as _get_settings
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.report_metric_coverage import build_metric_coverage_report
+
+    settings = _get_settings()
+    storage = PostgresStorage(settings.db_dsn)
+    report = build_metric_coverage_report(
+        storage=storage,
+        bsns_years=bsns_years,
+        reprt_codes=reprt_codes,
+        tickers=tickers,
+    )
+
+    print(f"✅ Metric coverage report generated. Targets: {report.target_count}")
+    for row in report.rows[:20]:
+        print(
+            f"   - {row.metric_code}: {row.covered_count}/{row.target_count} "
+            f"({row.coverage_ratio})"
+        )
+
+
+def _handle_flows_sync(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector flows sync``."""
+    settings = get_settings()
+    tickers = [value.strip() for value in args.tickers.split(",")] if args.tickers else None
+
+    print(
+        f"→ flows sync: start={args.start}, end={args.end}, "
+        f"tickers={tickers}, rate_limit={args.rate_limit_seconds}"
+    )
+
+    from krx_collector.adapters.flows_pykrx.provider import PykrxFlowProvider
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.sync_krx_flows import sync_krx_security_flows
+
+    provider = PykrxFlowProvider()
+    storage = PostgresStorage(settings.db_dsn)
+    result = sync_krx_security_flows(
+        provider=provider,
+        storage=storage,
+        start=args.start,
+        end=args.end,
+        tickers=tickers,
+        rate_limit_seconds=args.rate_limit_seconds,
+    )
+
+    if result.errors:
+        print(f"⚠ Flow sync completed with {len(result.errors)} errors.", file=sys.stderr)
+    else:
+        print("✅ KRX flow sync completed.")
+
+    print(f"   - Targets processed: {result.targets_processed}")
+    print(f"   - Requests attempted: {result.requests_attempted}")
+    print(f"   - Rows upserted: {result.rows_upserted}")
+    print(f"   - No-data requests: {result.no_data_requests}")
+    if result.pending_metrics:
+        print(f"   - Pending metrics: {', '.join(result.pending_metrics)}")
+    if result.errors:
+        for request_key, error in list(result.errors.items())[:10]:
+            print(f"   - Error {request_key}: {error}")
+
+
+def _handle_operating_process_document(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector operating process-document``."""
+    from krx_collector.domain.enums import Market
+    from krx_collector.domain.models import OperatingSourceDocument
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.default_operating_registry import build_default_operating_registry
+    from krx_collector.service.process_operating_document import (
+        build_operating_document_key,
+        process_operating_document,
+    )
+    from krx_collector.util.time import now_kst
+
+    settings = get_settings()
+    text_path = Path(args.text_file)
+    content_text = text_path.read_text(encoding="utf-8")
+    market = Market(args.market.upper())
+    document_key = build_operating_document_key(
+        ticker=args.ticker,
+        sector_key=args.sector_key,
+        document_type=args.document_type,
+        title=args.title,
+        period_end=args.period_end.isoformat(),
+        content_text=content_text,
+    )
+    document = OperatingSourceDocument(
+        document_key=document_key,
+        ticker=args.ticker,
+        market=market,
+        sector_key=args.sector_key,
+        document_type=args.document_type,
+        title=args.title,
+        document_date=args.document_date,
+        period_end=args.period_end,
+        source_system=args.source_system,
+        source_url=args.source_url or "",
+        language=args.language,
+        content_text=content_text,
+        fetched_at=now_kst(),
+        raw_payload={
+            "text_file": str(text_path),
+        },
+    )
+
+    print(
+        f"→ operating process-document: ticker={args.ticker}, market={market.value}, "
+        f"sector_key={args.sector_key}, period_end={args.period_end}, text_file={text_path}"
+    )
+
+    storage = PostgresStorage(settings.db_dsn)
+    registry = build_default_operating_registry()
+    result = process_operating_document(storage=storage, registry=registry, document=document)
+
+    if result.errors:
+        print(f"⚠ Operating KPI processing completed with {len(result.errors)} errors.", file=sys.stderr)
+        for request_key, error in list(result.errors.items())[:10]:
+            print(f"   - Error {request_key}: {error}")
+    else:
+        print("✅ Operating KPI processing completed.")
+
+    print(f"   - Documents processed: {result.documents_processed}")
+    print(f"   - Facts upserted: {result.facts_upserted}")
+    if result.extracted_metric_codes:
+        print(f"   - Extracted metrics: {', '.join(result.extracted_metric_codes)}")
 
 
 def _handle_universe_sync(args: argparse.Namespace) -> None:
@@ -234,6 +609,284 @@ def build_parser() -> argparse.ArgumentParser:
 
     db_init = db_sub.add_parser("init", help="Initialise database schema (run DDL).")
     db_init.set_defaults(handler=_handle_db_init)
+
+    db_sync_remote = db_sub.add_parser(
+        "sync-remote",
+        help="Sync the remote sj2-server PostgreSQL data into the local PostgreSQL DB.",
+    )
+    db_sync_remote.add_argument(
+        "--db-info-path",
+        default=None,
+        help="Path to the remote DB metadata file (default: from config).",
+    )
+    db_sync_remote.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Number of rows to fetch from the remote DB per batch (default: from config).",
+    )
+    db_sync_remote.add_argument(
+        "--full-refresh",
+        action="store_true",
+        default=False,
+        help="Truncate the local synced tables and copy everything from scratch.",
+    )
+    db_sync_remote.add_argument(
+        "--remote-host",
+        default=None,
+        help="Override the remote DB hostname from db_info (default: from config/file).",
+    )
+    db_sync_remote.add_argument(
+        "--ssh-host",
+        default=None,
+        help="Optional SSH host for port forwarding to the remote PostgreSQL server.",
+    )
+    db_sync_remote.add_argument(
+        "--ssh-local-port",
+        type=int,
+        default=None,
+        help="Optional fixed local port for the SSH tunnel (default: random free port).",
+    )
+    db_sync_remote.set_defaults(handler=_handle_db_sync_remote)
+
+    # -- dart -----------------------------------------------------------------
+    dart_parser = subparsers.add_parser("dart", help="OpenDART ingestion commands.")
+    dart_sub = dart_parser.add_subparsers(dest="dart_command", required=True)
+
+    dart_sync_corp = dart_sub.add_parser(
+        "sync-corp",
+        help="Download the OpenDART corp-code master and map it to active KRX tickers.",
+    )
+    dart_sync_corp.set_defaults(handler=_handle_dart_sync_corp)
+
+    dart_sync_financials = dart_sub.add_parser(
+        "sync-financials",
+        help="Download OpenDART single-company full financial statements into raw storage.",
+    )
+    dart_sync_financials.add_argument(
+        "--bsns-years",
+        default=str(date.today().year - 1),
+        help="Comma-separated business years (default: previous year).",
+    )
+    dart_sync_financials.add_argument(
+        "--reprt-codes",
+        default="11011",
+        help="Comma-separated report codes (default: 11011 for annual report).",
+    )
+    dart_sync_financials.add_argument(
+        "--fs-divs",
+        default="CFS",
+        help="Comma-separated fs_div values (default: CFS).",
+    )
+    dart_sync_financials.add_argument(
+        "--tickers",
+        default=None,
+        help="Optional comma-separated ticker allowlist.",
+    )
+    dart_sync_financials.add_argument(
+        "--rate-limit-seconds",
+        type=float,
+        default=0.2,
+        help="Seconds between OpenDART requests (default: 0.2).",
+    )
+    dart_sync_financials.set_defaults(handler=_handle_dart_sync_financials)
+
+    dart_sync_share_info = dart_sub.add_parser(
+        "sync-share-info",
+        help="Download OpenDART stock count, dividend, and treasury-stock disclosures.",
+    )
+    dart_sync_share_info.add_argument(
+        "--bsns-years",
+        default=str(date.today().year - 1),
+        help="Comma-separated business years (default: previous year).",
+    )
+    dart_sync_share_info.add_argument(
+        "--reprt-codes",
+        default="11011",
+        help="Comma-separated report codes (default: 11011 for annual report).",
+    )
+    dart_sync_share_info.add_argument(
+        "--tickers",
+        default=None,
+        help="Optional comma-separated ticker allowlist.",
+    )
+    dart_sync_share_info.add_argument(
+        "--rate-limit-seconds",
+        type=float,
+        default=0.2,
+        help="Seconds between OpenDART request groups (default: 0.2).",
+    )
+    dart_sync_share_info.set_defaults(handler=_handle_dart_sync_share_info)
+
+    dart_sync_xbrl = dart_sub.add_parser(
+        "sync-xbrl",
+        help="Download and parse OpenDART XBRL ZIP filings into raw fact storage.",
+    )
+    dart_sync_xbrl.add_argument(
+        "--bsns-years",
+        default=str(date.today().year - 1),
+        help="Comma-separated business years (default: previous year).",
+    )
+    dart_sync_xbrl.add_argument(
+        "--reprt-codes",
+        default="11011",
+        help="Comma-separated report codes (default: 11011 for annual report).",
+    )
+    dart_sync_xbrl.add_argument(
+        "--tickers",
+        default=None,
+        help="Optional comma-separated ticker allowlist.",
+    )
+    dart_sync_xbrl.add_argument(
+        "--rate-limit-seconds",
+        type=float,
+        default=0.2,
+        help="Seconds between OpenDART XBRL requests (default: 0.2).",
+    )
+    dart_sync_xbrl.set_defaults(handler=_handle_dart_sync_xbrl)
+
+    # -- metrics --------------------------------------------------------------
+    metrics_parser = subparsers.add_parser("metrics", help="Canonical metric commands.")
+    metrics_sub = metrics_parser.add_subparsers(dest="metrics_command", required=True)
+
+    metrics_normalize = metrics_sub.add_parser(
+        "normalize",
+        help="Seed metric mapping rules and normalize canonical metric facts.",
+    )
+    metrics_normalize.add_argument(
+        "--bsns-years",
+        default=str(date.today().year - 1),
+        help="Comma-separated business years (default: previous year).",
+    )
+    metrics_normalize.add_argument(
+        "--reprt-codes",
+        default="11011",
+        help="Comma-separated report codes (default: 11011 for annual report).",
+    )
+    metrics_normalize.add_argument(
+        "--tickers",
+        default=None,
+        help="Optional comma-separated ticker allowlist.",
+    )
+    metrics_normalize.set_defaults(handler=_handle_metrics_normalize)
+
+    metrics_coverage = metrics_sub.add_parser(
+        "coverage-report",
+        help="Report canonical metric coverage for the selected periods.",
+    )
+    metrics_coverage.add_argument(
+        "--bsns-years",
+        default=str(date.today().year - 1),
+        help="Comma-separated business years (default: previous year).",
+    )
+    metrics_coverage.add_argument(
+        "--reprt-codes",
+        default="11011",
+        help="Comma-separated report codes (default: 11011 for annual report).",
+    )
+    metrics_coverage.add_argument(
+        "--tickers",
+        default=None,
+        help="Optional comma-separated ticker allowlist.",
+    )
+    metrics_coverage.set_defaults(handler=_handle_metrics_coverage_report)
+
+    # -- flows ----------------------------------------------------------------
+    flows_parser = subparsers.add_parser("flows", help="Security flow ingestion commands.")
+    flows_sub = flows_parser.add_subparsers(dest="flows_command", required=True)
+
+    flows_sync = flows_sub.add_parser(
+        "sync",
+        help="Sync daily investor/foreign/shorting raw flow metrics.",
+    )
+    flows_sync.add_argument(
+        "--start",
+        type=_parse_date,
+        default=date.today() - timedelta(days=1),
+        help="Start date (YYYY-MM-DD). Default: yesterday.",
+    )
+    flows_sync.add_argument(
+        "--end",
+        type=_parse_date,
+        default=date.today() - timedelta(days=1),
+        help="End date (YYYY-MM-DD). Default: yesterday.",
+    )
+    flows_sync.add_argument(
+        "--tickers",
+        default=None,
+        help="Optional comma-separated ticker allowlist.",
+    )
+    flows_sync.add_argument(
+        "--rate-limit-seconds",
+        type=float,
+        default=0.2,
+        help="Seconds between provider requests (default: 0.2).",
+    )
+    flows_sync.set_defaults(handler=_handle_flows_sync)
+
+    # -- operating ------------------------------------------------------------
+    operating_parser = subparsers.add_parser("operating", help="Sector-specific operating KPI commands.")
+    operating_sub = operating_parser.add_subparsers(dest="operating_command", required=True)
+
+    operating_process = operating_sub.add_parser(
+        "process-document",
+        help="Persist one source document and run a sector-specific KPI extractor.",
+    )
+    operating_process.add_argument("--ticker", required=True, help="6-digit ticker code.")
+    operating_process.add_argument(
+        "--market",
+        required=True,
+        choices=["KOSPI", "KOSDAQ", "kospi", "kosdaq"],
+        help="Market segment.",
+    )
+    operating_process.add_argument(
+        "--sector-key",
+        required=True,
+        help="Sector extractor key, e.g. shipbuilding_defense.",
+    )
+    operating_process.add_argument(
+        "--document-type",
+        default="manual_text",
+        help="Document type label for provenance.",
+    )
+    operating_process.add_argument(
+        "--title",
+        required=True,
+        help="Document title for provenance.",
+    )
+    operating_process.add_argument(
+        "--document-date",
+        type=_parse_date,
+        default=None,
+        help="Document date (YYYY-MM-DD).",
+    )
+    operating_process.add_argument(
+        "--period-end",
+        type=_parse_date,
+        required=True,
+        help="Metric period end date (YYYY-MM-DD).",
+    )
+    operating_process.add_argument(
+        "--source-system",
+        default="LOCAL",
+        help="Document source system label.",
+    )
+    operating_process.add_argument(
+        "--source-url",
+        default="",
+        help="Optional source URL for provenance.",
+    )
+    operating_process.add_argument(
+        "--language",
+        default="ko",
+        help="Document language code.",
+    )
+    operating_process.add_argument(
+        "--text-file",
+        required=True,
+        help="UTF-8 text file containing extracted document text.",
+    )
+    operating_process.set_defaults(handler=_handle_operating_process_document)
 
     # -- universe -------------------------------------------------------------
     universe_parser = subparsers.add_parser("universe", help="Stock universe management.")

@@ -4,7 +4,11 @@
 
 1. [FinanceDataReader](https://github.com/financedata-org/FinanceDataReader) 및 [pykrx](https://github.com/sharebook-kr/pykrx)를 사용하여 **KOSPI / KOSDAQ 종목 유니버스를 동기화**합니다 (종목 마스터 관리).
 2. pykrx를 사용하여 상장일로부터 **종목별 일봉(OHLCV) 이력 데이터를 수집**합니다.
-3. 깔끔한 포트/어댑터(Ports & Adapters) 아키텍처를 적용하여 **PostgreSQL에 모든 데이터를 저장**합니다. 핵심 로직의 리팩토링 없이 향후 파일 기반 저장소(CSV / Parquet)로 확장할 수 있도록 설계되었습니다.
+3. [OpenDART](https://opendart.fss.or.kr)를 사용하여 **재무제표 / 주식수 / 배당 / 자사주 raw 값과 XBRL fact**를 수집합니다.
+4. pykrx 및 KRX 소스를 사용하여 **일자별 수급 raw**(투자자별 순매수, 공매도 등)를 수집합니다.
+5. 공시 원문 기반 **섹터별 사업 KPI extractor 프레임워크**를 제공합니다 (파일럿: 조선/방산 수주).
+6. raw 테이블과 별도로 `metric_catalog` / `metric_mapping_rule` / `stock_metric_fact` 기반 **canonical metric 정규화 계층**을 운영합니다.
+7. 깔끔한 포트/어댑터(Ports & Adapters) 아키텍처를 적용하여 **PostgreSQL에 모든 데이터를 저장**합니다. 핵심 로직의 리팩토링 없이 향후 파일 기반 저장소(CSV / Parquet)로 확장할 수 있도록 설계되었습니다.
 
 ## 목표 제외 범위 (현재 스코프)
 
@@ -28,6 +32,7 @@ uv sync
 # 2. 환경 변수 설정
 cp .env.example .env
 # .env 파일을 열어 데이터베이스 계정 정보 및 설정을 수정하세요
+# `dart`/`metrics` 계열 명령은 OPENDART_API_KEY가 반드시 설정되어야 동작합니다
 
 # 3. 데이터베이스 스키마 초기화
 uv run krx-collector db init
@@ -45,6 +50,74 @@ uv run krx-collector prices backfill --market all --incremental
 uv run krx-collector validate --date 2025-01-15 --market all
 ```
 
+### 계정 / 재무 / XBRL 파이프라인 (OpenDART)
+
+```bash
+# 7. OpenDART corp_code 마스터 동기화 및 ticker 매핑 검증
+uv run krx-collector dart sync-corp
+
+# 8. OpenDART 재무 raw 적재 (예: 삼성전자 2025 사업보고서 연결재무)
+uv run krx-collector dart sync-financials --tickers 005930 --bsns-years 2025 --reprt-codes 11011 --fs-divs CFS
+
+# 9. OpenDART 주식수 / 배당 / 자사주 raw 적재
+uv run krx-collector dart sync-share-info --tickers 005930 --bsns-years 2025 --reprt-codes 11011
+
+# 10. OpenDART XBRL ZIP 파싱 및 fact raw 적재
+uv run krx-collector dart sync-xbrl --tickers 005930 --bsns-years 2025 --reprt-codes 11011
+```
+
+### Canonical metric 정규화
+
+```bash
+# 11. raw 테이블 → stock_metric_fact 정규화
+uv run krx-collector metrics normalize --tickers 005930 --bsns-years 2025 --reprt-codes 11011
+
+# 12. raw 대비 정규화 커버리지 리포트
+uv run krx-collector metrics coverage-report --tickers 005930 --bsns-years 2025 --reprt-codes 11011
+```
+
+### 수급 raw (pykrx / KRX)
+
+```bash
+# 13. 종목/일자 기준 수급 raw 적재
+uv run krx-collector flows sync --tickers 005930 --start 2026-04-17 --end 2026-04-17
+```
+
+### 사업 KPI 파일럿 (섹터별 extractor)
+
+```bash
+# 14. 문서 등록 + 섹터별 extractor로 operating_metric_fact 적재
+uv run krx-collector operating process-document \
+  --ticker 009540 \
+  --market KOSPI \
+  --sector-key shipbuilding_defense \
+  --document-type manual_text \
+  --title "조선 방산 수주 샘플" \
+  --document-date 2026-04-19 \
+  --period-end 2025-12-31 \
+  --source-system LOCAL \
+  --text-file tests/fixtures/operating/shipbuilding_defense_sample.txt
+```
+
+현재 `flows sync` 1차 구현은 다음 metric을 대상으로 합니다.
+
+- `foreign_holding_shares`
+- `foreign_net_buy_volume`
+- `institution_net_buy_volume`
+- `individual_net_buy_volume`
+- `short_selling_volume`
+- `short_selling_value`
+- `short_selling_balance_quantity`
+
+`borrow_balance_quantity`는 `pykrx` 기본 API에서 안정 경로를 확인하지 못해 pending 상태입니다. 또한 KRX 응답 상태에 따라 `pykrx` 호출이 장시간 멈출 수 있어 provider 내부에 호출 타임아웃을 넣었습니다.
+
+현재 `operating process-document` 파일럿은 `shipbuilding_defense` 섹터에 대해 다음 metric을 추출합니다.
+
+- `order_intake_amount`
+- `order_backlog_amount`
+
+신규 파이프라인들은 외부 API 장애 시 자동 재시도/rate-limit/jitter를 수행하며, 최종적으로 일부 요청이 실패해도 파이프라인은 정상 종료됩니다. 이 경우 `ingestion_runs.status`가 `partial`로 기록되고 `counts.error_count` / `partial_failure_count` / `completed_request_count` 값이 함께 저장됩니다. 해석/복구 절차는 [docs/operations.md](docs/operations.md)를 참고하세요.
+
 > **백필 모드 요약**
 > - **기본 모드** (gap detection): 거래일 캘린더 기준으로 누락된 모든 영업일을 찾아 채웁니다. 최초 백필이나 히스토리 보강에 적합합니다. 각 티커마다 `MIN(trade_date)`로 자동 클램핑되어 상장 이전(또는 pykrx가 제공하지 못하는 과거) 구간을 매번 재요청하지 않습니다.
 > - **`--incremental` 모드**: 각 티커의 `MAX(trade_date)` 이후만 단일 연속 구간으로 수집합니다. gap 검출을 건너뛰므로 매일 돌리는 catch-up 작업에 가장 빠릅니다.
@@ -54,6 +127,47 @@ uv run krx-collector validate --date 2025-01-15 --market all
 ```bash
 uv run python -m krx_collector universe sync --source pykrx
 ```
+
+## 원격 DB를 로컬 PostgreSQL로 동기화하기
+
+`sj2-server`에서 매일 수집한 데이터를 로컬 PostgreSQL로 가져와 로컬에서도 바로 분석할 수 있도록 `db sync-remote` 명령을 제공합니다.
+로컬 PostgreSQL 접속 정보는 `.env`의 `DB_DSN` 또는 `DB_HOST`/`DB_PORT`/`DB_NAME`/`DB_USER`/`DB_PASSWORD`를 사용합니다.
+원격 PostgreSQL 접속 정보는 기본적으로 `/Users/whishaw/wss_p/stock_data_collector_secrets/db_info`에서 읽습니다.
+
+```bash
+# 기본 증분 동기화
+uv run krx-collector db sync-remote
+```
+
+원격 DB 호스트가 로컬에서 직접 열리지 않고 `sj2-server` SSH 접속을 통해서만 접근 가능하다면 SSH 터널 옵션을 함께 사용하세요.
+
+```bash
+# SSH 터널을 통한 증분 동기화
+uv run krx-collector db sync-remote --ssh-host whi@sj2-server
+```
+
+첫 동기화이거나 로컬 복제본을 원격과 완전히 다시 맞추고 싶다면 `--full-refresh`를 사용합니다.
+
+```bash
+# 로컬 복제본 전체 재구성
+uv run krx-collector db sync-remote --ssh-host whi@sj2-server --full-refresh
+```
+
+추가 옵션:
+
+- `--db-info-path`: 원격 DB 정보 파일 경로를 변경합니다.
+- `--batch-size`: 원격 DB에서 한 번에 읽어올 행 수를 조절합니다.
+- `--remote-host`: `db_info`의 host 값을 다른 호스트명으로 덮어씁니다.
+- `--ssh-local-port`: SSH 터널에 고정 로컬 포트를 사용합니다.
+
+동기화 대상은 다음 테이블입니다.
+
+- `stock_master`
+- `stock_master_snapshot`
+- `stock_master_snapshot_items`
+- `daily_ohlcv`
+
+증분 동기화는 각 테이블의 `updated_at` 또는 `fetched_at` 워터마크를 기준으로 동작하며, 동일 시각 행이 배치 경계에서 누락되지 않도록 복합 커서를 사용합니다.
 
 ## Docker로 실행하기
 
@@ -139,30 +253,57 @@ uv run black src/ tests/
 
 ```text
 krx-data-pipeline/
-├── .env.example                  # 환경 변수 템플릿
-├── pyproject.toml                # 프로젝트 메타데이터 및 의존성 (uv)
+├── .env.example                      # 환경 변수 템플릿
+├── Dockerfile                        # 컨테이너 이미지 정의
+├── docker-compose.yml                # PostgreSQL + collector 구성
+├── pyproject.toml / uv.lock          # 프로젝트 메타데이터 및 의존성 (uv)
 ├── sql/
-│   └── postgres_ddl.sql          # 데이터베이스 스키마 DDL
+│   └── postgres_ddl.sql              # 전체 스키마 DDL (OHLCV / DART / XBRL / 수급 / KPI)
 ├── docs/
-│   ├── architecture.md           # 아키텍처 및 데이터 흐름 설명
-│   ├── database.md               # 데이터베이스 스키마 문서
-│   └── operations.md             # 운영 가이드(Runbook) 및 cron 스케줄 예시
+│   ├── architecture.md               # 아키텍처 및 데이터 흐름 설명
+│   ├── database.md                   # 데이터베이스 스키마 문서
+│   ├── operations.md                 # 운영 가이드(Runbook), cron, partial run 해석
+│   ├── holidays_krx.csv              # KRX 휴장일 데이터 (trading calendar에서 사용)
+│   └── dev/                          # 설계/구현 계획 및 세부 구현 추적표
 ├── src/krx_collector/
-│   ├── cli/app.py                # 하위 명령어를 포함하는 argparse CLI 진입점
-│   ├── domain/                   # 외부 의존성이 없는 순수 도메인 모델 및 Enum
-│   ├── ports/                    # 프로토콜 인터페이스 (universe, prices, storage)
-│   ├── adapters/                 # 실제 데이터를 가져오거나 저장하는 구현체 (Providers)
-│   ├── service/                  # 유스케이스(Use-case) 오케스트레이션
-│   ├── infra/                    # 설정(Config), 로깅, 캘린더, 데이터베이스 인프라
-│   └── util/                     # 재시도(Retry), 시간대(Timezone) 유틸리티
+│   ├── __main__.py                   # `python -m krx_collector` 진입점
+│   ├── main.py                       # main() 어댑터 shim
+│   ├── cli/app.py                    # argparse 기반 CLI (db/universe/prices/dart/metrics/flows/operating/validate)
+│   ├── domain/                       # 순수 도메인 모델 및 Enum (Source, RunType, RunStatus 등)
+│   ├── ports/                        # 프로토콜 인터페이스
+│   │                                 #   universe, prices, storage, corp_codes,
+│   │                                 #   financials, share_info, xbrl, flows,
+│   │                                 #   operating_extractors
+│   ├── adapters/                     # Provider 구현체
+│   │                                 #   universe_fdr / universe_pykrx / prices_pykrx
+│   │                                 #   opendart_corp / opendart_financials /
+│   │                                 #   opendart_share_info / opendart_xbrl
+│   │                                 #   flows_pykrx / operating_extractors
+│   ├── service/                      # 유스케이스 오케스트레이션
+│   │                                 #   sync_universe, backfill_daily, validate,
+│   │                                 #   sync_dart_corp / sync_dart_financials /
+│   │                                 #   sync_dart_share_info / sync_dart_xbrl,
+│   │                                 #   normalize_metrics, report_metric_coverage,
+│   │                                 #   sync_krx_flows, process_operating_document,
+│   │                                 #   operating_registry, sync_local_db
+│   ├── infra/
+│   │   ├── calendar/                 # KRX 거래일 계산 유틸리티
+│   │   ├── config/                   # pydantic-settings 기반 환경 설정
+│   │   ├── db_postgres/              # PostgreSQL 연결, 저장소, 원격 동기화 구현
+│   │   └── logging/                  # 구조화 로깅 설정
+│   └── util/                         # pipeline.py(재시도/jitter/partial-run finalizer),
+│                                     #   시간대(Asia/Seoul) 유틸리티
 └── tests/
-    ├── unit/
-    └── integration/
+    ├── unit/                         # 파서 / 매핑 / 재시도 / pipeline util 단위 테스트
+    ├── integration/                  # DB 연결, OHLCV end-to-end, 운영 KPI round-trip
+    └── fixtures/                     # 섹터별 KPI 샘플 문서 등 테스트 픽스처
 ```
 
-## 아키텍처
+## 아키텍처 및 추가 문서
 
-전체 데이터 흐름도와 포트/어댑터 설계 이유에 대한 상세 내용은 [docs/architecture.md](docs/architecture.md) 문서를 참고하세요.
+- [docs/architecture.md](docs/architecture.md) — 포트/어댑터 설계, 전체 데이터 흐름.
+- [docs/database.md](docs/database.md) — raw 테이블, canonical 테이블, 인덱스/제약 설명.
+- [docs/operations.md](docs/operations.md) — cron 스케줄, `ingestion_runs.status` 해석(`running` / `success` / `partial` / `failed`), 실패 복구 절차.
 
 ## 라이선스
 
