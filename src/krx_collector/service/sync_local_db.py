@@ -32,6 +32,7 @@ class RemoteDbSyncResult:
     started_at: datetime
     ended_at: datetime | None = None
     full_refresh: bool = False
+    all_tables: bool = False
     batch_size: int = 0
     remote_host: str = ""
     ssh_host: str | None = None
@@ -72,6 +73,7 @@ def sync_remote_db_to_local(
     remote_db_info_path: str | Path,
     batch_size: int,
     full_refresh: bool = False,
+    all_tables: bool = False,
     remote_host_override: str | None = None,
     ssh_host: str | None = None,
     ssh_local_port: int | None = None,
@@ -81,6 +83,7 @@ def sync_remote_db_to_local(
     result = RemoteDbSyncResult(
         started_at=started_at,
         full_refresh=full_refresh,
+        all_tables=all_tables,
         batch_size=batch_size,
         ssh_host=ssh_host,
     )
@@ -94,6 +97,7 @@ def sync_remote_db_to_local(
             "remote_db_info_path": str(remote_db_info_path),
             "batch_size": batch_size,
             "full_refresh": full_refresh,
+            "all_tables": all_tables,
             "remote_host_override": remote_host_override,
             "ssh_host": ssh_host,
             "ssh_local_port": ssh_local_port,
@@ -114,9 +118,10 @@ def sync_remote_db_to_local(
                 result.remote_host = remote_info.host
                 logger.info(
                     "Starting remote DB sync: remote_host=%s full_refresh=%s "
-                    "batch_size=%s ssh_host=%s",
+                    "all_tables=%s batch_size=%s ssh_host=%s",
                     remote_info.host,
                     full_refresh,
+                    all_tables,
                     batch_size,
                     ssh_host,
                 )
@@ -126,6 +131,7 @@ def sync_remote_db_to_local(
                     local_dsn=local_dsn,
                     batch_size=batch_size,
                     full_refresh=full_refresh,
+                    all_tables=all_tables,
                 )
                 result.table_counts = table_counts
                 result.ended_at = now_kst()

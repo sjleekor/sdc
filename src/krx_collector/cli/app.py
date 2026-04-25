@@ -4,6 +4,7 @@ Subcommands::
 
     krx-collector db init
     krx-collector db sync-remote [--db-info-path ...] [--ssh-host ...] [--full-refresh]
+                                  [--all-tables]
     krx-collector universe sync  [--source fdr|pykrx] [--markets ...]
     krx-collector prices backfill [--market ...] [--tickers ...] [--start ...]
     krx-collector validate       [--date ...] [--market ...]
@@ -79,6 +80,7 @@ def _handle_db_sync_remote(args: argparse.Namespace) -> None:
     print(
         f"→ db sync-remote: db_info_path={db_info_path}, "
         f"batch_size={batch_size}, full_refresh={args.full_refresh}, "
+        f"all_tables={args.all_tables}, "
         f"remote_host_override={remote_host_override}, ssh_host={ssh_host}, "
         f"ssh_local_port={ssh_local_port}"
     )
@@ -90,6 +92,7 @@ def _handle_db_sync_remote(args: argparse.Namespace) -> None:
         remote_db_info_path=db_info_path,
         batch_size=batch_size,
         full_refresh=args.full_refresh,
+        all_tables=args.all_tables,
         remote_host_override=remote_host_override,
         ssh_host=ssh_host,
         ssh_local_port=ssh_local_port,
@@ -720,6 +723,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Truncate the local synced tables and copy everything from scratch.",
+    )
+    db_sync_remote.add_argument(
+        "--all-tables",
+        action="store_true",
+        default=False,
+        help="Sync all public-schema tables. Requires --full-refresh.",
     )
     db_sync_remote.add_argument(
         "--remote-host",

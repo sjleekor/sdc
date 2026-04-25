@@ -170,28 +170,54 @@ uv run krx-collector db sync-remote
 uv run krx-collector db sync-remote --ssh-host whi@sj2-server
 ```
 
-첫 동기화이거나 로컬 복제본을 원격과 완전히 다시 맞추고 싶다면 `--full-refresh`를 사용합니다.
+### 동기화 모드
 
-```bash
-# 로컬 복제본 전체 재구성
-uv run krx-collector db sync-remote --ssh-host whi@sj2-server --full-refresh
-```
+`db sync-remote`는 세 가지 모드를 지원합니다. 모든 모드는 SSH 터널 옵션(`--ssh-host`, `--ssh-local-port`)과 자유롭게 조합할 수 있습니다.
 
-추가 옵션:
+#### 1. 증분 동기화 (기본)
 
-- `--db-info-path`: 원격 DB 정보 파일 경로를 변경합니다.
-- `--batch-size`: 원격 DB에서 한 번에 읽어올 행 수를 조절합니다.
-- `--remote-host`: `db_info`의 host 값을 다른 호스트명으로 덮어씁니다.
-- `--ssh-local-port`: SSH 터널에 고정 로컬 포트를 사용합니다.
-
-동기화 대상은 다음 테이블입니다.
+핵심 4개 테이블만 대상으로 새 행만 upsert 합니다.
 
 - `stock_master`
 - `stock_master_snapshot`
 - `stock_master_snapshot_items`
 - `daily_ohlcv`
 
-증분 동기화는 각 테이블의 `updated_at` 또는 `fetched_at` 워터마크를 기준으로 동작하며, 동일 시각 행이 배치 경계에서 누락되지 않도록 복합 커서를 사용합니다.
+각 테이블의 `updated_at` 또는 `fetched_at` 워터마크를 기준으로 동작하며, 동일 시각 행이 배치 경계에서 누락되지 않도록 `(timestamp, primary_key...)` 복합 커서를 사용합니다. `daily_ohlcv`는 `sync_checkpoints`에 재개 커서를 저장해 중단 지점에서 이어받습니다.
+
+#### 2. `--full-refresh`
+
+위 4개 테이블을 `TRUNCATE` 후 원격 데이터를 처음부터 다시 적재합니다. 로컬 복제본이 손상됐거나 첫 동기화일 때 사용합니다.
+
+```bash
+uv run krx-collector db sync-remote --ssh-host whi@sj2-server --full-refresh
+```
+
+#### 3. `--all-tables` (반드시 `--full-refresh`와 함께)
+
+원격 `public` 스키마의 **모든** 테이블을 로컬 `public` 스키마로 통째 복제합니다. 로컬 public 테이블 데이터가 모두 비워지므로 파괴적 작업입니다. `--full-refresh`를 함께 지정하지 않으면 즉시 에러로 중단됩니다.
+
+```bash
+uv run krx-collector db sync-remote --ssh-host whi@sj2-server --full-refresh --all-tables
+```
+
+`--all-tables` 모드는 다음 순서로 동작합니다.
+
+1. **사전 검증** — 원격/로컬 public 테이블 집합과 각 테이블의 컬럼 구성(이름·순서)이 일치하는지 확인합니다. 불일치가 있으면 truncate 전에 즉시 오류로 중단됩니다.
+2. **위상 정렬 후 truncate** — 외래키 의존성을 따라 부모 → 자식 순으로 정렬한 뒤 `TRUNCATE ... RESTART IDENTITY CASCADE`로 모든 대상 테이블을 비웁니다. 순환 FK가 발견되면 오류로 중단됩니다.
+3. **바이너리 COPY 스트리밍** — 각 테이블을 PostgreSQL `COPY ... (FORMAT BINARY)`로 OS 파이프를 통해 원격→로컬 스트리밍합니다. 큰 테이블도 메모리 스파이크 없이 처리됩니다.
+4. **시퀀스 복제** — 각 테이블이 소유한 시퀀스의 `last_value`/`is_called`를 `setval`로 그대로 복제합니다.
+5. **체크포인트 정렬** — 마지막으로 `daily_ohlcv` 증분 체크포인트를 로컬에 적재된 데이터 기준으로 다시 써서, 이후 증분 sync가 올바르게 재개되도록 보정합니다.
+
+### 옵션
+
+- `--full-refresh`: 기본 4개 테이블을 truncate 후 처음부터 적재합니다.
+- `--all-tables`: 원격 public 스키마의 모든 테이블을 full-refresh 방식으로 복제합니다 (`--full-refresh` 필수).
+- `--db-info-path`: 원격 DB 정보 파일 경로를 변경합니다.
+- `--batch-size`: 증분 동기화에서 한 번에 읽어올 행 수를 조절합니다 (`--all-tables` 모드에서는 사용되지 않습니다).
+- `--remote-host`: `db_info`의 host 값을 다른 호스트명으로 덮어씁니다.
+- `--ssh-host`: 지정 시 SSH 로컬 포트 포워딩을 통해 원격 DB에 접속합니다.
+- `--ssh-local-port`: SSH 터널에 고정 로컬 포트를 사용합니다 (미지정 시 임의의 빈 포트).
 
 ## Docker로 실행하기
 

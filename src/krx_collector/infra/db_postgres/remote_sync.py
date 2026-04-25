@@ -14,8 +14,10 @@ import csv
 import io
 import json
 import logging
+import os
 import socket
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -25,12 +27,14 @@ from urllib.parse import quote
 
 import psycopg2
 import psycopg2.extras
+from psycopg2 import sql
 
 logger = logging.getLogger(__name__)
 
 DAILY_OHLCV_SYNC_NAME = "remote_db_sync.daily_ohlcv"
 DAILY_OHLCV_STAGING_TABLE = "staging_daily_ohlcv"
 FULL_REFRESH_DAILY_OHLCV_BATCH_SIZE = 200_000
+PUBLIC_SCHEMA = "public"
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +71,21 @@ class TableSyncSpec:
     update_columns: tuple[str, ...]
     local_cursor_sql: str
     cursor_indexes: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DatabaseTable:
+    """A physical database table to copy during full database sync."""
+
+    schema: str
+    name: str
+
+    @property
+    def display_name(self) -> str:
+        """Return a compact table name for sync result output."""
+        if self.schema == PUBLIC_SCHEMA:
+            return self.name
+        return f"{self.schema}.{self.name}"
 
 
 SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
@@ -232,16 +251,25 @@ def sync_remote_tables_to_local(
     local_dsn: str,
     batch_size: int,
     full_refresh: bool,
+    all_tables: bool = False,
 ) -> dict[str, int]:
     """Copy the supported remote tables into the local PostgreSQL database."""
     if batch_size <= 0:
         raise ValueError("batch_size must be a positive integer")
+    if all_tables and not full_refresh:
+        raise ValueError("all_tables sync requires full_refresh=True")
 
     results: dict[str, int] = {}
     with contextlib.closing(psycopg2.connect(remote_dsn)) as remote_conn:
         remote_conn.set_session(readonly=True, autocommit=False)
         with contextlib.closing(psycopg2.connect(local_dsn)) as local_conn:
             local_conn.autocommit = False
+            if all_tables:
+                return _sync_all_public_tables_to_local(
+                    remote_conn=remote_conn,
+                    local_conn=local_conn,
+                )
+
             if full_refresh:
                 _prepare_local_full_refresh_session(local_conn)
                 _truncate_target_tables(local_conn)
@@ -266,6 +294,381 @@ def sync_remote_tables_to_local(
                 results[spec.name] = copied
 
     return results
+
+
+def _sync_all_public_tables_to_local(*, remote_conn: Any, local_conn: Any) -> dict[str, int]:
+    """Replace local public-schema table data with the remote public-schema data."""
+    _prepare_local_full_refresh_session(local_conn)
+
+    remote_tables = _list_public_tables(remote_conn)
+    local_tables = _list_public_tables(local_conn)
+    _validate_full_database_table_sets(remote_tables=remote_tables, local_tables=local_tables)
+    _validate_full_database_columns(
+        remote_conn=remote_conn,
+        local_conn=local_conn,
+        tables=remote_tables,
+    )
+
+    table_order = _sort_tables_by_fk_dependencies(
+        tables=remote_tables,
+        dependencies=_list_foreign_key_dependencies(remote_conn),
+    )
+    _truncate_database_tables(local_conn=local_conn, tables=table_order)
+
+    results: dict[str, int] = {}
+    for table in table_order:
+        columns = _list_table_columns(remote_conn, table)
+        copied = _copy_database_table(
+            remote_conn=remote_conn,
+            local_conn=local_conn,
+            table=table,
+            columns=columns,
+        )
+        local_conn.commit()
+        results[table.display_name] = copied
+        logger.info("full database sync copied table=%s rows=%s", table.display_name, copied)
+
+    _sync_owned_sequences(remote_conn=remote_conn, local_conn=local_conn, tables=table_order)
+    _reset_daily_ohlcv_checkpoint_from_local(local_conn)
+    local_conn.commit()
+    return results
+
+
+def _list_public_tables(conn: Any) -> tuple[DatabaseTable, ...]:
+    """Return non-partition public tables in deterministic order."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT n.nspname, c.relname
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = %s
+              AND c.relkind IN ('r', 'p')
+              AND NOT c.relispartition
+            ORDER BY n.nspname, c.relname
+            """,
+            (PUBLIC_SCHEMA,),
+        )
+        return tuple(DatabaseTable(schema=row[0], name=row[1]) for row in cur.fetchall())
+
+
+def _validate_full_database_table_sets(
+    *,
+    remote_tables: tuple[DatabaseTable, ...],
+    local_tables: tuple[DatabaseTable, ...],
+) -> None:
+    """Ensure destructive full-database sync only runs against matching table sets."""
+    remote_set = set(remote_tables)
+    local_set = set(local_tables)
+    missing_local = sorted(table.display_name for table in remote_set - local_set)
+    missing_remote = sorted(table.display_name for table in local_set - remote_set)
+
+    messages = []
+    if missing_local:
+        messages.append(f"missing locally: {', '.join(missing_local)}")
+    if missing_remote:
+        messages.append(f"missing remotely: {', '.join(missing_remote)}")
+    if messages:
+        raise ValueError("Remote/local public table sets differ; " + "; ".join(messages))
+
+
+def _validate_full_database_columns(
+    *,
+    remote_conn: Any,
+    local_conn: Any,
+    tables: tuple[DatabaseTable, ...],
+) -> None:
+    """Ensure all copied tables expose the same writable columns on both sides."""
+    mismatches: list[str] = []
+    for table in tables:
+        remote_columns = _list_table_columns(remote_conn, table)
+        local_columns = _list_table_columns(local_conn, table)
+        if remote_columns != local_columns:
+            mismatches.append(
+                f"{table.display_name}: remote=({', '.join(remote_columns)}) "
+                f"local=({', '.join(local_columns)})"
+            )
+
+    if mismatches:
+        raise ValueError("Remote/local table columns differ; " + "; ".join(mismatches))
+
+
+def _list_table_columns(conn: Any, table: DatabaseTable) -> tuple[str, ...]:
+    """Return insertable columns in physical order for a table."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT a.attname
+            FROM pg_attribute a
+            WHERE a.attrelid = %s::regclass
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+              AND a.attgenerated = ''
+            ORDER BY a.attnum
+            """,
+            (_regclass_text(table),),
+        )
+        return tuple(row[0] for row in cur.fetchall())
+
+
+def _list_foreign_key_dependencies(conn: Any) -> tuple[tuple[DatabaseTable, DatabaseTable], ...]:
+    """Return child-to-parent FK dependencies between public tables."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                child_ns.nspname AS child_schema,
+                child.relname AS child_table,
+                parent_ns.nspname AS parent_schema,
+                parent.relname AS parent_table
+            FROM pg_constraint con
+            JOIN pg_class child ON child.oid = con.conrelid
+            JOIN pg_namespace child_ns ON child_ns.oid = child.relnamespace
+            JOIN pg_class parent ON parent.oid = con.confrelid
+            JOIN pg_namespace parent_ns ON parent_ns.oid = parent.relnamespace
+            WHERE con.contype = 'f'
+              AND child_ns.nspname = %s
+              AND parent_ns.nspname = %s
+            ORDER BY child_ns.nspname, child.relname, parent_ns.nspname, parent.relname
+            """,
+            (PUBLIC_SCHEMA, PUBLIC_SCHEMA),
+        )
+        return tuple(
+            (
+                DatabaseTable(schema=row[0], name=row[1]),
+                DatabaseTable(schema=row[2], name=row[3]),
+            )
+            for row in cur.fetchall()
+        )
+
+
+def _sort_tables_by_fk_dependencies(
+    *,
+    tables: tuple[DatabaseTable, ...],
+    dependencies: tuple[tuple[DatabaseTable, DatabaseTable], ...],
+) -> tuple[DatabaseTable, ...]:
+    """Order tables so parents are copied before FK children."""
+    table_set = set(tables)
+    remaining_parents = {table: set[DatabaseTable]() for table in tables}
+    children_by_parent = {table: set[DatabaseTable]() for table in tables}
+
+    for child, parent in dependencies:
+        if child not in table_set or parent not in table_set or child == parent:
+            continue
+        remaining_parents[child].add(parent)
+        children_by_parent[parent].add(child)
+
+    ready = sorted(
+        (table for table in tables if not remaining_parents[table]),
+        key=_table_sort_key,
+    )
+    ordered: list[DatabaseTable] = []
+
+    while ready:
+        table = ready.pop(0)
+        ordered.append(table)
+        for child in sorted(children_by_parent[table], key=_table_sort_key):
+            remaining_parents[child].discard(table)
+            if not remaining_parents[child] and child not in ordered and child not in ready:
+                ready.append(child)
+        ready.sort(key=_table_sort_key)
+
+    if len(ordered) != len(tables):
+        cyclic_tables = sorted(
+            table.display_name for table in tables if table not in set(ordered)
+        )
+        raise ValueError(
+            "Cannot determine full database copy order due to cyclic foreign keys: "
+            + ", ".join(cyclic_tables)
+        )
+
+    return tuple(ordered)
+
+
+def _truncate_database_tables(*, local_conn: Any, tables: tuple[DatabaseTable, ...]) -> None:
+    """Truncate all target tables before a full database refresh."""
+    if not tables:
+        return
+
+    table_list = sql.SQL(", ").join(_table_identifier(table) for table in tables)
+    statement = sql.SQL("TRUNCATE TABLE {} RESTART IDENTITY CASCADE").format(table_list)
+    with local_conn.cursor() as cur:
+        cur.execute(statement)
+    local_conn.commit()
+
+
+def _copy_database_table(
+    *,
+    remote_conn: Any,
+    local_conn: Any,
+    table: DatabaseTable,
+    columns: tuple[str, ...],
+) -> int:
+    """Stream one table from remote to local with PostgreSQL binary COPY."""
+    if not columns:
+        return 0
+
+    column_list = sql.SQL(", ").join(sql.Identifier(column) for column in columns)
+    copy_to = sql.SQL("COPY {} ({}) TO STDOUT WITH (FORMAT BINARY)").format(
+        _table_identifier(table),
+        column_list,
+    )
+    copy_from = sql.SQL("COPY {} ({}) FROM STDIN WITH (FORMAT BINARY)").format(
+        _table_identifier(table),
+        column_list,
+    )
+
+    read_fd, write_fd = os.pipe()
+    producer_errors: list[BaseException] = []
+
+    def produce_copy_stream() -> None:
+        try:
+            with os.fdopen(write_fd, "wb", closefd=True) as write_file:
+                with remote_conn.cursor() as remote_cur:
+                    remote_cur.copy_expert(copy_to.as_string(remote_conn), write_file)
+        except BaseException as exc:  # pragma: no cover - surfaced through main thread
+            producer_errors.append(exc)
+
+    producer = threading.Thread(target=produce_copy_stream, daemon=True)
+    producer.start()
+
+    status_message = ""
+    try:
+        with os.fdopen(read_fd, "rb", closefd=True) as read_file:
+            with local_conn.cursor() as local_cur:
+                local_cur.copy_expert(copy_from.as_string(local_conn), read_file)
+                status_message = local_cur.statusmessage
+    finally:
+        producer.join()
+
+    if producer_errors:
+        raise RuntimeError(
+            f"Remote COPY failed for {table.display_name}: {producer_errors[0]}"
+        ) from producer_errors[0]
+
+    copied_rows = _copy_status_row_count(status_message)
+    if copied_rows is not None:
+        return copied_rows
+    return _count_table_rows(local_conn=local_conn, table=table)
+
+
+def _copy_status_row_count(status_message: str) -> int | None:
+    """Extract row count from a PostgreSQL COPY status message."""
+    parts = status_message.split()
+    if len(parts) == 2 and parts[0] == "COPY" and parts[1].isdigit():
+        return int(parts[1])
+    return None
+
+
+def _count_table_rows(*, local_conn: Any, table: DatabaseTable) -> int:
+    """Count rows in a copied table when COPY status does not expose a count."""
+    with local_conn.cursor() as cur:
+        cur.execute(sql.SQL("SELECT COUNT(*) FROM {}").format(_table_identifier(table)))
+        row = cur.fetchone()
+    return int(row[0])
+
+
+def _sync_owned_sequences(
+    *,
+    remote_conn: Any,
+    local_conn: Any,
+    tables: tuple[DatabaseTable, ...],
+) -> int:
+    """Copy owned sequence states after explicit table data loads."""
+    table_set = set(tables)
+    sequences = [
+        sequence
+        for sequence, owner_table in _list_owned_sequences(remote_conn)
+        if owner_table in table_set
+    ]
+
+    for sequence in sequences:
+        last_value, is_called = _read_sequence_state(remote_conn, sequence)
+        with local_conn.cursor() as cur:
+            cur.execute(
+                "SELECT setval(%s::regclass, %s, %s)",
+                (_regclass_text(sequence), last_value, is_called),
+            )
+
+    if sequences:
+        logger.info("full database sync copied sequence states count=%s", len(sequences))
+    return len(sequences)
+
+
+def _reset_daily_ohlcv_checkpoint_from_local(local_conn: Any) -> None:
+    """Align the local remote-sync checkpoint with copied daily OHLCV rows."""
+    daily_spec = next(spec for spec in SYNC_TABLE_SPECS if spec.name == "daily_ohlcv")
+    cursor_values = _get_local_cursor(local_conn=local_conn, spec=daily_spec)
+    if cursor_values is None:
+        with local_conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM sync_checkpoints WHERE sync_name = %s",
+                (DAILY_OHLCV_SYNC_NAME,),
+            )
+        return
+
+    _save_daily_ohlcv_checkpoint(local_conn, cursor_values)
+
+
+def _list_owned_sequences(conn: Any) -> tuple[tuple[DatabaseTable, DatabaseTable], ...]:
+    """Return public sequences and their owning public tables."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                sequence_ns.nspname AS sequence_schema,
+                sequence.relname AS sequence_name,
+                table_ns.nspname AS table_schema,
+                table_class.relname AS table_name
+            FROM pg_class sequence
+            JOIN pg_namespace sequence_ns ON sequence_ns.oid = sequence.relnamespace
+            JOIN pg_depend dep ON dep.objid = sequence.oid AND dep.deptype = 'a'
+            JOIN pg_class table_class ON table_class.oid = dep.refobjid
+            JOIN pg_namespace table_ns ON table_ns.oid = table_class.relnamespace
+            WHERE sequence.relkind = 'S'
+              AND sequence_ns.nspname = %s
+              AND table_ns.nspname = %s
+            ORDER BY sequence_ns.nspname, sequence.relname
+            """,
+            (PUBLIC_SCHEMA, PUBLIC_SCHEMA),
+        )
+        return tuple(
+            (
+                DatabaseTable(schema=row[0], name=row[1]),
+                DatabaseTable(schema=row[2], name=row[3]),
+            )
+            for row in cur.fetchall()
+        )
+
+
+def _read_sequence_state(conn: Any, sequence: DatabaseTable) -> tuple[int, bool]:
+    """Read last_value/is_called from a sequence."""
+    with conn.cursor() as cur:
+        cur.execute(
+            sql.SQL("SELECT last_value, is_called FROM {}").format(_table_identifier(sequence))
+        )
+        row = cur.fetchone()
+    return int(row[0]), bool(row[1])
+
+
+def _table_identifier(table: DatabaseTable) -> sql.Identifier:
+    """Build a safely quoted SQL identifier for a table or sequence."""
+    return sql.Identifier(table.schema, table.name)
+
+
+def _regclass_text(table: DatabaseTable) -> str:
+    """Build a regclass input string for parameterized catalog queries."""
+    return f"{_quote_identifier_text(table.schema)}.{_quote_identifier_text(table.name)}"
+
+
+def _quote_identifier_text(value: str) -> str:
+    """Quote one SQL identifier for use inside a regclass text value."""
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _table_sort_key(table: DatabaseTable) -> tuple[str, str]:
+    """Return stable sort key for database table metadata."""
+    return table.schema, table.name
 
 
 def _truncate_target_tables(local_conn: Any) -> None:
