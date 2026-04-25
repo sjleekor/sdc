@@ -2,9 +2,8 @@ name: docker
 
 on:
   push:
-    branches:
-      - main
-  workflow_dispatch:
+    tags:
+      - "*"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -42,8 +41,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest
-            type=sha,prefix=sha-
+            type=ref,event=tag
 
       - name: Build and push image
         uses: docker/build-push-action@v7
