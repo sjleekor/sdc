@@ -52,3 +52,24 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Write Docker image summary
+        env:
+          IMAGE_PATH: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          IMAGE_TAG: ${{ github.ref_name }}
+          IMAGE_REFS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo "## Docker image"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Image path | \`$IMAGE_PATH\` |"
+            echo "| Tag | \`$IMAGE_TAG\` |"
+            echo ""
+            echo "### Published image"
+            echo ""
+            echo "\`\`\`text"
+            echo "$IMAGE_REFS"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
