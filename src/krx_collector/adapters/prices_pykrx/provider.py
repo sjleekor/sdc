@@ -16,8 +16,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-from pykrx import stock
-
+from krx_collector.adapters.pykrx_auth import get_pykrx_stock_module
 from krx_collector.domain.enums import Market, Source
 from krx_collector.domain.models import DailyBar, DailyPriceResult
 from krx_collector.util.time import now_kst
@@ -50,6 +49,7 @@ class PykrxDailyPriceProvider:
             ``DailyPriceResult`` containing bars or an error.
         """
         try:
+            stock = get_pykrx_stock_module()
             start_str = start.strftime("%Y%m%d")
             end_str = end.strftime("%Y%m%d")
 

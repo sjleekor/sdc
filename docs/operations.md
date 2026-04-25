@@ -133,6 +133,36 @@ uv run krx-collector operating process-document \
   --text-file tests/fixtures/operating/shipbuilding_defense_sample.txt
 ```
 
+### OpenDART 전체 사업연도 백필
+
+전체 사업연도 백필은 매일 최신분을 처리하는 계정/수급 이벤트와 분리해서 실행합니다. 백필은 시간이 길고 OpenDART quota 소진으로 실패 종료될 수 있으므로, Cronicle에서는 별도 이벤트(예: `sdc_opendart_all_years_backfill`)로 등록합니다.
+
+권장 Cronicle command:
+
+```bash
+/home/whi/apps/sdc/bin/dart-backfill-all-years.sh
+```
+
+스크립트 기본값:
+
+- 시작연도: `2015`
+- 종료연도: 현재연도 - 1
+- 보고서 코드: `11011,11012,11013,11014`
+- 재무제표 구분: `CFS,OFS`
+- 처리 순서: 최신 연도부터 `dart sync-financials`, `dart sync-share-info`, `dart sync-xbrl`, `metrics normalize`
+
+필요하면 Cronicle 이벤트 환경 변수로 범위를 좁힙니다.
+
+```bash
+SDC_DART_BACKFILL_START_YEAR=2018
+SDC_DART_BACKFILL_END_YEAR=2025
+SDC_DART_BACKFILL_INCLUDE_CURRENT_YEAR=0
+SDC_DART_BACKFILL_REPRT_CODES=11011,11012,11013,11014
+SDC_DART_BACKFILL_FS_DIVS=CFS,OFS
+```
+
+모든 OpenDART API key가 일일 한도에 도달하면 각 OpenDART CLI는 exit code `75`로 종료됩니다. 스크립트는 `set -euo pipefail`이므로 그 지점에서 멈추고, 다음 실행 때 이미 저장된 raw/XBRL은 skip되어 같은 범위를 이어받습니다.
+
 ### 데이터 수집 이력 조회
 
 ```sql

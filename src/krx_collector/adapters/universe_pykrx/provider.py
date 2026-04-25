@@ -17,8 +17,7 @@ import logging
 import uuid
 from datetime import date
 
-from pykrx import stock
-
+from krx_collector.adapters.pykrx_auth import get_pykrx_stock_module
 from krx_collector.domain.enums import ListingStatus, Market, Source
 from krx_collector.domain.models import Stock, StockUniverseSnapshot, UniverseResult
 from krx_collector.util.time import now_kst, today_kst
@@ -47,6 +46,7 @@ class PykrxUniverseProvider:
             ``UniverseResult`` with the snapshot.
         """
         try:
+            stock = get_pykrx_stock_module()
             records: list[Stock] = []
             reference_date = as_of or today_kst()
             fetched_at = now_kst()

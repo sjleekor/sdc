@@ -15,6 +15,7 @@ Usage::
 
 from __future__ import annotations
 
+import os
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
@@ -100,6 +101,12 @@ class Settings(BaseSettings):
 
     # Universe
     universe_source_default: UniverseSourceDefault = UniverseSourceDefault.FDR
+
+    # KRX / pykrx authentication
+    krx_id: str = ""
+    krx_pw: str = ""
+
+    # OpenDART
     opendart_api_key: str = ""
     opendart_api_keys_raw: str = Field(default="", validation_alias="OPENDART_API_KEYS")
     _opendart_api_keys: tuple[str, ...] = PrivateAttr(default=())
@@ -147,8 +154,20 @@ class Settings(BaseSettings):
         self._opendart_api_keys = tuple(ordered_keys)
         return self
 
+    def export_krx_credentials_to_environment(self) -> None:
+        """Expose .env-loaded KRX credentials for pykrx's import-time auth hook."""
+        if self.krx_id and not os.environ.get("KRX_ID"):
+            os.environ["KRX_ID"] = self.krx_id
+        if self.krx_pw and not os.environ.get("KRX_PW"):
+            os.environ["KRX_PW"] = self.krx_pw
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return the singleton ``Settings`` instance (cached)."""
     return Settings()
+
+
+def configure_krx_credentials_from_settings() -> None:
+    """Load KRX credentials from settings before importing pykrx modules."""
+    get_settings().export_krx_credentials_to_environment()

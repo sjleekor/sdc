@@ -1,0 +1,4 @@
+- 모든 api key 소진 후 에는 바로 종료 ( agent) 
+- 2025년 뿐 아니라 2025년 분기 및 이전 년도의 데이터도 다운받도록 수정 ( agent)
+- http://sj2-server:3012/#Schedule?sub=edit_event&id=sdc_daily_accounts_flows 에 반영( agent)
+- api 추가로 더 발급받기

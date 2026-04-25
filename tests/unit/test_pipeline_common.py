@@ -330,7 +330,5 @@ def test_sync_dart_financial_statements_stops_on_all_keys_rate_limited() -> None
 
     assert provider.calls == 1
     assert result.opendart_exhaustion_reason == "all_rate_limited"
-    assert result.errors == {
-        "pipeline": "All OpenDART API keys are temporarily rate limited."
-    }
+    assert result.errors == {"pipeline": "All OpenDART API keys are temporarily rate limited."}
     assert storage.runs[-1].status == RunStatus.FAILED

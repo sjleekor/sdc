@@ -8,7 +8,7 @@ license = { text = "MIT" }
 authors = [{ name = "KRX Pipeline Team" }]
 dependencies = [
     "finance-datareader>=0.9",
-    "pykrx>=1.0",
+    "pykrx>=1.2.7",
     "pandas>=2.0",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",

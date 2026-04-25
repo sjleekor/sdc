@@ -1,3 +1,5 @@
+import os
+
 from krx_collector.domain.enums import RunType, Source
 from krx_collector.infra.config.settings import Settings
 
@@ -45,6 +47,17 @@ def test_settings_allow_empty_multiple_opendart_keys() -> None:
     )
 
     assert settings.opendart_api_keys == ()
+
+
+def test_settings_exports_krx_credentials_to_environment(monkeypatch) -> None:
+    monkeypatch.delenv("KRX_ID", raising=False)
+    monkeypatch.delenv("KRX_PW", raising=False)
+    settings = Settings(_env_file=None, krx_id="krx-user", krx_pw="krx-pass")
+
+    settings.export_krx_credentials_to_environment()
+
+    assert os.environ["KRX_ID"] == "krx-user"
+    assert os.environ["KRX_PW"] == "krx-pass"
 
 
 def test_future_sources_and_run_types_are_declared() -> None:

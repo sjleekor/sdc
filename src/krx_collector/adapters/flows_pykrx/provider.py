@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import logging
 import signal
 from datetime import date
 from decimal import Decimal
 
 import pandas as pd
-from pykrx import stock
 
+from krx_collector.adapters.pykrx_auth import get_pykrx_stock_module
 from krx_collector.domain.enums import Market, Source
 from krx_collector.domain.models import SecurityFlowFetchResult, SecurityFlowLine
 from krx_collector.util.time import now_kst
@@ -19,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 class PykrxCallTimeoutError(RuntimeError):
     """Raised when a pykrx network call exceeds the configured timeout."""
+
+
+class PykrxCallOutputError(RuntimeError):
+    """Raised when pykrx prints an internal error instead of raising it."""
 
 
 def _json_safe(value: object) -> object:
@@ -196,8 +202,23 @@ class PykrxFlowProvider:
         self._call_timeout_seconds = call_timeout_seconds
 
     def _call_with_timeout(self, func, *args):
+        def _invoke():
+            captured_output = io.StringIO()
+            with (
+                contextlib.redirect_stdout(captured_output),
+                contextlib.redirect_stderr(captured_output),
+            ):
+                result = func(*args)
+            output = captured_output.getvalue().strip()
+            if "Error occurred" in output:
+                normalized = " ".join(output.split())
+                raise PykrxCallOutputError(normalized[:500])
+            if output:
+                logger.debug("Suppressed pykrx output: %s", " ".join(output.split())[:500])
+            return result
+
         if self._call_timeout_seconds <= 0:
-            return func(*args)
+            return _invoke()
 
         def _timeout_handler(signum, frame):  # type: ignore[no-untyped-def]
             raise PykrxCallTimeoutError(
@@ -208,7 +229,7 @@ class PykrxFlowProvider:
         signal.signal(signal.SIGALRM, _timeout_handler)
         signal.setitimer(signal.ITIMER_REAL, self._call_timeout_seconds)
         try:
-            return func(*args)
+            return _invoke()
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, previous_handler)
@@ -221,6 +242,7 @@ class PykrxFlowProvider:
         end: date,
     ) -> SecurityFlowFetchResult:
         try:
+            stock = get_pykrx_stock_module()
             df = self._call_with_timeout(
                 stock.get_market_trading_volume_by_date,
                 start.strftime("%Y%m%d"),
@@ -243,6 +265,7 @@ class PykrxFlowProvider:
         end: date,
     ) -> SecurityFlowFetchResult:
         try:
+            stock = get_pykrx_stock_module()
             start_str = start.strftime("%Y%m%d")
             end_str = end.strftime("%Y%m%d")
             status_df = self._call_with_timeout(
@@ -268,6 +291,7 @@ class PykrxFlowProvider:
         tickers: list[str] | None = None,
     ) -> SecurityFlowFetchResult:
         try:
+            stock = get_pykrx_stock_module()
             df = self._call_with_timeout(
                 stock.get_exhaustion_rates_of_foreign_investment_by_ticker,
                 trade_date.strftime("%Y%m%d"),

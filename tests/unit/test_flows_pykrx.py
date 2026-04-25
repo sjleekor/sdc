@@ -4,6 +4,8 @@ from decimal import Decimal
 import pandas as pd
 
 from krx_collector.adapters.flows_pykrx.provider import (
+    PykrxCallOutputError,
+    PykrxFlowProvider,
     parse_foreign_holding_frame,
     parse_investor_net_volume_frame,
     parse_shorting_frames,
@@ -73,6 +75,21 @@ def test_parse_shorting_frames() -> None:
     assert facts["short_selling_volume"].value == Decimal("123")
     assert facts["short_selling_value"].value == Decimal("4567")
     assert facts["short_selling_balance_quantity"].value == Decimal("1000")
+
+
+def test_pykrx_printed_internal_error_is_raised() -> None:
+    provider = PykrxFlowProvider(call_timeout_seconds=0)
+
+    def noisy_pykrx_call() -> pd.DataFrame:
+        print("Error occurred in fake_pykrx_call: boom")
+        return pd.DataFrame()
+
+    try:
+        provider._call_with_timeout(noisy_pykrx_call)  # noqa: SLF001
+    except PykrxCallOutputError as exc:
+        assert "fake_pykrx_call" in str(exc)
+    else:
+        raise AssertionError("Expected pykrx printed error to be raised")
 
 
 class MockFlowProvider:

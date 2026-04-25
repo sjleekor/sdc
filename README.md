@@ -72,6 +72,16 @@ uv run krx-collector dart sync-share-info --tickers 005930 --bsns-years 2025 --r
 uv run krx-collector dart sync-xbrl --tickers 005930 --bsns-years 2025 --reprt-codes 11011
 ```
 
+전체 사업연도 백필은 서버 checkout에서 host-side 스크립트로 실행합니다. 기본 범위는 2015년부터 전년도까지이며, 최신 연도부터 `sync-financials → sync-share-info → sync-xbrl → metrics normalize` 순서로 처리합니다. 모든 OpenDART key가 일일 한도에 도달하면 해당 CLI가 exit code `75`로 종료되고, 다음 실행 때 이미 저장된 raw는 건너뛰며 이어받습니다.
+
+```bash
+bin/dart-backfill-all-years.sh
+
+SDC_DART_BACKFILL_START_YEAR=2018 \
+SDC_DART_BACKFILL_END_YEAR=2025 \
+bin/dart-backfill-all-years.sh
+```
+
 ### Canonical metric 정규화
 
 ```bash
