@@ -436,7 +436,11 @@ class OpenDartRequestExecutor:
                 )
             if payload:
                 parsed_result = parser(payload)
-                if parsed_result.error is not None or parsed_result.no_data or parsed_result.payload:
+                if (
+                    parsed_result.error is not None
+                    or parsed_result.no_data
+                    or parsed_result.payload
+                ):
                     return parsed_result
             return OpenDartCallResult(
                 status_code=str(exc.code),

@@ -159,7 +159,9 @@ class OpenDartFinancialStatementProvider:
             payload = call_result.parsed_payload
             if not isinstance(payload, dict):
                 raise RuntimeError("OpenDART returned an unexpected JSON payload.")
-            result = parse_fnltt_singl_acnt_all_response(payload, corp, bsns_year, reprt_code, fs_div)
+            result = parse_fnltt_singl_acnt_all_response(
+                payload, corp, bsns_year, reprt_code, fs_div
+            )
             return apply_call_result_meta(result, call_result)
         except Exception as exc:
             return DartFinancialStatementResult(

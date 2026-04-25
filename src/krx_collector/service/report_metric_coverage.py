@@ -20,11 +20,7 @@ def build_metric_coverage_report(
     facts = storage.get_stock_metric_facts(bsns_years, reprt_codes, tickers)
     financial_rows = storage.get_dart_financial_statement_raw(bsns_years, reprt_codes, tickers)
 
-    targets = {
-        (row.ticker, row.bsns_year, row.reprt_code)
-        for row in financial_rows
-        if row.ticker
-    }
+    targets = {(row.ticker, row.bsns_year, row.reprt_code) for row in financial_rows if row.ticker}
     report.target_count = len(targets)
 
     covered_by_metric: dict[str, set[tuple[str, int, str]]] = {}

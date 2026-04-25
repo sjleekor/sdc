@@ -104,8 +104,9 @@ class OpenDartCorpCodeProvider:
             records = parse_corp_code_zip_bytes(call_result.payload or b"")
             return apply_call_result_meta(DartCorpCodeResult(records=records), call_result)
         except zipfile.BadZipFile:
+            preview = (call_result.payload or b"")[:120]
             return DartCorpCodeResult(
-                error=f"OpenDART returned an invalid ZIP payload: {(call_result.payload or b'')[:120]!r}"
+                error=f"OpenDART returned an invalid ZIP payload: {preview!r}"
             )
         except Exception as exc:
             return DartCorpCodeResult(error=str(exc))

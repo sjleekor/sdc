@@ -73,9 +73,13 @@ def validate(
         violations = []
         for bar in bars:
             if not (bar.low <= bar.open <= bar.high):
-                violations.append(f"{bar.ticker}: open ({bar.open}) out of bounds [{bar.low}, {bar.high}]")
+                violations.append(
+                    f"{bar.ticker}: open ({bar.open}) out of bounds [{bar.low}, {bar.high}]"
+                )
             if not (bar.low <= bar.close <= bar.high):
-                violations.append(f"{bar.ticker}: close ({bar.close}) out of bounds [{bar.low}, {bar.high}]")
+                violations.append(
+                    f"{bar.ticker}: close ({bar.close}) out of bounds [{bar.low}, {bar.high}]"
+                )
             if bar.volume < 0:
                 violations.append(f"{bar.ticker}: negative volume ({bar.volume})")
 
@@ -96,7 +100,11 @@ def validate(
                 if stock.ticker not in fetched_tickers:
                     missing_tickers.append(stock.ticker)
             if missing_tickers:
-                logger.warning("Missing daily bars for %d active tickers on %s.", len(missing_tickers), resolved_date)
+                logger.warning(
+                    "Missing daily bars for %d active tickers on %s.",
+                    len(missing_tickers),
+                    resolved_date,
+                )
 
         # 5. Check universe count drift (skipped in this iteration)
         # TODO: Implement universe count drift check

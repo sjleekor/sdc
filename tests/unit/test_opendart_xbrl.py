@@ -3,8 +3,10 @@ import zipfile
 from datetime import date
 from decimal import Decimal
 
-from krx_collector.adapters.opendart_xbrl.provider import parse_xbrl_zip_response
-from krx_collector.adapters.opendart_xbrl.provider import OpenDartXbrlProvider
+from krx_collector.adapters.opendart_xbrl.provider import (
+    OpenDartXbrlProvider,
+    parse_xbrl_zip_response,
+)
 from krx_collector.domain.enums import Market, RunStatus, RunType, Source
 from krx_collector.domain.models import (
     DartCorp,
@@ -35,7 +37,10 @@ def _sample_corp() -> DartCorp:
 
 
 def _build_sample_xbrl_zip() -> bytes:
-    instance_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    weighted_concept = "ifrs-full_WeightedAverageNumberOfOrdinarySharesOutstandingBasic"
+    depreciation_concept = "ifrs-full_DepreciationExpense"
+    weighted_label = "기본주당이익 계산에 사용된 가중평균주식수"
+    instance_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <xbrli:xbrl
     xmlns:xbrli="http://www.xbrl.org/2003/instance"
     xmlns:ifrs-full="http://xbrl.ifrs.org/taxonomy/2023-03-23/ifrs-full"
@@ -55,17 +60,21 @@ def _build_sample_xbrl_zip() -> bytes:
   <xbrli:unit id="krw">
     <xbrli:measure>iso4217:KRW</xbrli:measure>
   </xbrli:unit>
-  <ifrs-full:WeightedAverageNumberOfOrdinarySharesOutstandingBasic contextRef="D2025" unitRef="shares" decimals="0">6630180138</ifrs-full:WeightedAverageNumberOfOrdinarySharesOutstandingBasic>
-  <ifrs-full:DepreciationExpense contextRef="D2025" unitRef="krw" decimals="0">12345</ifrs-full:DepreciationExpense>
+  <{weighted_concept}
+      contextRef="D2025" unitRef="shares" decimals="0">6630180138</{weighted_concept}>
+  <{depreciation_concept}
+      contextRef="D2025" unitRef="krw" decimals="0">12345</{depreciation_concept}>
 </xbrli:xbrl>
 """
-    label_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    label_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <link:linkbase
     xmlns:link="http://www.xbrl.org/2003/linkbase"
     xmlns:xlink="http://www.w3.org/1999/xlink">
   <link:labelLink xlink:type="extended" xlink:role="http://www.xbrl.org/2003/role/link">
-    <link:loc xlink:type="locator" xlink:href="entity00126380_2025-12-31.xsd#ifrs-full_WeightedAverageNumberOfOrdinarySharesOutstandingBasic" xlink:label="loc1"/>
-    <link:label xlink:type="resource" xlink:label="lab1">기본주당이익 계산에 사용된 가중평균주식수</link:label>
+    <link:loc xlink:type="locator"
+        xlink:href="entity00126380_2025-12-31.xsd#{weighted_concept}"
+        xlink:label="loc1"/>
+    <link:label xlink:type="resource" xlink:label="lab1">{weighted_label}</link:label>
     <link:labelArc xlink:type="arc" xlink:from="loc1" xlink:to="lab1"/>
   </link:labelLink>
 </link:linkbase>
@@ -95,7 +104,8 @@ def test_parse_xbrl_zip_response_extracts_document_and_facts() -> None:
     assert result.document.instance_document_name.endswith(".xbrl")
     assert len(result.facts) == 2
     weighted = next(
-        fact for fact in result.facts
+        fact
+        for fact in result.facts
         if fact.concept_id == "ifrs-full_WeightedAverageNumberOfOrdinarySharesOutstandingBasic"
     )
     assert weighted.value_numeric == Decimal("6630180138")
@@ -106,12 +116,13 @@ def test_parse_xbrl_zip_response_extracts_document_and_facts() -> None:
 
 def test_open_dart_xbrl_provider_maps_file_missing_as_no_data() -> None:
     corp = _sample_corp()
+    payload = (
+        "<result><status>014</status>" "<message>파일이 존재하지 않습니다.</message></result>"
+    ).encode()
     provider = OpenDartXbrlProvider(
         request_executor=FakeOpenDartExecutor(
             [
-                (
-                    "<result><status>014</status><message>파일이 존재하지 않습니다.</message></result>"
-                ).encode("utf-8"),
+                payload,
             ]
         )
     )
@@ -125,12 +136,13 @@ def test_open_dart_xbrl_provider_maps_file_missing_as_no_data() -> None:
 
 def test_open_dart_xbrl_provider_maps_no_data_status_013() -> None:
     corp = _sample_corp()
+    payload = (
+        "<result><status>013</status>" "<message>조회된 데이타가 없습니다.</message></result>"
+    ).encode()
     provider = OpenDartXbrlProvider(
         request_executor=FakeOpenDartExecutor(
             [
-                (
-                    "<result><status>013</status><message>조회된 데이타가 없습니다.</message></result>"
-                ).encode("utf-8"),
+                payload,
             ]
         )
     )
@@ -143,6 +155,9 @@ def test_open_dart_xbrl_provider_maps_no_data_status_013() -> None:
 
 
 class MockXbrlProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def fetch_xbrl(
         self,
         corp: DartCorp,
@@ -150,6 +165,7 @@ class MockXbrlProvider:
         reprt_code: str,
         rcept_no: str,
     ) -> DartXbrlResult:
+        self.calls += 1
         fetched_at = now_kst()
         return DartXbrlResult(
             corp_code=corp.corp_code,
@@ -206,6 +222,7 @@ class MockXbrlStorage:
         self.runs: list[IngestionRun] = []
         self.documents: list[DartXbrlDocument] = []
         self.facts: list[DartXbrlFactLine] = []
+        self.existing_xbrl_documents: set[tuple[str, int, str, str]] = set()
 
     def record_run(self, run: IngestionRun) -> None:
         self.runs.append(run)
@@ -219,6 +236,20 @@ class MockXbrlStorage:
         if tickers is None:
             return records
         return [record for record in records if record.ticker in tickers]
+
+    def get_existing_dart_xbrl_document_keys(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int, str, str]]:
+        return {
+            key
+            for key in self.existing_xbrl_documents
+            if key[1] in bsns_years
+            and key[2] in reprt_codes
+            and (corp_codes is None or key[0] in corp_codes)
+        }
 
     def get_dart_financial_statement_raw(
         self,
@@ -269,9 +300,10 @@ class MockXbrlStorage:
 
 def test_sync_dart_xbrl_writes_documents_and_facts() -> None:
     storage = MockXbrlStorage()
+    provider = MockXbrlProvider()
 
     result = sync_dart_xbrl(
-        provider=MockXbrlProvider(),
+        provider=provider,
         storage=storage,
         bsns_years=[2025],
         reprt_codes=["11011"],
@@ -282,9 +314,54 @@ def test_sync_dart_xbrl_writes_documents_and_facts() -> None:
     assert result.errors == {}
     assert result.targets_processed == 1
     assert result.requests_attempted == 1
+    assert result.requests_skipped == 0
+    assert provider.calls == 1
     assert result.documents_upserted == 1
     assert result.facts_upserted == 1
     assert len(storage.documents) == 1
     assert len(storage.facts) == 1
     assert storage.runs[0].run_type == RunType.XBRL_PARSE
     assert storage.runs[-1].status == RunStatus.SUCCESS
+
+
+def test_sync_dart_xbrl_skips_existing_document() -> None:
+    storage = MockXbrlStorage()
+    storage.existing_xbrl_documents.add(("00126380", 2025, "11011", "20260310002820"))
+    provider = MockXbrlProvider()
+
+    result = sync_dart_xbrl(
+        provider=provider,
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+    )
+
+    assert result.errors == {}
+    assert result.requests_attempted == 0
+    assert result.requests_skipped == 1
+    assert provider.calls == 0
+    assert storage.documents == []
+    assert storage.facts == []
+
+
+def test_sync_dart_xbrl_force_bypasses_existing_check() -> None:
+    storage = MockXbrlStorage()
+    storage.existing_xbrl_documents.add(("00126380", 2025, "11011", "20260310002820"))
+    provider = MockXbrlProvider()
+
+    result = sync_dart_xbrl(
+        provider=provider,
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+        force=True,
+    )
+
+    assert result.requests_attempted == 1
+    assert result.requests_skipped == 0
+    assert provider.calls == 1
+    assert len(storage.documents) == 1

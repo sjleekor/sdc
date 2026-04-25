@@ -96,8 +96,12 @@ def sync_universe(
                 if ticker not in snapshot_tickers:
                     delisted_tickers.append(ticker)
 
-        logger.info("Diffs - New: %d, Delisted: %d, Name Changes: %d",
-                    len(new_tickers), len(delisted_tickers), len(name_changes))
+        logger.info(
+            "Diffs - New: %d, Delisted: %d, Name Changes: %d",
+            len(new_tickers),
+            len(delisted_tickers),
+            len(name_changes),
+        )
 
         # 4. Prepare records to upsert
         # We need to explicitly mark delisted stocks

@@ -65,9 +65,7 @@ def _extract_amount_snippet(text: str, keywords: list[str]) -> tuple[Decimal | N
     patterns = []
     for keyword in keywords:
         patterns.append(
-            re.compile(
-                rf"{keyword}\s*(?:은|는|:|기준|으로)?\s*(?P<amount>{_AMOUNT_VALUE_PATTERN})"
-            )
+            re.compile(rf"{keyword}\s*(?:은|는|:|기준|으로)?\s*(?P<amount>{_AMOUNT_VALUE_PATTERN})")
         )
 
     for pattern in patterns:

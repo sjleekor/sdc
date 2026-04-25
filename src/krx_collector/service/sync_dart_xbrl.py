@@ -34,6 +34,7 @@ def sync_dart_xbrl(
     reprt_codes: list[str],
     tickers: list[str] | None = None,
     rate_limit_seconds: float = 0.2,
+    force: bool = False,
 ) -> DartXbrlSyncResult:
     """Synchronise parsed XBRL ZIP data for filings already present in financial raw."""
     run = IngestionRun(
@@ -45,6 +46,7 @@ def sync_dart_xbrl(
             "reprt_codes": reprt_codes,
             "tickers": tickers,
             "rate_limit_seconds": rate_limit_seconds,
+            "force": force,
         },
     )
     executor = _get_executor(provider)
@@ -58,7 +60,9 @@ def sync_dart_xbrl(
         corp_rows = storage.get_dart_corp_master(active_only=True, tickers=tickers)
         corp_by_ticker = {corp.ticker: corp for corp in corp_rows if corp.ticker}
         if not corp_by_ticker:
-            raise RuntimeError("No active OpenDART corp mappings found. Run `dart sync-corp` first.")
+            raise RuntimeError(
+                "No active OpenDART corp mappings found. Run `dart sync-corp` first."
+            )
 
         financial_rows = storage.get_dart_financial_statement_raw(bsns_years, reprt_codes, tickers)
         request_targets: dict[tuple[str, int, str, str], tuple[str, int, str, str]] = {}
@@ -73,14 +77,29 @@ def sync_dart_xbrl(
                 "No financial raw rows with rcept_no found. Run `dart sync-financials` first."
             )
 
+        existing_doc_keys: set[tuple[str, int, str, str]]
+        if force:
+            existing_doc_keys = set()
+        else:
+            existing_doc_keys = storage.get_existing_dart_xbrl_document_keys(
+                bsns_years=bsns_years,
+                reprt_codes=reprt_codes,
+                corp_codes=[corp.corp_code for corp in corp_by_ticker.values()],
+            )
+
         result.targets_processed = len(request_targets)
         for ticker, bsns_year, reprt_code, rcept_no in request_targets.values():
             corp = corp_by_ticker.get(ticker)
             if corp is None:
                 continue
 
-            result.requests_attempted += 1
             request_key = f"{ticker}:{bsns_year}:{reprt_code}:{rcept_no}"
+            if (corp.corp_code, bsns_year, reprt_code, rcept_no) in existing_doc_keys:
+                logger.debug("Skipping existing XBRL document %s", request_key)
+                result.requests_skipped += 1
+                continue
+
+            result.requests_attempted += 1
             fetch_result = call_with_retry(
                 lambda: provider.fetch_xbrl(
                     corp=corp,
@@ -119,6 +138,7 @@ def sync_dart_xbrl(
             counts=build_run_counts(
                 targets_processed=result.targets_processed,
                 requests_attempted=result.requests_attempted,
+                requests_skipped=result.requests_skipped,
                 documents_upserted=result.documents_upserted,
                 facts_upserted=result.facts_upserted,
                 no_data_requests=result.no_data_requests,

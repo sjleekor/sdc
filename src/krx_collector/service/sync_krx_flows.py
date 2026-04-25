@@ -5,8 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-from krx_collector.domain.enums import RunStatus, RunType
-from krx_collector.domain.enums import ListingStatus, Source
+from krx_collector.domain.enums import ListingStatus, RunStatus, RunType, Source
 from krx_collector.domain.models import IngestionRun, KrxFlowSyncResult, Stock
 from krx_collector.infra.calendar.trading_days import get_trading_days
 from krx_collector.ports.flows import FlowProvider
@@ -104,7 +103,9 @@ def sync_krx_security_flows(
                     logger_instance=logger,
                 )
                 if foreign_result.error:
-                    logger.warning("Foreign holding sync failed for %s: %s", request_key, foreign_result.error)
+                    logger.warning(
+                        "Foreign holding sync failed for %s: %s", request_key, foreign_result.error
+                    )
                     result.errors[request_key] = foreign_result.error
                 elif foreign_result.no_data:
                     result.no_data_requests += 1

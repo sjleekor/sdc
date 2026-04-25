@@ -146,7 +146,7 @@ def test_open_dart_share_info_provider_maps_no_data_result() -> None:
     provider = OpenDartShareInfoProvider(
         request_executor=FakeOpenDartExecutor(
             [
-                '{"status":"013","message":"조회된 데이타가 없습니다."}'.encode("utf-8"),
+                '{"status":"013","message":"조회된 데이타가 없습니다."}'.encode(),
             ]
         )
     )
@@ -159,7 +159,18 @@ def test_open_dart_share_info_provider_maps_no_data_result() -> None:
 
 
 class MockShareInfoProvider:
-    def fetch_share_count(self, corp: DartCorp, bsns_year: int, reprt_code: str) -> DartShareCountResult:
+    def __init__(self) -> None:
+        self.share_count_calls = 0
+        self.dividend_calls = 0
+        self.treasury_stock_calls = 0
+
+    def fetch_share_count(
+        self,
+        corp: DartCorp,
+        bsns_year: int,
+        reprt_code: str,
+    ) -> DartShareCountResult:
+        self.share_count_calls += 1
         return DartShareCountResult(
             corp_code=corp.corp_code,
             ticker=corp.ticker or "",
@@ -198,6 +209,7 @@ class MockShareInfoProvider:
         bsns_year: int,
         reprt_code: str,
     ) -> DartShareholderReturnResult:
+        self.dividend_calls += 1
         return DartShareholderReturnResult(
             corp_code=corp.corp_code,
             ticker=corp.ticker or "",
@@ -236,6 +248,7 @@ class MockShareInfoProvider:
         bsns_year: int,
         reprt_code: str,
     ) -> DartShareholderReturnResult:
+        self.treasury_stock_calls += 1
         return DartShareholderReturnResult(
             corp_code=corp.corp_code,
             ticker=corp.ticker or "",
@@ -251,6 +264,8 @@ class MockShareInfoStorage:
         self.runs: list[IngestionRun] = []
         self.share_count_rows: list[DartShareCountLine] = []
         self.return_rows: list[DartShareholderReturnLine] = []
+        self.existing_share_count_requests: set[tuple[str, int, str]] = set()
+        self.existing_return_requests: set[tuple[str, int, str, str]] = set()
 
     def record_run(self, run: IngestionRun) -> None:
         self.runs.append(run)
@@ -264,6 +279,34 @@ class MockShareInfoStorage:
         if tickers is None:
             return records
         return [record for record in records if record.ticker in tickers]
+
+    def get_existing_dart_share_count_keys(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int, str]]:
+        return {
+            key
+            for key in self.existing_share_count_requests
+            if key[1] in bsns_years
+            and key[2] in reprt_codes
+            and (corp_codes is None or key[0] in corp_codes)
+        }
+
+    def get_existing_dart_shareholder_return_keys(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int, str, str]]:
+        return {
+            key
+            for key in self.existing_return_requests
+            if key[1] in bsns_years
+            and key[2] in reprt_codes
+            and (corp_codes is None or key[0] in corp_codes)
+        }
 
     def upsert_dart_share_count_raw(self, records: list[DartShareCountLine]) -> UpsertResult:
         self.share_count_rows.extend(records)
@@ -294,7 +337,85 @@ def test_sync_dart_share_info_counts_results() -> None:
     assert result.errors == {}
     assert result.targets_processed == 1
     assert result.requests_attempted == 3
+    assert result.requests_skipped == 0
     assert result.share_count_rows_upserted == 1
     assert result.shareholder_return_rows_upserted == 1
     assert result.no_data_requests == 1
     assert storage.runs[-1].status == RunStatus.SUCCESS
+
+
+def test_sync_dart_share_info_skips_existing_raw_requests() -> None:
+    storage = MockShareInfoStorage()
+    storage.existing_share_count_requests.add(("00126380", 2025, "11011"))
+    storage.existing_return_requests.add(("00126380", 2025, "11011", "dividend"))
+    storage.existing_return_requests.add(("00126380", 2025, "11011", "treasury_stock"))
+    provider = MockShareInfoProvider()
+
+    result = sync_dart_share_info(
+        share_count_provider=provider,
+        shareholder_return_provider=provider,
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+    )
+
+    assert result.errors == {}
+    assert result.requests_attempted == 0
+    assert result.requests_skipped == 3
+    assert provider.share_count_calls == 0
+    assert provider.dividend_calls == 0
+    assert provider.treasury_stock_calls == 0
+    assert storage.share_count_rows == []
+    assert storage.return_rows == []
+
+
+def test_sync_dart_share_info_force_bypasses_existing_check() -> None:
+    storage = MockShareInfoStorage()
+    storage.existing_share_count_requests.add(("00126380", 2025, "11011"))
+    storage.existing_return_requests.add(("00126380", 2025, "11011", "dividend"))
+    storage.existing_return_requests.add(("00126380", 2025, "11011", "treasury_stock"))
+    provider = MockShareInfoProvider()
+
+    result = sync_dart_share_info(
+        share_count_provider=provider,
+        shareholder_return_provider=provider,
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+        force=True,
+    )
+
+    assert result.requests_attempted == 3
+    assert result.requests_skipped == 0
+    assert provider.share_count_calls == 1
+    assert provider.dividend_calls == 1
+    assert provider.treasury_stock_calls == 1
+
+
+def test_sync_dart_share_info_skips_sleep_when_all_sub_requests_cached(monkeypatch) -> None:
+    storage = MockShareInfoStorage()
+    storage.existing_share_count_requests.add(("00126380", 2025, "11011"))
+    storage.existing_return_requests.add(("00126380", 2025, "11011", "dividend"))
+    storage.existing_return_requests.add(("00126380", 2025, "11011", "treasury_stock"))
+
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(
+        "krx_collector.service.sync_dart_share_info.sleep_with_jitter",
+        lambda seconds: sleep_calls.append(seconds),
+    )
+
+    sync_dart_share_info(
+        share_count_provider=MockShareInfoProvider(),
+        shareholder_return_provider=MockShareInfoProvider(),
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        tickers=["005930"],
+        rate_limit_seconds=0.5,
+    )
+
+    assert sleep_calls == []

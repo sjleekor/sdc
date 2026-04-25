@@ -9,7 +9,13 @@ from krx_collector.adapters.flows_pykrx.provider import (
     parse_shorting_frames,
 )
 from krx_collector.domain.enums import ListingStatus, Market, RunStatus, RunType, Source
-from krx_collector.domain.models import IngestionRun, SecurityFlowFetchResult, SecurityFlowLine, Stock, UpsertResult
+from krx_collector.domain.models import (
+    IngestionRun,
+    SecurityFlowFetchResult,
+    SecurityFlowLine,
+    Stock,
+    UpsertResult,
+)
 from krx_collector.service.sync_krx_flows import sync_krx_security_flows
 
 

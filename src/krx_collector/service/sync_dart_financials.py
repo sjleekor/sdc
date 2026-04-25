@@ -35,6 +35,7 @@ def sync_dart_financial_statements(
     fs_divs: list[str],
     tickers: list[str] | None = None,
     rate_limit_seconds: float = 0.2,
+    force: bool = False,
 ) -> DartFinancialSyncResult:
     """Synchronise OpenDART financial raw rows into local storage."""
     run = IngestionRun(
@@ -47,6 +48,7 @@ def sync_dart_financial_statements(
             "fs_divs": fs_divs,
             "tickers": tickers,
             "rate_limit_seconds": rate_limit_seconds,
+            "force": force,
         },
     )
     executor = _get_executor(provider)
@@ -59,7 +61,20 @@ def sync_dart_financial_statements(
     try:
         targets = storage.get_dart_corp_master(active_only=True, tickers=tickers)
         if not targets:
-            raise RuntimeError("No active OpenDART corp mappings found. Run `dart sync-corp` first.")
+            raise RuntimeError(
+                "No active OpenDART corp mappings found. Run `dart sync-corp` first."
+            )
+
+        existing_keys: set[tuple[str, int, str, str]]
+        if force:
+            existing_keys = set()
+        else:
+            existing_keys = storage.get_existing_dart_financial_statement_keys(
+                bsns_years=bsns_years,
+                reprt_codes=reprt_codes,
+                fs_divs=fs_divs,
+                corp_codes=[corp.corp_code for corp in targets],
+            )
 
         for corp in targets:
             result.targets_processed += 1
@@ -67,8 +82,13 @@ def sync_dart_financial_statements(
             for bsns_year in bsns_years:
                 for reprt_code in reprt_codes:
                     for fs_div in fs_divs:
-                        result.requests_attempted += 1
                         request_key = f"{corp.ticker}:{bsns_year}:{reprt_code}:{fs_div}"
+                        if (corp.corp_code, bsns_year, reprt_code, fs_div) in existing_keys:
+                            logger.debug("Skipping existing financial request %s", request_key)
+                            result.requests_skipped += 1
+                            continue
+
+                        result.requests_attempted += 1
                         fetch_result = call_with_retry(
                             lambda: provider.fetch_financial_statement(
                                 corp=corp,
@@ -82,7 +102,9 @@ def sync_dart_financial_statements(
                         )
 
                         if fetch_result.error:
-                            logger.warning("Financial sync failed for %s: %s", request_key, fetch_result.error)
+                            logger.warning(
+                                "Financial sync failed for %s: %s", request_key, fetch_result.error
+                            )
                             result.errors[request_key] = fetch_result.error
                         elif fetch_result.no_data:
                             result.no_data_requests += 1
@@ -102,6 +124,7 @@ def sync_dart_financial_statements(
             counts=build_run_counts(
                 targets_processed=result.targets_processed,
                 requests_attempted=result.requests_attempted,
+                requests_skipped=result.requests_skipped,
                 rows_upserted=result.rows_upserted,
                 no_data_requests=result.no_data_requests,
                 **(executor.snapshot_metrics() if executor is not None else {}),

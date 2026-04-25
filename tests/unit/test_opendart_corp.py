@@ -51,8 +51,7 @@ def _make_corp_code_zip(xml_text: str) -> bytes:
 
 
 def test_parse_corp_code_zip_bytes() -> None:
-    payload = _make_corp_code_zip(
-        """
+    payload = _make_corp_code_zip("""
         <result>
           <list>
             <corp_code>00126380</corp_code>
@@ -67,8 +66,7 @@ def test_parse_corp_code_zip_bytes() -> None:
             <modify_date>20240315</modify_date>
           </list>
         </result>
-        """
-    )
+        """)
 
     records = parse_corp_code_zip_bytes(payload)
 
@@ -84,10 +82,7 @@ def test_parse_corp_code_zip_bytes() -> None:
 
 def test_open_dart_corp_code_provider_uses_executor_payload() -> None:
     provider = OpenDartCorpCodeProvider(
-        request_executor=FakeOpenDartExecutor(
-            [
-                _make_corp_code_zip(
-                    """
+        request_executor=FakeOpenDartExecutor([_make_corp_code_zip("""
                     <result>
                       <list>
                         <corp_code>00126380</corp_code>
@@ -96,10 +91,7 @@ def test_open_dart_corp_code_provider_uses_executor_payload() -> None:
                         <modify_date>20240401</modify_date>
                       </list>
                     </result>
-                    """
-                )
-            ]
-        )
+                    """)])
     )
 
     result = provider.fetch_corp_codes()
@@ -116,7 +108,7 @@ def test_open_dart_corp_code_provider_maps_body_error_as_error() -> None:
                 (
                     "<result><status>010</status>"
                     "<message>등록되지 않은 키입니다.</message></result>"
-                ).encode("utf-8"),
+                ).encode(),
             ]
         )
     )
@@ -162,9 +154,15 @@ class MockStorage:
     def __init__(self) -> None:
         self.runs: list[IngestionRun] = []
         self.saved_records: list[DartCorp] = []
+        self.last_successful_corp_run: IngestionRun | None = None
 
     def record_run(self, run: IngestionRun) -> None:
         self.runs.append(run)
+
+    def get_last_successful_run(self, run_type: RunType) -> IngestionRun | None:
+        if run_type == RunType.DART_CORP_SYNC:
+            return self.last_successful_corp_run
+        return None
 
     def get_active_stocks(self, market: Market | None = None) -> list[Stock]:
         stocks = [
@@ -213,6 +211,42 @@ def test_sync_dart_corp_master_matches_active_tickers_and_reports_gaps() -> None
     assert storage.runs[-1].status == RunStatus.SUCCESS
 
 
+def test_sync_dart_corp_master_skips_when_previous_success_recorded() -> None:
+    storage = MockStorage()
+    storage.last_successful_corp_run = IngestionRun(
+        run_type=RunType.DART_CORP_SYNC,
+        status=RunStatus.SUCCESS,
+    )
+    provider = _ExhaustedCorpProvider()
+
+    result = sync_dart_corp_master(provider=provider, storage=storage)
+
+    assert result.error is None
+    assert provider.calls == 0
+    assert storage.saved_records == []
+    assert storage.runs[-1].status == RunStatus.SUCCESS
+    assert storage.runs[-1].counts["skipped_existing"] == 1
+
+
+def test_sync_dart_corp_master_force_re_runs_even_with_previous_success() -> None:
+    storage = MockStorage()
+    storage.last_successful_corp_run = IngestionRun(
+        run_type=RunType.DART_CORP_SYNC,
+        status=RunStatus.SUCCESS,
+    )
+
+    result = sync_dart_corp_master(
+        provider=MockCorpCodeProvider(),
+        storage=storage,
+        force=True,
+    )
+
+    assert result.error is None
+    assert result.total_records == 2
+    assert storage.runs[-1].status == RunStatus.SUCCESS
+    assert storage.runs[-1].counts.get("skipped_existing") is None
+
+
 class _ExhaustedCorpProvider:
     """Minimal provider that returns an ``all_disabled`` exhaustion once."""
 
@@ -253,7 +287,7 @@ def test_sync_dart_corp_master_records_executor_metrics_on_failure() -> None:
                     (
                         "<result><status>010</status>"
                         "<message>등록되지 않은 키입니다.</message></result>"
-                    ).encode("utf-8")
+                    ).encode()
                 ],
                 [],
             ),

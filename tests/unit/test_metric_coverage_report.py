@@ -2,7 +2,11 @@ from datetime import date
 from decimal import Decimal
 
 from krx_collector.domain.enums import Market, Source
-from krx_collector.domain.models import DartFinancialStatementLine, MetricCatalogEntry, StockMetricFact
+from krx_collector.domain.models import (
+    DartFinancialStatementLine,
+    MetricCatalogEntry,
+    StockMetricFact,
+)
 from krx_collector.service.report_metric_coverage import build_metric_coverage_report
 from krx_collector.util.time import now_kst
 
@@ -11,7 +15,9 @@ class MockCoverageStorage:
     def get_metric_catalog_entries(self) -> list[MetricCatalogEntry]:
         return [
             MetricCatalogEntry("revenue", "매출액", "financial", "KRW", "매출액"),
-            MetricCatalogEntry("weighted_avg_shares", "가중평균주식수", "xbrl", "shares", "가중평균주식수"),
+            MetricCatalogEntry(
+                "weighted_avg_shares", "가중평균주식수", "xbrl", "shares", "가중평균주식수"
+            ),
         ]
 
     def get_dart_financial_statement_raw(

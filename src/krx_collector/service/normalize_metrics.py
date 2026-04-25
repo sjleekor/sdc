@@ -29,7 +29,9 @@ def _default_metric_catalog() -> list[MetricCatalogEntry]:
     return [
         MetricCatalogEntry("revenue", "매출액", "financial", "KRW", "손익계산서 매출액"),
         MetricCatalogEntry("cogs", "매출원가", "financial", "KRW", "손익계산서 매출원가"),
-        MetricCatalogEntry("gross_profit", "매출총이익", "financial", "KRW", "손익계산서 매출총이익"),
+        MetricCatalogEntry(
+            "gross_profit", "매출총이익", "financial", "KRW", "손익계산서 매출총이익"
+        ),
         MetricCatalogEntry("sga", "판매비와관리비", "financial", "KRW", "판매비와관리비"),
         MetricCatalogEntry("operating_income", "영업이익", "financial", "KRW", "영업이익"),
         MetricCatalogEntry("net_income", "당기순이익", "financial", "KRW", "당기순이익"),
@@ -73,7 +75,9 @@ def _default_metric_catalog() -> list[MetricCatalogEntry]:
         ),
         MetricCatalogEntry("issued_shares", "발행주식수", "share_count", "shares", "발행주식 총수"),
         MetricCatalogEntry("treasury_shares", "자기주식수", "share_count", "shares", "자기주식 수"),
-        MetricCatalogEntry("dps", "주당 현금배당금", "shareholder_return", "KRW", "보통주 기준 DPS"),
+        MetricCatalogEntry(
+            "dps", "주당 현금배당금", "shareholder_return", "KRW", "보통주 기준 DPS"
+        ),
         MetricCatalogEntry(
             "interest_received",
             "이자수익",
@@ -161,7 +165,9 @@ def _default_metric_catalog() -> list[MetricCatalogEntry]:
     ]
 
 
-def _financial_rule(metric_code: str, account_id: str, sj_div: str, priority: int, fs_div: str) -> MetricMappingRule:
+def _financial_rule(
+    metric_code: str, account_id: str, sj_div: str, priority: int, fs_div: str
+) -> MetricMappingRule:
     return MetricMappingRule(
         rule_code=f"fin.{metric_code}.{fs_div.lower()}.{sj_div.lower()}.{account_id}",
         metric_code=metric_code,
@@ -359,9 +365,8 @@ def _matches_financial(rule: MetricMappingRule, row: DartFinancialStatementLine)
 
 
 def _matches_share_count(rule: MetricMappingRule, row: DartShareCountLine) -> bool:
-    return (
-        rule.source_table == "dart_share_count_raw"
-        and (not rule.row_name or row.se == rule.row_name)
+    return rule.source_table == "dart_share_count_raw" and (
+        not rule.row_name or row.se == rule.row_name
     )
 
 
@@ -382,7 +387,11 @@ def _matches_xbrl(rule: MetricMappingRule, row: DartXbrlFactLine) -> bool:
     return (
         rule.source_table == "dart_xbrl_fact_raw"
         and (not rule.account_id or row.concept_id == rule.account_id)
-        and (not rule.account_nm or row.label_ko == rule.account_nm or row.concept_name == rule.account_nm)
+        and (
+            not rule.account_nm
+            or row.label_ko == rule.account_nm
+            or row.concept_name == rule.account_nm
+        )
     )
 
 
@@ -437,15 +446,15 @@ def normalize_stock_metrics(
 
         corp_rows = storage.get_dart_corp_master(active_only=True, tickers=tickers)
         corp_by_ticker = {
-            corp.ticker: corp
-            for corp in corp_rows
-            if corp.ticker and corp.market is not None
+            corp.ticker: corp for corp in corp_rows if corp.ticker and corp.market is not None
         }
         result.targets_processed = len(corp_by_ticker)
 
         financial_rows = storage.get_dart_financial_statement_raw(bsns_years, reprt_codes, tickers)
         share_count_rows = storage.get_dart_share_count_raw(bsns_years, reprt_codes, tickers)
-        shareholder_return_rows = storage.get_dart_shareholder_return_raw(bsns_years, reprt_codes, tickers)
+        shareholder_return_rows = storage.get_dart_shareholder_return_raw(
+            bsns_years, reprt_codes, tickers
+        )
         xbrl_rows = storage.get_dart_xbrl_fact_raw(bsns_years, reprt_codes, tickers)
 
         rules_by_source: dict[str, list[MetricMappingRule]] = {}
@@ -499,7 +508,9 @@ def normalize_stock_metrics(
                 _matches_xbrl,
                 lambda row: (row.ticker, row.bsns_year, row.reprt_code, ""),
                 lambda row: f"{row.rcept_no}:{row.context_id}:{row.concept_id}",
-                lambda row: row.instant_date or row.period_end or _infer_period_end(row.bsns_year, row.reprt_code),
+                lambda row: row.instant_date
+                or row.period_end
+                or _infer_period_end(row.bsns_year, row.reprt_code),
                 _xbrl_candidate_rank,
             ),
         ]
@@ -542,7 +553,11 @@ def normalize_stock_metrics(
                         value_numeric=value_numeric,
                         value_text=str(value_numeric),
                         unit=next(
-                            (entry.unit for entry in catalog if entry.metric_code == rule.metric_code),
+                            (
+                                entry.unit
+                                for entry in catalog
+                                if entry.metric_code == rule.metric_code
+                            ),
                             "",
                         ),
                         source_table=source_table,
@@ -553,7 +568,10 @@ def normalize_stock_metrics(
                     fact_key = (ticker, rule.metric_code, bsns_year, reprt_code)
                     candidate_rank = candidate_rank_builder(row)
                     current = selected_facts.get(fact_key)
-                    if current is None or (rule.priority, candidate_rank) < (current[0], current[1]):
+                    if current is None or (rule.priority, candidate_rank) < (
+                        current[0],
+                        current[1],
+                    ):
                         selected_facts[fact_key] = (rule.priority, candidate_rank, fact)
 
         facts = [fact for _, _, fact in selected_facts.values()]

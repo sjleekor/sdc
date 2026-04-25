@@ -20,7 +20,6 @@ import uuid
 from datetime import date
 
 import FinanceDataReader as fdr
-import pandas as pd
 
 from krx_collector.domain.enums import ListingStatus, Market, Source
 from krx_collector.domain.models import Stock, StockUniverseSnapshot, UniverseResult
@@ -69,7 +68,7 @@ class FdrUniverseProvider:
                     ticker = str(row.get("Code", ""))
                     if not ticker:
                         continue
-                        
+
                     name = str(row.get("Name", ""))
 
                     stock = Stock(

@@ -6,7 +6,7 @@ import logging
 import random
 import time
 from collections.abc import Callable, Mapping
-from typing import Any, TypeVar
+from typing import Any
 
 from krx_collector.domain.enums import RunStatus
 from krx_collector.domain.models import IngestionRun
@@ -14,8 +14,6 @@ from krx_collector.ports.storage import Storage
 from krx_collector.util.time import now_kst
 
 logger = logging.getLogger(__name__)
-
-_T = TypeVar("_T")
 
 
 def sleep_with_jitter(
@@ -45,8 +43,8 @@ def should_retry_opendart_result(result: object) -> bool:
     )
 
 
-def call_with_retry(
-    operation: Callable[[], _T],
+def call_with_retry[T](
+    operation: Callable[[], T],
     *,
     request_label: str,
     max_attempts: int = 3,
@@ -54,13 +52,13 @@ def call_with_retry(
     backoff_factor: float = 2.0,
     sleep_fn: Callable[[float], None] = time.sleep,
     logger_instance: logging.Logger | None = None,
-    should_retry_result: Callable[[_T], bool] | None = None,
-) -> _T:
+    should_retry_result: Callable[[T], bool] | None = None,
+) -> T:
     """Execute one provider call with retry on exceptions or ``result.error``."""
     active_logger = logger_instance or logger
     delay = base_delay_seconds
     last_exception: BaseException | None = None
-    last_result: _T | None = None
+    last_result: T | None = None
 
     for attempt in range(1, max_attempts + 1):
         try:
@@ -84,9 +82,7 @@ def call_with_retry(
         last_result = result
         error = getattr(result, "error", None)
         retry_result = (
-            should_retry_result(result)
-            if should_retry_result is not None
-            else bool(error)
+            should_retry_result(result) if should_retry_result is not None else bool(error)
         )
         if retry_result and attempt < max_attempts:
             retry_delay_seconds = getattr(result, "retry_after_seconds", None)

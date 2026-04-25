@@ -232,9 +232,7 @@ def parse_xbrl_zip_response(
         contexts = _parse_contexts(root)
         units = _parse_units(root)
         labels = (
-            _parse_label_ko_map(archive.read(label_ko_name), prefix_by_uri)
-            if label_ko_name
-            else {}
+            _parse_label_ko_map(archive.read(label_ko_name), prefix_by_uri) if label_ko_name else {}
         )
 
         fetched_at = now_kst()
@@ -370,13 +368,14 @@ class OpenDartXbrlProvider:
             )
             return apply_call_result_meta(result, call_result)
         except zipfile.BadZipFile:
+            preview = (call_result.payload or b"")[:120]
             return DartXbrlResult(
                 corp_code=corp.corp_code,
                 ticker=corp.ticker or "",
                 bsns_year=bsns_year,
                 reprt_code=reprt_code,
                 rcept_no=rcept_no,
-                error=f"OpenDART returned an invalid ZIP payload: {(call_result.payload or b'')[:120]!r}",
+                error=f"OpenDART returned an invalid ZIP payload: {preview!r}",
             )
         except Exception as exc:
             return DartXbrlResult(

@@ -29,7 +29,9 @@ def build_operating_document_key(
 ) -> str:
     """Build a stable document key from core identity fields."""
     digest = hashlib.sha256(
-        "|".join([ticker, sector_key, document_type, title, period_end, content_text]).encode("utf-8")
+        "|".join([ticker, sector_key, document_type, title, period_end, content_text]).encode(
+            "utf-8"
+        )
     ).hexdigest()
     return digest
 
@@ -58,7 +60,9 @@ def process_operating_document(
     try:
         extractor = registry.get(document.sector_key)
         if extractor is None:
-            raise RuntimeError(f"No operating extractor registered for sector_key={document.sector_key!r}.")
+            raise RuntimeError(
+                f"No operating extractor registered for sector_key={document.sector_key!r}."
+            )
 
         result.document_upsert = storage.upsert_operating_source_documents([document])
         result.documents_processed = result.document_upsert.updated

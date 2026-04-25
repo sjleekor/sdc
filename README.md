@@ -32,7 +32,8 @@ uv sync
 # 2. 환경 변수 설정
 cp .env.example .env
 # .env 파일을 열어 데이터베이스 계정 정보 및 설정을 수정하세요
-# `dart`/`metrics` 계열 명령은 OPENDART_API_KEY 또는 OPENDART_API_KEYS가 반드시 설정되어야 동작합니다
+# `dart` 계열 명령은 OPENDART_API_KEY 또는 OPENDART_API_KEYS가 반드시 설정되어야 동작합니다
+# `metrics` 계열 명령은 별도 API 호출 없이 이미 적재된 raw 데이터를 정규화합니다
 
 # 3. 데이터베이스 스키마 초기화
 uv run krx-collector db init
@@ -51,6 +52,11 @@ uv run krx-collector validate --date 2025-01-15 --market all
 ```
 
 ### 계정 / 재무 / XBRL 파이프라인 (OpenDART)
+
+OpenDART 명령은 `.env`의 `OPENDART_API_KEY` 단일 키 또는 `OPENDART_API_KEYS` 쉼표 구분 멀티 키를 사용합니다.
+두 값을 모두 설정하면 중복을 제거한 뒤 `OPENDART_API_KEYS` 순서 다음에 `OPENDART_API_KEY`를 병합합니다.
+멀티 키 실행 시 공통 executor가 키별 rate-limit, 일시 오류, 비활성 키 상태를 분류하고 가능한 경우 다른 키로 자동 전환합니다.
+각 sync 명령은 동일 요청 결과가 이미 DB에 있으면 OpenDART를 다시 호출하지 않고 건너뜁니다.
 
 ```bash
 # 7. OpenDART corp_code 마스터 동기화 및 ticker 매핑 검증
@@ -116,7 +122,15 @@ uv run krx-collector operating process-document \
 - `order_intake_amount`
 - `order_backlog_amount`
 
-신규 파이프라인들은 외부 API 장애 시 자동 재시도/rate-limit/jitter를 수행하며, 최종적으로 일부 요청이 실패해도 파이프라인은 정상 종료됩니다. 이 경우 `ingestion_runs.status`가 `partial`로 기록되고 `counts.error_count` / `partial_failure_count` / `completed_request_count` 값이 함께 저장됩니다. 해석/복구 절차는 [docs/operations.md](docs/operations.md)를 참고하세요.
+신규 파이프라인들은 외부 API 장애 시 자동 재시도/rate-limit/jitter를 수행하며, 최종적으로 일부 요청이 실패해도 파이프라인은 정상 종료됩니다. 이 경우 `ingestion_runs.status`가 `partial`로 기록되고 `counts.error_count` / `partial_failure_count` / `completed_request_count` 값이 함께 저장됩니다. OpenDART 실행은 추가로 `opendart_key_count`, `key_rotation_count`, `rate_limit_count`, `key_disable_count`, `all_rate_limited_count`, `all_disabled_count`, `request_invalid_count`, `retryable_error_count`, `terminal_error_count`, `status_<code>_count` 같은 키/상태코드 메트릭을 기록합니다. 해석/복구 절차는 [docs/operations.md](docs/operations.md)를 참고하세요.
+
+> **중복 실행 방지**
+> - `dart sync-corp`: `dart_corp_master`에 데이터가 있으면 corp-code ZIP 다운로드를 건너뜁니다.
+> - `dart sync-financials`: `(corp_code, bsns_year, reprt_code, fs_div)` raw 행이 있으면 해당 재무제표 요청을 건너뜁니다.
+> - `dart sync-share-info`: 주식수, 배당, 자사주 각각에 대해 해당 raw 행이 있으면 해당 요청만 건너뜁니다.
+> - `dart sync-xbrl`: `(corp_code, bsns_year, reprt_code, rcept_no)` XBRL 문서가 있으면 ZIP 다운로드/파싱을 건너뜁니다.
+> - `metrics normalize`: 이미 같은 `(ticker, metric_code, bsns_year, reprt_code)` canonical fact가 있으면 다시 쓰지 않습니다.
+> - `metrics coverage-report`: read-only 리포트라 외부 다운로드와 DB 쓰기를 하지 않습니다.
 
 > **백필 모드 요약**
 > - **기본 모드** (gap detection): 거래일 캘린더 기준으로 누락된 모든 영업일을 찾아 채웁니다. 최초 백필이나 히스토리 보강에 적합합니다. 각 티커마다 `MIN(trade_date)`로 자동 클램핑되어 상장 이전(또는 pykrx가 제공하지 못하는 과거) 구간을 매번 재요청하지 않습니다.
@@ -276,7 +290,7 @@ krx-data-pipeline/
 │   │                                 #   operating_extractors
 │   ├── adapters/                     # Provider 구현체
 │   │                                 #   universe_fdr / universe_pykrx / prices_pykrx
-│   │                                 #   opendart_corp / opendart_financials /
+│   │                                 #   opendart_common / opendart_corp / opendart_financials /
 │   │                                 #   opendart_share_info / opendart_xbrl
 │   │                                 #   flows_pykrx / operating_extractors
 │   ├── service/                      # 유스케이스 오케스트레이션
@@ -296,6 +310,7 @@ krx-data-pipeline/
 └── tests/
     ├── unit/                         # 파서 / 매핑 / 재시도 / pipeline util 단위 테스트
     ├── integration/                  # DB 연결, OHLCV end-to-end, 운영 KPI round-trip
+    ├── helpers/                      # 테스트용 fake provider/executor 헬퍼
     └── fixtures/                     # 섹터별 KPI 샘플 문서 등 테스트 픽스처
 ```
 

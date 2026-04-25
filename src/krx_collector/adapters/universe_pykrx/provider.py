@@ -55,7 +55,9 @@ class PykrxUniverseProvider:
             date_str = reference_date.strftime("%Y%m%d")
 
             for market in markets:
-                logger.info("Fetching pykrx universe for market: %s as_of: %s", market.value, date_str)
+                logger.info(
+                    "Fetching pykrx universe for market: %s as_of: %s", market.value, date_str
+                )
                 # market argument expects 'KOSPI' or 'KOSDAQ'
                 tickers = stock.get_market_ticker_list(date_str, market=market.value)
 

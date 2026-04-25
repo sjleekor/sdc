@@ -110,7 +110,7 @@ def backfill_daily_prices(
             result.tickers_processed += 1
 
             # Determine start date
-            resolved_start = start or date(2000, 1, 1) # arbitrary early date for pykrx
+            resolved_start = start or date(2000, 1, 1)  # arbitrary early date for pykrx
 
             if incremental:
                 # Incremental mode: start strictly after the last stored
@@ -122,7 +122,9 @@ def backfill_daily_prices(
                     if next_date > resolved_start:
                         logger.debug(
                             "Incremental: %s starts at %s (after last stored %s)",
-                            ticker, next_date, max_stored,
+                            ticker,
+                            next_date,
+                            max_stored,
                         )
                         resolved_start = next_date
             else:
@@ -133,14 +135,18 @@ def backfill_daily_prices(
                 if min_stored and min_stored > resolved_start:
                     logger.debug(
                         "Clamping start for %s from %s to %s (earliest stored trade date)",
-                        ticker, resolved_start, min_stored,
+                        ticker,
+                        resolved_start,
+                        min_stored,
                     )
                     resolved_start = min_stored
 
             if resolved_start > resolved_end:
                 logger.info(
                     "Nothing to fetch for %s (start=%s > end=%s). Skipping.",
-                    ticker, resolved_start, resolved_end,
+                    ticker,
+                    resolved_start,
+                    resolved_end,
                 )
                 continue
             try:
@@ -150,9 +156,7 @@ def backfill_daily_prices(
                     ranges.append((resolved_start, resolved_end))
                 else:
                     # 1. Query missing days to optimize fetching
-                    missing_days = storage.query_missing_days(
-                        ticker, resolved_start, resolved_end
-                    )
+                    missing_days = storage.query_missing_days(ticker, resolved_start, resolved_end)
 
                     if not missing_days:
                         logger.debug("No missing days for %s. Skipping.", ticker)
@@ -176,10 +180,7 @@ def backfill_daily_prices(
                     current_start = r_start
                     while current_start <= r_end:
                         # Chunk by 1 year to avoid overloading the pykrx API
-                        current_end = min(
-                            current_start + timedelta(days=365),
-                            r_end
-                        )
+                        current_end = min(current_start + timedelta(days=365), r_end)
 
                         logger.info(
                             "Backfilling %s from %s to %s", ticker, current_start, current_end
@@ -187,10 +188,7 @@ def backfill_daily_prices(
 
                         try:
                             fetch_res = _fetch_with_retry(
-                                ticker,
-                                stock.market,
-                                current_start,
-                                current_end
+                                ticker, stock.market, current_start, current_end
                             )
                         except Exception as e:
                             fetch_res = DailyPriceResult(ticker=ticker, error=str(e))
@@ -200,7 +198,8 @@ def backfill_daily_prices(
                         if long_rest_interval > 0 and api_requests_count % long_rest_interval == 0:
                             logger.info(
                                 "Reached %d requests. Taking a long rest for %.1f seconds...",
-                                api_requests_count, long_rest_seconds
+                                api_requests_count,
+                                long_rest_seconds,
                             )
                             time.sleep(long_rest_seconds)
 

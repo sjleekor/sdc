@@ -11,23 +11,23 @@ from __future__ import annotations
 from datetime import date
 from typing import Protocol, runtime_checkable
 
-from krx_collector.domain.enums import Market
+from krx_collector.domain.enums import Market, RunType
 from krx_collector.domain.models import (
     DailyBar,
     DartCorp,
     DartFinancialStatementLine,
+    DartShareCountLine,
+    DartShareholderReturnLine,
+    DartXbrlDocument,
+    DartXbrlFactLine,
+    IngestionRun,
+    MetricCatalogEntry,
+    MetricMappingRule,
     OperatingMetricFact,
     OperatingSourceDocument,
     SecurityFlowLine,
-    DartXbrlDocument,
-    DartXbrlFactLine,
-    MetricCatalogEntry,
-    MetricMappingRule,
-    StockMetricFact,
-    DartShareCountLine,
-    DartShareholderReturnLine,
-    IngestionRun,
     Stock,
+    StockMetricFact,
     StockUniverseSnapshot,
     UpsertResult,
 )
@@ -98,6 +98,47 @@ class Storage(Protocol):
         Returns:
             List of OpenDART corp-code rows.
         """
+        ...
+
+    def get_last_successful_run(self, run_type: RunType) -> IngestionRun | None:
+        """Return the most recent SUCCESS-status run for the given run_type, or None."""
+        ...
+
+    def get_existing_dart_financial_statement_keys(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        fs_divs: list[str],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int, str, str]]:
+        """Return (corp_code, bsns_year, reprt_code, fs_div) tuples already present in raw."""
+        ...
+
+    def get_existing_dart_share_count_keys(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int, str]]:
+        """Return (corp_code, bsns_year, reprt_code) tuples already present in share-count raw."""
+        ...
+
+    def get_existing_dart_shareholder_return_keys(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int, str, str]]:
+        """Return (corp_code, bsns_year, reprt_code, statement_type) tuples already present."""
+        ...
+
+    def get_existing_dart_xbrl_document_keys(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int, str, str]]:
+        """Return (corp_code, bsns_year, reprt_code, rcept_no) tuples already parsed."""
         ...
 
     def upsert_dart_financial_statement_raw(

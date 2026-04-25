@@ -245,12 +245,17 @@ class PykrxFlowProvider:
         try:
             start_str = start.strftime("%Y%m%d")
             end_str = end.strftime("%Y%m%d")
-            status_df = self._call_with_timeout(stock.get_shorting_status_by_date, start_str, end_str, ticker)
-            balance_df = self._call_with_timeout(stock.get_shorting_balance_by_date, start_str, end_str, ticker)
+            status_df = self._call_with_timeout(
+                stock.get_shorting_status_by_date, start_str, end_str, ticker
+            )
+            balance_df = self._call_with_timeout(
+                stock.get_shorting_balance_by_date, start_str, end_str, ticker
+            )
             records = parse_shorting_frames(status_df, balance_df, ticker, market)
             return SecurityFlowFetchResult(
                 records=records,
-                no_data=(status_df is None or status_df.empty) and (balance_df is None or balance_df.empty),
+                no_data=(status_df is None or status_df.empty)
+                and (balance_df is None or balance_df.empty),
             )
         except Exception as exc:
             logger.exception("Failed to fetch shorting metrics for %s", ticker)

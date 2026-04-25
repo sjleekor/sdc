@@ -525,8 +525,7 @@ def _fetch_remote_rows(
 def _ensure_daily_ohlcv_staging_table(local_conn: Any) -> None:
     """Create the temp staging table used by ``COPY``."""
     with local_conn.cursor() as cur:
-        cur.execute(
-            f"""
+        cur.execute(f"""
             CREATE TEMP TABLE IF NOT EXISTS {DAILY_OHLCV_STAGING_TABLE} (
                 trade_date  DATE        NOT NULL,
                 ticker      TEXT        NOT NULL,
@@ -539,8 +538,7 @@ def _ensure_daily_ohlcv_staging_table(local_conn: Any) -> None:
                 source      TEXT        NOT NULL,
                 fetched_at  TIMESTAMPTZ NOT NULL
             ) ON COMMIT DELETE ROWS
-            """
-        )
+            """)
 
 
 def _copy_daily_ohlcv_rows_to_staging(*, local_conn: Any, rows: list[tuple[Any, ...]]) -> None:
@@ -566,23 +564,20 @@ def _copy_daily_ohlcv_rows_to_staging(*, local_conn: Any, rows: list[tuple[Any, 
 def _insert_daily_ohlcv_from_staging(local_conn: Any) -> None:
     """Insert staged rows into an empty ``daily_ohlcv`` target."""
     with local_conn.cursor() as cur:
-        cur.execute(
-            f"""
+        cur.execute(f"""
             INSERT INTO daily_ohlcv (
                 trade_date, ticker, market, open, high, low, close, volume, source, fetched_at
             )
             SELECT
                 trade_date, ticker, market, open, high, low, close, volume, source, fetched_at
             FROM {DAILY_OHLCV_STAGING_TABLE}
-            """
-        )
+            """)
 
 
 def _merge_daily_ohlcv_from_staging(local_conn: Any) -> None:
     """Merge staged ``daily_ohlcv`` rows into the target table."""
     with local_conn.cursor() as cur:
-        cur.execute(
-            f"""
+        cur.execute(f"""
             INSERT INTO daily_ohlcv (
                 trade_date, ticker, market, open, high, low, close, volume, source, fetched_at
             )
@@ -598,8 +593,7 @@ def _merge_daily_ohlcv_from_staging(local_conn: Any) -> None:
                 source = EXCLUDED.source,
                 fetched_at = EXCLUDED.fetched_at
             WHERE daily_ohlcv.fetched_at <= EXCLUDED.fetched_at
-            """
-        )
+            """)
 
 
 def _serialize_copy_row(row: tuple[Any, ...]) -> list[Any]:

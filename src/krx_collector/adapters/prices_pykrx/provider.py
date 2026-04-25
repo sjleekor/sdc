@@ -53,7 +53,9 @@ class PykrxDailyPriceProvider:
             start_str = start.strftime("%Y%m%d")
             end_str = end.strftime("%Y%m%d")
 
-            logger.debug("Fetching OHLCV for %s (%s) from %s to %s", ticker, market.value, start_str, end_str)
+            logger.debug(
+                "Fetching OHLCV for %s (%s) from %s to %s", ticker, market.value, start_str, end_str
+            )
             df = stock.get_market_ohlcv_by_date(start_str, end_str, ticker)
 
             if df is None or df.empty:
@@ -63,7 +65,7 @@ class PykrxDailyPriceProvider:
             fetched_at = now_kst()
 
             for trade_date, row in df.iterrows():
-                trade_date_val = trade_date.date() if hasattr(trade_date, "date") else trade_date # type: ignore
+                trade_date_val = trade_date.date() if hasattr(trade_date, "date") else trade_date  # type: ignore
 
                 bars.append(
                     DailyBar(

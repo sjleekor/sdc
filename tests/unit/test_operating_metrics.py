@@ -20,9 +20,11 @@ from krx_collector.service.process_operating_document import (
 )
 from krx_collector.util.time import now_kst
 
-
 FIXTURE_PATH = (
-    Path(__file__).resolve().parent.parent / "fixtures" / "operating" / "shipbuilding_defense_sample.txt"
+    Path(__file__).resolve().parent.parent
+    / "fixtures"
+    / "operating"
+    / "shipbuilding_defense_sample.txt"
 )
 
 
@@ -78,7 +80,9 @@ class MockOperatingStorage:
     def record_run(self, run: IngestionRun) -> None:
         self.runs.append(run)
 
-    def upsert_operating_source_documents(self, records: list[OperatingSourceDocument]) -> UpsertResult:
+    def upsert_operating_source_documents(
+        self, records: list[OperatingSourceDocument]
+    ) -> UpsertResult:
         self.documents.extend(records)
         return UpsertResult(updated=len(records))
 

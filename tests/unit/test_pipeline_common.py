@@ -111,6 +111,15 @@ class PartialFinancialStorage(RecordingStorage):
         )
         return [corp]
 
+    def get_existing_dart_financial_statement_keys(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        fs_divs: list[str],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int, str, str]]:
+        return set()
+
     def upsert_dart_financial_statement_raw(
         self,
         records: list[DartFinancialStatementLine],
@@ -276,6 +285,7 @@ def test_sync_dart_financial_statements_marks_partial_run() -> None:
     assert storage.runs[-1].counts == {
         "targets_processed": 1,
         "requests_attempted": 2,
+        "requests_skipped": 0,
         "rows_upserted": 1,
         "no_data_requests": 0,
         "error_count": 1,

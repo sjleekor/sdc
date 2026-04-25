@@ -12,23 +12,23 @@ from pathlib import Path
 
 import psycopg2.extras
 
-from krx_collector.domain.enums import ListingStatus, Market, Source
+from krx_collector.domain.enums import ListingStatus, Market, RunStatus, RunType, Source
 from krx_collector.domain.models import (
     DailyBar,
     DartCorp,
     DartFinancialStatementLine,
+    DartShareCountLine,
+    DartShareholderReturnLine,
+    DartXbrlDocument,
+    DartXbrlFactLine,
+    IngestionRun,
+    MetricCatalogEntry,
+    MetricMappingRule,
     OperatingMetricFact,
     OperatingSourceDocument,
     SecurityFlowLine,
-    DartXbrlDocument,
-    DartXbrlFactLine,
-    MetricCatalogEntry,
-    MetricMappingRule,
-    StockMetricFact,
-    DartShareCountLine,
-    DartShareholderReturnLine,
-    IngestionRun,
     Stock,
+    StockMetricFact,
     StockUniverseSnapshot,
     UpsertResult,
 )
@@ -83,7 +83,13 @@ class PostgresStorage:
                 # 1. Insert snapshot metadata
                 cur.execute(
                     """
-                    INSERT INTO stock_master_snapshot (snapshot_id, as_of_date, source, fetched_at, record_count)
+                    INSERT INTO stock_master_snapshot (
+                        snapshot_id,
+                        as_of_date,
+                        source,
+                        fetched_at,
+                        record_count
+                    )
                     VALUES (%s, %s, %s, %s, %s)
                     """,
                     (
@@ -92,7 +98,7 @@ class PostgresStorage:
                         snapshot.source.value,
                         snapshot.fetched_at,
                         snapshot.record_count,
-                    )
+                    ),
                 )
 
                 # 2. Insert snapshot items
@@ -109,12 +115,18 @@ class PostgresStorage:
                 psycopg2.extras.execute_values(
                     cur,
                     """
-                    INSERT INTO stock_master_snapshot_items (snapshot_id, ticker, market, name, status)
+                    INSERT INTO stock_master_snapshot_items (
+                        snapshot_id,
+                        ticker,
+                        market,
+                        name,
+                        status
+                    )
                     VALUES %s
                     ON CONFLICT (snapshot_id, ticker, market) DO NOTHING
                     """,
                     snapshot_items_args,
-                    page_size=1000
+                    page_size=1000,
                 )
 
                 # 3. Upsert stock_master
@@ -148,7 +160,7 @@ class PostgresStorage:
                         updated_at = now()
                     """,
                     master_args,
-                    page_size=1000
+                    page_size=1000,
                 )
                 # Approximation: we can just count total as updated for upsert
                 result.updated = cur.rowcount
@@ -163,7 +175,7 @@ class PostgresStorage:
                 if market:
                     cur.execute(
                         "SELECT * FROM stock_master WHERE status = 'ACTIVE' AND market = %s",
-                        (market.value,)
+                        (market.value,),
                     )
                 else:
                     cur.execute("SELECT * FROM stock_master WHERE status = 'ACTIVE'")
@@ -278,6 +290,149 @@ class PostgresStorage:
                     )
         return records
 
+    def get_existing_dart_financial_statement_keys(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        fs_divs: list[str],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int, str, str]]:
+        """Return (corp_code, bsns_year, reprt_code, fs_div) tuples already present in raw."""
+        if not bsns_years or not reprt_codes or not fs_divs:
+            return set()
+        sql = """
+            SELECT DISTINCT corp_code, bsns_year, reprt_code, fs_div
+            FROM dart_financial_statement_raw
+            WHERE bsns_year = ANY(%s)
+              AND reprt_code = ANY(%s)
+              AND fs_div = ANY(%s)
+        """
+        params: list[object] = [bsns_years, reprt_codes, fs_divs]
+        if corp_codes:
+            sql += " AND corp_code = ANY(%s)"
+            params.append(corp_codes)
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, tuple(params))
+                return {(row[0], row[1], row[2], row[3]) for row in cur.fetchall()}
+
+    def get_existing_dart_share_count_keys(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int, str]]:
+        """Return (corp_code, bsns_year, reprt_code) tuples already present."""
+        if not bsns_years or not reprt_codes:
+            return set()
+        sql = """
+            SELECT DISTINCT corp_code, bsns_year, reprt_code
+            FROM dart_share_count_raw
+            WHERE bsns_year = ANY(%s)
+              AND reprt_code = ANY(%s)
+        """
+        params: list[object] = [bsns_years, reprt_codes]
+        if corp_codes:
+            sql += " AND corp_code = ANY(%s)"
+            params.append(corp_codes)
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, tuple(params))
+                return {(row[0], row[1], row[2]) for row in cur.fetchall()}
+
+    def get_existing_dart_shareholder_return_keys(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int, str, str]]:
+        """Return (corp_code, bsns_year, reprt_code, statement_type) tuples already present."""
+        if not bsns_years or not reprt_codes:
+            return set()
+        sql = """
+            SELECT DISTINCT corp_code, bsns_year, reprt_code, statement_type
+            FROM dart_shareholder_return_raw
+            WHERE bsns_year = ANY(%s)
+              AND reprt_code = ANY(%s)
+        """
+        params: list[object] = [bsns_years, reprt_codes]
+        if corp_codes:
+            sql += " AND corp_code = ANY(%s)"
+            params.append(corp_codes)
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, tuple(params))
+                return {(row[0], row[1], row[2], row[3]) for row in cur.fetchall()}
+
+    def get_existing_dart_xbrl_document_keys(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int, str, str]]:
+        """Return (corp_code, bsns_year, reprt_code, rcept_no) tuples already parsed."""
+        if not bsns_years or not reprt_codes:
+            return set()
+        sql = """
+            SELECT corp_code, bsns_year, reprt_code, rcept_no
+            FROM dart_xbrl_document
+            WHERE bsns_year = ANY(%s)
+              AND reprt_code = ANY(%s)
+        """
+        params: list[object] = [bsns_years, reprt_codes]
+        if corp_codes:
+            sql += " AND corp_code = ANY(%s)"
+            params.append(corp_codes)
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, tuple(params))
+                return {(row[0], row[1], row[2], row[3]) for row in cur.fetchall()}
+
+    def get_last_successful_run(self, run_type: RunType) -> IngestionRun | None:
+        """Return the most recent SUCCESS-status run for the given run_type, or None."""
+        import json
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        run_id,
+                        run_type,
+                        started_at,
+                        ended_at,
+                        status,
+                        params,
+                        counts,
+                        error_summary
+                    FROM ingestion_runs
+                    WHERE run_type = %s
+                      AND status = %s
+                    ORDER BY started_at DESC
+                    LIMIT 1
+                    """,
+                    (run_type.value, RunStatus.SUCCESS.value),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                params = (
+                    row[5] if isinstance(row[5], dict) else (json.loads(row[5]) if row[5] else {})
+                )
+                counts = (
+                    row[6] if isinstance(row[6], dict) else (json.loads(row[6]) if row[6] else {})
+                )
+                return IngestionRun(
+                    run_id=str(row[0]),
+                    run_type=RunType(row[1]),
+                    started_at=row[2],
+                    ended_at=row[3],
+                    status=RunStatus(row[4]),
+                    params=params,
+                    counts=counts,
+                    error_summary=row[7],
+                )
+
     def upsert_dart_financial_statement_raw(
         self,
         records: list[DartFinancialStatementLine],
@@ -366,7 +521,16 @@ class PostgresStorage:
                         raw_payload
                     )
                     VALUES %s
-                    ON CONFLICT (corp_code, bsns_year, reprt_code, fs_div, sj_div, account_id, ord, rcept_no)
+                    ON CONFLICT (
+                        corp_code,
+                        bsns_year,
+                        reprt_code,
+                        fs_div,
+                        sj_div,
+                        account_id,
+                        ord,
+                        rcept_no
+                    )
                     DO UPDATE SET
                         ticker = EXCLUDED.ticker,
                         sj_nm = EXCLUDED.sj_nm,
@@ -1130,14 +1294,12 @@ class PostgresStorage:
         records: list[MetricMappingRule] = []
         with get_connection(self._dsn) as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-                cur.execute(
-                    """
+                cur.execute("""
                     SELECT *
                     FROM metric_mapping_rule
                     WHERE is_active = TRUE
                     ORDER BY priority ASC, rule_code
-                    """
-                )
+                    """)
                 for row in cur.fetchall():
                     records.append(
                         MetricMappingRule(
@@ -1451,14 +1613,12 @@ class PostgresStorage:
         records: list[MetricCatalogEntry] = []
         with get_connection(self._dsn) as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-                cur.execute(
-                    """
+                cur.execute("""
                     SELECT *
                     FROM metric_catalog
                     WHERE is_active = TRUE
                     ORDER BY metric_code
-                    """
-                )
+                    """)
                 for row in cur.fetchall():
                     records.append(
                         MetricCatalogEntry(
@@ -1587,7 +1747,18 @@ class PostgresStorage:
                 psycopg2.extras.execute_values(
                     cur,
                     """
-                    INSERT INTO daily_ohlcv (trade_date, ticker, market, open, high, low, close, volume, source, fetched_at)
+                    INSERT INTO daily_ohlcv (
+                        trade_date,
+                        ticker,
+                        market,
+                        open,
+                        high,
+                        low,
+                        close,
+                        volume,
+                        source,
+                        fetched_at
+                    )
                     VALUES %s
                     ON CONFLICT (trade_date, ticker, market) DO UPDATE SET
                         open = EXCLUDED.open,
@@ -1599,7 +1770,7 @@ class PostgresStorage:
                         fetched_at = EXCLUDED.fetched_at
                     """,
                     args,
-                    page_size=1000
+                    page_size=1000,
                 )
                 result.updated = cur.rowcount
 
@@ -1615,7 +1786,16 @@ class PostgresStorage:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO ingestion_runs (run_id, run_type, started_at, ended_at, status, params, counts, error_summary)
+                    INSERT INTO ingestion_runs (
+                        run_id,
+                        run_type,
+                        started_at,
+                        ended_at,
+                        status,
+                        params,
+                        counts,
+                        error_summary
+                    )
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (run_id) DO UPDATE SET
                         ended_at = EXCLUDED.ended_at,
@@ -1633,7 +1813,7 @@ class PostgresStorage:
                         json.dumps(run.params) if run.params else None,
                         json.dumps(run.counts) if run.counts else None,
                         run.error_summary,
-                    )
+                    ),
                 )
 
     # -- Query helpers --------------------------------------------------------
@@ -1646,13 +1826,10 @@ class PostgresStorage:
                 if market:
                     cur.execute(
                         "SELECT * FROM daily_ohlcv WHERE trade_date = %s AND market = %s",
-                        (target_date, market.value)
+                        (target_date, market.value),
                     )
                 else:
-                    cur.execute(
-                        "SELECT * FROM daily_ohlcv WHERE trade_date = %s",
-                        (target_date,)
-                    )
+                    cur.execute("SELECT * FROM daily_ohlcv WHERE trade_date = %s", (target_date,))
 
                 for row in cur.fetchall():
                     bars.append(

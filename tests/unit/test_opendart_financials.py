@@ -91,7 +91,7 @@ def test_open_dart_financial_provider_maps_rate_limited_result() -> None:
     provider = OpenDartFinancialStatementProvider(
         request_executor=FakeOpenDartExecutor(
             [
-                '{"status":"020","message":"요청 제한을 초과하였습니다."}'.encode("utf-8"),
+                '{"status":"020","message":"요청 제한을 초과하였습니다."}'.encode(),
             ]
         )
     )
@@ -108,7 +108,7 @@ def test_open_dart_financial_provider_maps_no_data_result() -> None:
     provider = OpenDartFinancialStatementProvider(
         request_executor=FakeOpenDartExecutor(
             [
-                '{"status":"013","message":"조회된 데이타가 없습니다."}'.encode("utf-8"),
+                '{"status":"013","message":"조회된 데이타가 없습니다."}'.encode(),
             ]
         )
     )
@@ -126,7 +126,7 @@ def test_open_dart_financial_provider_maps_file_missing_as_request_invalid() -> 
     provider = OpenDartFinancialStatementProvider(
         request_executor=FakeOpenDartExecutor(
             [
-                '{"status":"014","message":"파일이 존재하지 않습니다."}'.encode("utf-8"),
+                '{"status":"014","message":"파일이 존재하지 않습니다."}'.encode(),
             ]
         )
     )
@@ -141,6 +141,9 @@ def test_open_dart_financial_provider_maps_file_missing_as_request_invalid() -> 
 
 
 class MockFinancialProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def fetch_financial_statement(
         self,
         corp: DartCorp,
@@ -148,6 +151,7 @@ class MockFinancialProvider:
         reprt_code: str,
         fs_div: str,
     ) -> DartFinancialStatementResult:
+        self.calls += 1
         if fs_div == "OFS":
             return DartFinancialStatementResult(
                 corp_code=corp.corp_code,
@@ -200,6 +204,7 @@ class MockFinancialStorage:
     def __init__(self) -> None:
         self.runs: list[IngestionRun] = []
         self.upserts: list[DartFinancialStatementLine] = []
+        self.existing_financial_requests: set[tuple[str, int, str, str]] = set()
 
     def record_run(self, run: IngestionRun) -> None:
         self.runs.append(run)
@@ -213,6 +218,22 @@ class MockFinancialStorage:
         if tickers is None:
             return records
         return [record for record in records if record.ticker in tickers]
+
+    def get_existing_dart_financial_statement_keys(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        fs_divs: list[str],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int, str, str]]:
+        return {
+            key
+            for key in self.existing_financial_requests
+            if key[1] in bsns_years
+            and key[2] in reprt_codes
+            and key[3] in fs_divs
+            and (corp_codes is None or key[0] in corp_codes)
+        }
 
     def upsert_dart_financial_statement_raw(
         self,
@@ -310,8 +331,9 @@ def test_sync_dart_financial_statements_does_not_retry_request_invalid() -> None
 
 def test_sync_dart_financial_statements_counts_success_and_no_data() -> None:
     storage = MockFinancialStorage()
+    provider = MockFinancialProvider()
     result = sync_dart_financial_statements(
-        provider=MockFinancialProvider(),
+        provider=provider,
         storage=storage,
         bsns_years=[2025],
         reprt_codes=["11011"],
@@ -323,8 +345,53 @@ def test_sync_dart_financial_statements_counts_success_and_no_data() -> None:
     assert result.errors == {}
     assert result.targets_processed == 1
     assert result.requests_attempted == 2
+    assert result.requests_skipped == 0
+    assert provider.calls == 2
     assert result.rows_upserted == 1
     assert result.no_data_requests == 1
     assert len(storage.upserts) == 1
     assert storage.runs[0].run_type == RunType.DART_FINANCIAL_SYNC
     assert storage.runs[-1].status == RunStatus.SUCCESS
+
+
+def test_sync_dart_financial_statements_skips_existing_raw_request() -> None:
+    storage = MockFinancialStorage()
+    storage.existing_financial_requests.add(("00126380", 2025, "11011", "CFS"))
+    provider = MockFinancialProvider()
+
+    result = sync_dart_financial_statements(
+        provider=provider,
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        fs_divs=["CFS"],
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+    )
+
+    assert result.errors == {}
+    assert result.requests_attempted == 0
+    assert result.requests_skipped == 1
+    assert provider.calls == 0
+    assert storage.upserts == []
+
+
+def test_sync_dart_financial_statements_force_bypasses_existing_check() -> None:
+    storage = MockFinancialStorage()
+    storage.existing_financial_requests.add(("00126380", 2025, "11011", "CFS"))
+    provider = MockFinancialProvider()
+
+    result = sync_dart_financial_statements(
+        provider=provider,
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        fs_divs=["CFS"],
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+        force=True,
+    )
+
+    assert result.requests_attempted == 1
+    assert result.requests_skipped == 0
+    assert provider.calls == 1

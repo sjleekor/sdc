@@ -31,16 +31,16 @@ from krx_collector.service.sync_universe import sync_universe
 from krx_collector.service.validate import validate
 from krx_collector.util.time import now_kst
 
-
 OPERATING_FIXTURE_PATH = (
-    Path(__file__).resolve().parent.parent / "fixtures" / "operating" / "shipbuilding_defense_sample.txt"
+    Path(__file__).resolve().parent.parent
+    / "fixtures"
+    / "operating"
+    / "shipbuilding_defense_sample.txt"
 )
 
 
 class MockUniverseProvider:
-    def fetch_universe(
-        self, markets: list[Market], as_of: date | None = None
-    ) -> UniverseResult:
+    def fetch_universe(self, markets: list[Market], as_of: date | None = None) -> UniverseResult:
         records = [
             Stock(
                 ticker="000001",
@@ -206,7 +206,9 @@ def test_operating_document_pipeline(storage: PostgresStorage) -> None:
     assert result.documents_processed == 1
     assert result.facts_upserted == 2
 
-    facts = storage.get_operating_metric_facts(tickers=["009540"], sector_keys=["shipbuilding_defense"])
+    facts = storage.get_operating_metric_facts(
+        tickers=["009540"], sector_keys=["shipbuilding_defense"]
+    )
     fact_map = {fact.metric_code: fact for fact in facts}
     assert sorted(fact_map) == ["order_backlog_amount", "order_intake_amount"]
     assert str(fact_map["order_intake_amount"].value_numeric) == "3250000000000.0000"

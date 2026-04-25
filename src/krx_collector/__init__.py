@@ -4,4 +4,4 @@ Collects KOSPI / KOSDAQ stock universe and daily OHLCV history from
 FinanceDataReader and pykrx, storing results in PostgreSQL.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.4.0"

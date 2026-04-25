@@ -44,6 +44,7 @@ def _handle_db_init(args: argparse.Namespace) -> None:
     print("→ db init: initialising database schema…")
     settings = get_settings()
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
+
     storage = PostgresStorage(settings.db_dsn)
     try:
         storage.init_schema()
@@ -111,7 +112,7 @@ def _handle_dart_sync_corp(args: argparse.Namespace) -> None:
 
     provider = OpenDartCorpCodeProvider(request_executor=request_executor)
     storage = PostgresStorage(settings.db_dsn)
-    result = sync_dart_corp_master(provider=provider, storage=storage)
+    result = sync_dart_corp_master(provider=provider, storage=storage, force=args.force)
 
     if result.error:
         print(f"❌ OpenDART corp sync failed: {result.error}", file=sys.stderr)
@@ -163,6 +164,7 @@ def _handle_dart_sync_financials(args: argparse.Namespace) -> None:
         fs_divs=fs_divs,
         tickers=tickers,
         rate_limit_seconds=args.rate_limit_seconds,
+        force=args.force,
     )
 
     if result.errors:
@@ -172,6 +174,7 @@ def _handle_dart_sync_financials(args: argparse.Namespace) -> None:
 
     print(f"   - Targets processed: {result.targets_processed}")
     print(f"   - Requests attempted: {result.requests_attempted}")
+    print(f"   - Requests skipped: {result.requests_skipped}")
     print(f"   - Rows upserted: {result.rows_upserted}")
     print(f"   - No-data requests: {result.no_data_requests}")
     if result.errors:
@@ -211,6 +214,7 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
         reprt_codes=reprt_codes,
         tickers=tickers,
         rate_limit_seconds=args.rate_limit_seconds,
+        force=args.force,
     )
 
     if result.errors:
@@ -220,6 +224,7 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
 
     print(f"   - Targets processed: {result.targets_processed}")
     print(f"   - Requests attempted: {result.requests_attempted}")
+    print(f"   - Requests skipped: {result.requests_skipped}")
     print(f"   - Share count rows upserted: {result.share_count_rows_upserted}")
     print(f"   - Shareholder return rows upserted: {result.shareholder_return_rows_upserted}")
     print(f"   - No-data requests: {result.no_data_requests}")
@@ -259,6 +264,7 @@ def _handle_dart_sync_xbrl(args: argparse.Namespace) -> None:
         reprt_codes=reprt_codes,
         tickers=tickers,
         rate_limit_seconds=args.rate_limit_seconds,
+        force=args.force,
     )
 
     if result.errors:
@@ -268,6 +274,7 @@ def _handle_dart_sync_xbrl(args: argparse.Namespace) -> None:
 
     print(f"   - Targets processed: {result.targets_processed}")
     print(f"   - Requests attempted: {result.requests_attempted}")
+    print(f"   - Requests skipped: {result.requests_skipped}")
     print(f"   - Documents upserted: {result.documents_upserted}")
     print(f"   - Facts upserted: {result.facts_upserted}")
     print(f"   - No-data requests: {result.no_data_requests}")
@@ -282,9 +289,7 @@ def _handle_metrics_normalize(args: argparse.Namespace) -> None:
     reprt_codes = [value.strip() for value in args.reprt_codes.split(",") if value.strip()]
     tickers = [value.strip() for value in args.tickers.split(",")] if args.tickers else None
 
-    print(
-        f"→ metrics normalize: years={bsns_years}, reprt_codes={reprt_codes}, tickers={tickers}"
-    )
+    print(f"→ metrics normalize: years={bsns_years}, reprt_codes={reprt_codes}, tickers={tickers}")
 
     from krx_collector.infra.config.settings import get_settings as _get_settings
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
@@ -300,7 +305,9 @@ def _handle_metrics_normalize(args: argparse.Namespace) -> None:
     )
 
     if result.errors:
-        print(f"⚠ Metric normalization completed with {len(result.errors)} errors.", file=sys.stderr)
+        print(
+            f"⚠ Metric normalization completed with {len(result.errors)} errors.", file=sys.stderr
+        )
         for error_key, error_value in list(result.errors.items())[:10]:
             print(f"   - Error {error_key}: {error_value}")
     else:
@@ -438,7 +445,10 @@ def _handle_operating_process_document(args: argparse.Namespace) -> None:
     result = process_operating_document(storage=storage, registry=registry, document=document)
 
     if result.errors:
-        print(f"⚠ Operating KPI processing completed with {len(result.errors)} errors.", file=sys.stderr)
+        print(
+            f"⚠ Operating KPI processing completed with {len(result.errors)} errors.",
+            file=sys.stderr,
+        )
         for request_key, error in list(result.errors.items())[:10]:
             print(f"   - Error {request_key}: {error}")
     else:
@@ -459,6 +469,7 @@ def _handle_universe_sync(args: argparse.Namespace) -> None:
     source_str = source_str.upper()
 
     from krx_collector.domain.enums import Market
+
     markets = []
     for m in args.markets.split(","):
         m_upper = m.strip().upper()
@@ -477,14 +488,17 @@ def _handle_universe_sync(args: argparse.Namespace) -> None:
 
     # 2. Instantiate dependencies
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
+
     storage = PostgresStorage(settings.db_dsn)
 
     provider = None
     if source_str == "FDR":
         from krx_collector.adapters.universe_fdr.provider import FdrUniverseProvider
+
         provider = FdrUniverseProvider()
     elif source_str == "PYKRX":
         from krx_collector.adapters.universe_pykrx.provider import PykrxUniverseProvider
+
         provider = PykrxUniverseProvider()
     else:
         print(f"❌ Unsupported universe source: {source_str}", file=sys.stderr)
@@ -492,6 +506,7 @@ def _handle_universe_sync(args: argparse.Namespace) -> None:
 
     # 3. Execute use case
     from krx_collector.service.sync_universe import sync_universe
+
     result = sync_universe(
         provider=provider,
         storage=storage,
@@ -555,12 +570,15 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
         tickers_list = [t.strip() for t in args.tickers.split(",")]
 
     from krx_collector.adapters.prices_pykrx.provider import PykrxDailyPriceProvider
+
     provider = PykrxDailyPriceProvider()
 
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
+
     storage = PostgresStorage(settings.db_dsn)
 
     from krx_collector.service.backfill_daily import backfill_daily_prices
+
     result = backfill_daily_prices(
         provider=provider,
         storage=storage,
@@ -602,9 +620,11 @@ def _handle_validate(args: argparse.Namespace) -> None:
             sys.exit(1)
 
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
+
     storage = PostgresStorage(settings.db_dsn)
 
     from krx_collector.service.validate import validate
+
     try:
         validate(storage=storage, market=market_filter, target_date=args.date)
         print("✅ Validation completed. Check logs for details.")
@@ -688,6 +708,11 @@ def build_parser() -> argparse.ArgumentParser:
         "sync-corp",
         help="Download the OpenDART corp-code master and map it to active KRX tickers.",
     )
+    dart_sync_corp.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-download even if a previous successful corp sync is recorded.",
+    )
     dart_sync_corp.set_defaults(handler=_handle_dart_sync_corp)
 
     dart_sync_financials = dart_sub.add_parser(
@@ -720,6 +745,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.2,
         help="Seconds between OpenDART requests (default: 0.2).",
     )
+    dart_sync_financials.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-download even when raw rows already exist for a request key.",
+    )
     dart_sync_financials.set_defaults(handler=_handle_dart_sync_financials)
 
     dart_sync_share_info = dart_sub.add_parser(
@@ -747,6 +777,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.2,
         help="Seconds between OpenDART request groups (default: 0.2).",
     )
+    dart_sync_share_info.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-download even when raw rows already exist for a request key.",
+    )
     dart_sync_share_info.set_defaults(handler=_handle_dart_sync_share_info)
 
     dart_sync_xbrl = dart_sub.add_parser(
@@ -773,6 +808,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.2,
         help="Seconds between OpenDART XBRL requests (default: 0.2).",
+    )
+    dart_sync_xbrl.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-parse even when an XBRL document is already stored for a filing.",
     )
     dart_sync_xbrl.set_defaults(handler=_handle_dart_sync_xbrl)
 
@@ -856,7 +896,9 @@ def build_parser() -> argparse.ArgumentParser:
     flows_sync.set_defaults(handler=_handle_flows_sync)
 
     # -- operating ------------------------------------------------------------
-    operating_parser = subparsers.add_parser("operating", help="Sector-specific operating KPI commands.")
+    operating_parser = subparsers.add_parser(
+        "operating", help="Sector-specific operating KPI commands."
+    )
     operating_sub = operating_parser.add_subparsers(dest="operating_command", required=True)
 
     operating_process = operating_sub.add_parser(
@@ -987,10 +1029,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--long-rest-interval",
         type=int,
         default=None,
-        help=(
-            "Number of API requests between long rests "
-            "(0 disables; default: from config)."
-        ),
+        help=("Number of API requests between long rests " "(0 disables; default: from config)."),
     )
     prices_backfill.add_argument(
         "--long-rest-seconds",

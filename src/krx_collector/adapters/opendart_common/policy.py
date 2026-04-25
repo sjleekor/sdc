@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import TypeVar
 
 from krx_collector.adapters.opendart_common.client import (
     OPENDART_REQUEST_INVALID_STATUSES,
@@ -21,10 +20,8 @@ from krx_collector.adapters.opendart_common.client import (
     extract_xml_status,
 )
 
-_T = TypeVar("_T")
 
-
-def apply_call_result_meta(result: _T, call_result: OpenDartCallResult) -> _T:
+def apply_call_result_meta[T](result: T, call_result: OpenDartCallResult) -> T:
     """Copy transport-level metadata from ``call_result`` onto a domain result.
 
     Sets any of ``status_code``, ``error``, ``no_data``, ``retryable``,

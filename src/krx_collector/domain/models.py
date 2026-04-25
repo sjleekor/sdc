@@ -581,6 +581,7 @@ class DartFinancialSyncResult:
     upsert: UpsertResult = field(default_factory=UpsertResult)
     targets_processed: int = 0
     requests_attempted: int = 0
+    requests_skipped: int = 0
     rows_upserted: int = 0
     no_data_requests: int = 0
     errors: dict[str, str] = field(default_factory=dict)
@@ -594,6 +595,7 @@ class DartShareInfoSyncResult:
     shareholder_return_upsert: UpsertResult = field(default_factory=UpsertResult)
     targets_processed: int = 0
     requests_attempted: int = 0
+    requests_skipped: int = 0
     share_count_rows_upserted: int = 0
     shareholder_return_rows_upserted: int = 0
     no_data_requests: int = 0
@@ -608,6 +610,7 @@ class DartXbrlSyncResult:
     fact_upsert: UpsertResult = field(default_factory=UpsertResult)
     targets_processed: int = 0
     requests_attempted: int = 0
+    requests_skipped: int = 0
     documents_upserted: int = 0
     facts_upserted: int = 0
     no_data_requests: int = 0

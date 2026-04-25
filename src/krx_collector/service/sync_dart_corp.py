@@ -32,13 +32,14 @@ def _format_corp_fetch_error(fetch_result: object) -> str:
 def sync_dart_corp_master(
     provider: CorpCodeProvider,
     storage: Storage,
+    force: bool = False,
 ) -> DartCorpSyncResult:
     """Synchronise OpenDART corp codes into local storage."""
     run = IngestionRun(
         run_type=RunType.DART_CORP_SYNC,
         started_at=now_kst(),
         status=RunStatus.RUNNING,
-        params={},
+        params={"force": force},
     )
     executor = _get_executor(provider)
     if executor is not None:
@@ -46,6 +47,31 @@ def sync_dart_corp_master(
     storage.record_run(run)
 
     try:
+        if not force:
+            last_success = storage.get_last_successful_run(RunType.DART_CORP_SYNC)
+            if last_success is not None:
+                logger.info(
+                    "Skipping OpenDART corp master sync; last success at %s (run_id=%s). "
+                    "Pass --force to re-fetch.",
+                    last_success.ended_at,
+                    last_success.run_id,
+                )
+                run.ended_at = now_kst()
+                run.status = RunStatus.SUCCESS
+                run.counts = {
+                    "skipped_existing": 1,
+                    "fetched_records": 0,
+                    "matched_active_tickers": 0,
+                    "unmatched_active_tickers": 0,
+                    "unmatched_dart_tickers": 0,
+                    "upsert_updated": 0,
+                    "upsert_errors": 0,
+                }
+                if executor is not None:
+                    run.counts.update(executor.snapshot_metrics())
+                storage.record_run(run)
+                return DartCorpSyncResult()
+
         fetch_result = call_with_retry(
             provider.fetch_corp_codes,
             request_label="corp_code_master",
