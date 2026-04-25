@@ -2,6 +2,7 @@ from datetime import date
 from decimal import Decimal
 
 from krx_collector.adapters.opendart_share_info.provider import (
+    OpenDartShareInfoProvider,
     parse_dividend_response,
     parse_stock_count_response,
     parse_treasury_stock_response,
@@ -18,6 +19,7 @@ from krx_collector.domain.models import (
 )
 from krx_collector.service.sync_dart_share_info import sync_dart_share_info
 from krx_collector.util.time import now_kst
+from tests.helpers.fake_opendart_executor import FakeOpenDartExecutor
 
 
 def _sample_corp() -> DartCorp:
@@ -137,6 +139,23 @@ def test_parse_treasury_stock_response() -> None:
     assert ending.stock_knd == "보통주"
     assert ending.dim1 == "총계"
     assert ending.value_numeric == Decimal("91828987")
+
+
+def test_open_dart_share_info_provider_maps_no_data_result() -> None:
+    corp = _sample_corp()
+    provider = OpenDartShareInfoProvider(
+        request_executor=FakeOpenDartExecutor(
+            [
+                '{"status":"013","message":"조회된 데이타가 없습니다."}'.encode("utf-8"),
+            ]
+        )
+    )
+
+    result = provider.fetch_share_count(corp, 2025, "11011")
+
+    assert result.no_data is True
+    assert result.status_code == "013"
+    assert result.error is None
 
 
 class MockShareInfoProvider:

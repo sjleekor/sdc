@@ -10,7 +10,11 @@ from krx_collector.domain.models import (
     UpsertResult,
 )
 from krx_collector.service.sync_dart_financials import sync_dart_financial_statements
-from krx_collector.util.pipeline import call_with_retry, complete_run
+from krx_collector.util.pipeline import (
+    call_with_retry,
+    complete_run,
+    should_retry_opendart_result,
+)
 from krx_collector.util.time import now_kst
 
 
@@ -134,6 +138,99 @@ def test_call_with_retry_retries_result_errors_until_success() -> None:
     assert result.error is None
     assert attempts["count"] == 3
     assert sleeps == [0.5, 1.0]
+
+
+def test_call_with_retry_returns_last_result_after_max_attempts() -> None:
+    attempts = {"count": 0}
+    sleeps: list[float] = []
+
+    def operation() -> RetryProbe:
+        attempts["count"] += 1
+        return RetryProbe(error="keeps failing")
+
+    result = call_with_retry(
+        operation,
+        request_label="exhausting-probe",
+        max_attempts=3,
+        sleep_fn=sleeps.append,
+    )
+
+    assert result.error == "keeps failing"
+    assert attempts["count"] == 3
+    assert sleeps == [0.5, 1.0]
+
+
+@dataclass(slots=True)
+class _OpenDartProbe:
+    error: str | None = None
+    retryable: bool = False
+    retry_after_seconds: float | None = None
+    exhaustion_reason: str | None = None
+
+
+def test_should_retry_opendart_result_retries_on_retryable_flag() -> None:
+    assert should_retry_opendart_result(_OpenDartProbe(error="e", retryable=True)) is True
+
+
+def test_should_retry_opendart_result_retries_on_all_rate_limited() -> None:
+    probe = _OpenDartProbe(error="e", exhaustion_reason="all_rate_limited")
+    assert should_retry_opendart_result(probe) is True
+
+
+def test_should_retry_opendart_result_does_not_retry_request_invalid() -> None:
+    probe = _OpenDartProbe(error="e", exhaustion_reason="request_invalid")
+    assert should_retry_opendart_result(probe) is False
+
+
+def test_should_retry_opendart_result_does_not_retry_all_disabled() -> None:
+    probe = _OpenDartProbe(error="e", exhaustion_reason="all_disabled")
+    assert should_retry_opendart_result(probe) is False
+
+
+def test_call_with_retry_respects_should_retry_result_predicate() -> None:
+    attempts = {"count": 0}
+    sleeps: list[float] = []
+
+    def operation() -> RetryProbe:
+        attempts["count"] += 1
+        return RetryProbe(error="stop immediately")
+
+    result = call_with_retry(
+        operation,
+        request_label="no-retry-probe",
+        sleep_fn=sleeps.append,
+        should_retry_result=lambda _: False,
+    )
+
+    assert result.error == "stop immediately"
+    assert attempts["count"] == 1
+    assert sleeps == []
+
+
+def test_call_with_retry_uses_result_retry_after_seconds() -> None:
+    attempts = {"count": 0}
+    sleeps: list[float] = []
+
+    def operation() -> _OpenDartProbe:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return _OpenDartProbe(
+                error="all keys cooling down",
+                retryable=True,
+                retry_after_seconds=12.5,
+            )
+        return _OpenDartProbe(error=None)
+
+    result = call_with_retry(
+        operation,
+        request_label="retry-after-probe",
+        sleep_fn=sleeps.append,
+        should_retry_result=should_retry_opendart_result,
+    )
+
+    assert result.error is None
+    assert attempts["count"] == 2
+    assert sleeps == [12.5]
 
 
 def test_complete_run_marks_partial_and_extends_counts() -> None:

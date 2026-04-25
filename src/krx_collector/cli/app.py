@@ -21,10 +21,17 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
+from krx_collector.adapters.opendart_common.client import OpenDartRequestExecutor
 from krx_collector.infra.config.settings import get_settings
 from krx_collector.infra.logging.setup import setup_logging
 
 logger = logging.getLogger(__name__)
+
+
+def _build_opendart_request_executor() -> OpenDartRequestExecutor:
+    """Construct the shared OpenDART executor for one CLI command."""
+    settings = get_settings()
+    return OpenDartRequestExecutor(settings.opendart_api_keys)
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +103,13 @@ def _handle_dart_sync_corp(args: argparse.Namespace) -> None:
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
     from krx_collector.service.sync_dart_corp import sync_dart_corp_master
 
-    provider = OpenDartCorpCodeProvider(api_key=settings.opendart_api_key)
+    try:
+        request_executor = _build_opendart_request_executor()
+    except Exception as exc:
+        print(f"❌ OpenDART corp sync failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    provider = OpenDartCorpCodeProvider(request_executor=request_executor)
     storage = PostgresStorage(settings.db_dsn)
     result = sync_dart_corp_master(provider=provider, storage=storage)
 
@@ -134,7 +147,13 @@ def _handle_dart_sync_financials(args: argparse.Namespace) -> None:
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
     from krx_collector.service.sync_dart_financials import sync_dart_financial_statements
 
-    provider = OpenDartFinancialStatementProvider(api_key=settings.opendart_api_key)
+    try:
+        request_executor = _build_opendart_request_executor()
+    except Exception as exc:
+        print(f"❌ OpenDART financial sync failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    provider = OpenDartFinancialStatementProvider(request_executor=request_executor)
     storage = PostgresStorage(settings.db_dsn)
     result = sync_dart_financial_statements(
         provider=provider,
@@ -176,7 +195,13 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
     from krx_collector.service.sync_dart_share_info import sync_dart_share_info
 
-    provider = OpenDartShareInfoProvider(api_key=settings.opendart_api_key)
+    try:
+        request_executor = _build_opendart_request_executor()
+    except Exception as exc:
+        print(f"❌ OpenDART share info sync failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    provider = OpenDartShareInfoProvider(request_executor=request_executor)
     storage = PostgresStorage(settings.db_dsn)
     result = sync_dart_share_info(
         share_count_provider=provider,
@@ -219,7 +244,13 @@ def _handle_dart_sync_xbrl(args: argparse.Namespace) -> None:
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
     from krx_collector.service.sync_dart_xbrl import sync_dart_xbrl
 
-    provider = OpenDartXbrlProvider(api_key=settings.opendart_api_key)
+    try:
+        request_executor = _build_opendart_request_executor()
+    except Exception as exc:
+        print(f"❌ OpenDART XBRL sync failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    provider = OpenDartXbrlProvider(request_executor=request_executor)
     storage = PostgresStorage(settings.db_dsn)
     result = sync_dart_xbrl(
         provider=provider,

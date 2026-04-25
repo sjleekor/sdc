@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import date
 from decimal import Decimal, InvalidOperation
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import urlopen
 
+from krx_collector.adapters.opendart_common import (
+    DIVIDEND_POLICY,
+    SHARE_COUNT_POLICY,
+    TREASURY_STOCK_POLICY,
+    OpenDartCallResult,
+    OpenDartEndpointPolicy,
+    OpenDartRequestExecutor,
+    apply_call_result_meta,
+)
 from krx_collector.domain.enums import Source
 from krx_collector.domain.models import (
     DartCorp,
@@ -18,7 +23,6 @@ from krx_collector.domain.models import (
     DartShareholderReturnLine,
     DartShareholderReturnResult,
 )
-from krx_collector.util.retry import retry
 from krx_collector.util.time import now_kst
 
 logger = logging.getLogger(__name__)
@@ -26,8 +30,6 @@ logger = logging.getLogger(__name__)
 OPENDART_STOCK_COUNT_URL = "https://opendart.fss.or.kr/api/stockTotqySttus.json"
 OPENDART_DIVIDEND_URL = "https://opendart.fss.or.kr/api/alotMatter.json"
 OPENDART_TREASURY_STOCK_URL = "https://opendart.fss.or.kr/api/tesstkAcqsDspsSttus.json"
-OPENDART_OK_STATUS = "000"
-OPENDART_NO_DATA_STATUS = "013"
 
 DIVIDEND_METRICS = {
     "thstrm": "당기",
@@ -73,34 +75,13 @@ def _parse_date(value: object) -> date | None:
     return date.fromisoformat(text)
 
 
-def _extract_status(payload: dict[str, object]) -> tuple[str, str]:
-    return str(payload.get("status", "")).strip(), str(payload.get("message", "")).strip()
-
-
 def parse_stock_count_response(
     payload: dict[str, object],
     corp: DartCorp,
     bsns_year: int,
     reprt_code: str,
 ) -> DartShareCountResult:
-    status, message = _extract_status(payload)
-    if status == OPENDART_NO_DATA_STATUS:
-        return DartShareCountResult(
-            corp_code=corp.corp_code,
-            ticker=corp.ticker or "",
-            bsns_year=bsns_year,
-            reprt_code=reprt_code,
-            no_data=True,
-        )
-    if status != OPENDART_OK_STATUS:
-        return DartShareCountResult(
-            corp_code=corp.corp_code,
-            ticker=corp.ticker or "",
-            bsns_year=bsns_year,
-            reprt_code=reprt_code,
-            error=f"OpenDART error {status}: {message}",
-        )
-
+    """Parse an OpenDART stock-count success (``status=000``) payload."""
     fetched_at = now_kst()
     records: list[DartShareCountLine] = []
     for row in payload.get("list", []):
@@ -147,26 +128,7 @@ def parse_dividend_response(
     bsns_year: int,
     reprt_code: str,
 ) -> DartShareholderReturnResult:
-    status, message = _extract_status(payload)
-    if status == OPENDART_NO_DATA_STATUS:
-        return DartShareholderReturnResult(
-            corp_code=corp.corp_code,
-            ticker=corp.ticker or "",
-            bsns_year=bsns_year,
-            reprt_code=reprt_code,
-            statement_type="dividend",
-            no_data=True,
-        )
-    if status != OPENDART_OK_STATUS:
-        return DartShareholderReturnResult(
-            corp_code=corp.corp_code,
-            ticker=corp.ticker or "",
-            bsns_year=bsns_year,
-            reprt_code=reprt_code,
-            statement_type="dividend",
-            error=f"OpenDART error {status}: {message}",
-        )
-
+    """Parse an OpenDART dividend success (``status=000``) payload."""
     fetched_at = now_kst()
     records: list[DartShareholderReturnLine] = []
     for row in payload.get("list", []):
@@ -223,26 +185,7 @@ def parse_treasury_stock_response(
     bsns_year: int,
     reprt_code: str,
 ) -> DartShareholderReturnResult:
-    status, message = _extract_status(payload)
-    if status == OPENDART_NO_DATA_STATUS:
-        return DartShareholderReturnResult(
-            corp_code=corp.corp_code,
-            ticker=corp.ticker or "",
-            bsns_year=bsns_year,
-            reprt_code=reprt_code,
-            statement_type="treasury_stock",
-            no_data=True,
-        )
-    if status != OPENDART_OK_STATUS:
-        return DartShareholderReturnResult(
-            corp_code=corp.corp_code,
-            ticker=corp.ticker or "",
-            bsns_year=bsns_year,
-            reprt_code=reprt_code,
-            statement_type="treasury_stock",
-            error=f"OpenDART error {status}: {message}",
-        )
-
+    """Parse an OpenDART treasury-stock success (``status=000``) payload."""
     fetched_at = now_kst()
     records: list[DartShareholderReturnLine] = []
     for row in payload.get("list", []):
@@ -299,52 +242,40 @@ def parse_treasury_stock_response(
 class OpenDartShareInfoProvider:
     """Fetch share-count and shareholder-return disclosures from OpenDART."""
 
-    def __init__(self, api_key: str, timeout_seconds: float = 30.0) -> None:
-        self._api_key = api_key.strip()
+    def __init__(
+        self,
+        request_executor: OpenDartRequestExecutor,
+        timeout_seconds: float = 30.0,
+    ) -> None:
+        self._request_executor = request_executor
         self._timeout_seconds = timeout_seconds
 
-    @retry(max_attempts=3, base_delay=1.0, backoff_factor=2.0)
-    def _download(
-        self,
-        endpoint_url: str,
-        corp_code: str,
-        bsns_year: int,
-        reprt_code: str,
-    ) -> bytes:
-        if not self._api_key:
-            raise RuntimeError("OPENDART_API_KEY is required for share info sync.")
-
-        query = urlencode(
-            {
-                "crtfc_key": self._api_key,
-                "corp_code": corp_code,
-                "bsns_year": str(bsns_year),
-                "reprt_code": reprt_code,
-            }
-        )
-        url = f"{endpoint_url}?{query}"
-        logger.info(
-            "Downloading OpenDART share info: endpoint=%s corp_code=%s year=%s reprt=%s",
-            endpoint_url.rsplit("/", 1)[-1],
-            corp_code,
-            bsns_year,
-            reprt_code,
-        )
-        with urlopen(url, timeout=self._timeout_seconds) as response:
-            return response.read()
+    @property
+    def request_executor(self) -> OpenDartRequestExecutor:
+        """Expose the shared executor for run-level metrics."""
+        return self._request_executor
 
     def _fetch_json(
         self,
         endpoint_url: str,
+        policy: OpenDartEndpointPolicy,
         corp: DartCorp,
         bsns_year: int,
         reprt_code: str,
-    ) -> dict[str, object]:
-        payload_bytes = self._download(endpoint_url, corp.corp_code, bsns_year, reprt_code)
-        payload = json.loads(payload_bytes.decode("utf-8"))
-        if not isinstance(payload, dict):
-            raise RuntimeError("OpenDART returned an unexpected JSON payload.")
-        return payload
+    ) -> OpenDartCallResult:
+        return self._request_executor.fetch_bytes(
+            endpoint_url=endpoint_url,
+            params={
+                "corp_code": corp.corp_code,
+                "bsns_year": str(bsns_year),
+                "reprt_code": reprt_code,
+            },
+            request_label=(
+                f"{corp.ticker}:{bsns_year}:{reprt_code}:{endpoint_url.rsplit('/', 1)[-1]}"
+            ),
+            parser=policy.classify_json_payload,
+            timeout_seconds=self._timeout_seconds,
+        )
 
     def fetch_share_count(
         self,
@@ -353,24 +284,25 @@ class OpenDartShareInfoProvider:
         reprt_code: str,
     ) -> DartShareCountResult:
         try:
-            payload = self._fetch_json(OPENDART_STOCK_COUNT_URL, corp, bsns_year, reprt_code)
-            return parse_stock_count_response(payload, corp, bsns_year, reprt_code)
-        except HTTPError as exc:
-            return DartShareCountResult(
-                corp_code=corp.corp_code,
-                ticker=corp.ticker or "",
-                bsns_year=bsns_year,
-                reprt_code=reprt_code,
-                error=f"OpenDART HTTP error: {exc.code} {exc.reason}",
+            call_result = self._fetch_json(
+                OPENDART_STOCK_COUNT_URL, SHARE_COUNT_POLICY, corp, bsns_year, reprt_code
             )
-        except URLError as exc:
-            return DartShareCountResult(
-                corp_code=corp.corp_code,
-                ticker=corp.ticker or "",
-                bsns_year=bsns_year,
-                reprt_code=reprt_code,
-                error=f"OpenDART network error: {exc.reason}",
-            )
+            if call_result.error or call_result.no_data:
+                return apply_call_result_meta(
+                    DartShareCountResult(
+                        corp_code=corp.corp_code,
+                        ticker=corp.ticker or "",
+                        bsns_year=bsns_year,
+                        reprt_code=reprt_code,
+                    ),
+                    call_result,
+                )
+
+            payload = call_result.parsed_payload
+            if not isinstance(payload, dict):
+                raise RuntimeError("OpenDART returned an unexpected JSON payload.")
+            result = parse_stock_count_response(payload, corp, bsns_year, reprt_code)
+            return apply_call_result_meta(result, call_result)
         except Exception as exc:
             return DartShareCountResult(
                 corp_code=corp.corp_code,
@@ -387,26 +319,26 @@ class OpenDartShareInfoProvider:
         reprt_code: str,
     ) -> DartShareholderReturnResult:
         try:
-            payload = self._fetch_json(OPENDART_DIVIDEND_URL, corp, bsns_year, reprt_code)
-            return parse_dividend_response(payload, corp, bsns_year, reprt_code)
-        except HTTPError as exc:
-            return DartShareholderReturnResult(
-                corp_code=corp.corp_code,
-                ticker=corp.ticker or "",
-                bsns_year=bsns_year,
-                reprt_code=reprt_code,
-                statement_type="dividend",
-                error=f"OpenDART HTTP error: {exc.code} {exc.reason}",
+            call_result = self._fetch_json(
+                OPENDART_DIVIDEND_URL, DIVIDEND_POLICY, corp, bsns_year, reprt_code
             )
-        except URLError as exc:
-            return DartShareholderReturnResult(
-                corp_code=corp.corp_code,
-                ticker=corp.ticker or "",
-                bsns_year=bsns_year,
-                reprt_code=reprt_code,
-                statement_type="dividend",
-                error=f"OpenDART network error: {exc.reason}",
-            )
+            if call_result.error or call_result.no_data:
+                return apply_call_result_meta(
+                    DartShareholderReturnResult(
+                        corp_code=corp.corp_code,
+                        ticker=corp.ticker or "",
+                        bsns_year=bsns_year,
+                        reprt_code=reprt_code,
+                        statement_type="dividend",
+                    ),
+                    call_result,
+                )
+
+            payload = call_result.parsed_payload
+            if not isinstance(payload, dict):
+                raise RuntimeError("OpenDART returned an unexpected JSON payload.")
+            result = parse_dividend_response(payload, corp, bsns_year, reprt_code)
+            return apply_call_result_meta(result, call_result)
         except Exception as exc:
             return DartShareholderReturnResult(
                 corp_code=corp.corp_code,
@@ -424,26 +356,30 @@ class OpenDartShareInfoProvider:
         reprt_code: str,
     ) -> DartShareholderReturnResult:
         try:
-            payload = self._fetch_json(OPENDART_TREASURY_STOCK_URL, corp, bsns_year, reprt_code)
-            return parse_treasury_stock_response(payload, corp, bsns_year, reprt_code)
-        except HTTPError as exc:
-            return DartShareholderReturnResult(
-                corp_code=corp.corp_code,
-                ticker=corp.ticker or "",
-                bsns_year=bsns_year,
-                reprt_code=reprt_code,
-                statement_type="treasury_stock",
-                error=f"OpenDART HTTP error: {exc.code} {exc.reason}",
+            call_result = self._fetch_json(
+                OPENDART_TREASURY_STOCK_URL,
+                TREASURY_STOCK_POLICY,
+                corp,
+                bsns_year,
+                reprt_code,
             )
-        except URLError as exc:
-            return DartShareholderReturnResult(
-                corp_code=corp.corp_code,
-                ticker=corp.ticker or "",
-                bsns_year=bsns_year,
-                reprt_code=reprt_code,
-                statement_type="treasury_stock",
-                error=f"OpenDART network error: {exc.reason}",
-            )
+            if call_result.error or call_result.no_data:
+                return apply_call_result_meta(
+                    DartShareholderReturnResult(
+                        corp_code=corp.corp_code,
+                        ticker=corp.ticker or "",
+                        bsns_year=bsns_year,
+                        reprt_code=reprt_code,
+                        statement_type="treasury_stock",
+                    ),
+                    call_result,
+                )
+
+            payload = call_result.parsed_payload
+            if not isinstance(payload, dict):
+                raise RuntimeError("OpenDART returned an unexpected JSON payload.")
+            result = parse_treasury_stock_response(payload, corp, bsns_year, reprt_code)
+            return apply_call_result_meta(result, call_result)
         except Exception as exc:
             return DartShareholderReturnResult(
                 corp_code=corp.corp_code,

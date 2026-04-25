@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from krx_collector.adapters.opendart_common.client import OpenDartRequestExecutor
 from krx_collector.domain.enums import RunStatus, RunType
 from krx_collector.domain.models import DartFinancialSyncResult, IngestionRun
 from krx_collector.ports.financials import FinancialStatementProvider
@@ -13,11 +14,17 @@ from krx_collector.util.pipeline import (
     call_with_retry,
     complete_run,
     fail_run,
+    should_retry_opendart_result,
     sleep_with_jitter,
 )
 from krx_collector.util.time import now_kst
 
 logger = logging.getLogger(__name__)
+
+
+def _get_executor(provider: object) -> OpenDartRequestExecutor | None:
+    executor = getattr(provider, "request_executor", None)
+    return executor if isinstance(executor, OpenDartRequestExecutor) else None
 
 
 def sync_dart_financial_statements(
@@ -42,6 +49,9 @@ def sync_dart_financial_statements(
             "rate_limit_seconds": rate_limit_seconds,
         },
     )
+    executor = _get_executor(provider)
+    if executor is not None:
+        run.params["opendart_key_count"] = executor.configured_key_count
     storage.record_run(run)
 
     result = DartFinancialSyncResult()
@@ -68,6 +78,7 @@ def sync_dart_financial_statements(
                             ),
                             request_label=request_key,
                             logger_instance=logger,
+                            should_retry_result=should_retry_opendart_result,
                         )
 
                         if fetch_result.error:
@@ -93,6 +104,7 @@ def sync_dart_financial_statements(
                 requests_attempted=result.requests_attempted,
                 rows_upserted=result.rows_upserted,
                 no_data_requests=result.no_data_requests,
+                **(executor.snapshot_metrics() if executor is not None else {}),
             ),
             errors=result.errors,
             partial_subject="financial sync requests",

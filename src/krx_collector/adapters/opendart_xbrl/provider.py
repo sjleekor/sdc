@@ -9,20 +9,20 @@ import zipfile
 from collections import defaultdict
 from datetime import date
 from decimal import Decimal, InvalidOperation
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import urlopen
 
+from krx_collector.adapters.opendart_common import (
+    XBRL_POLICY,
+    OpenDartCallResult,
+    OpenDartRequestExecutor,
+    apply_call_result_meta,
+)
 from krx_collector.domain.enums import Source
 from krx_collector.domain.models import DartCorp, DartXbrlDocument, DartXbrlFactLine, DartXbrlResult
-from krx_collector.util.retry import retry
 from krx_collector.util.time import now_kst
 
 logger = logging.getLogger(__name__)
 
 OPENDART_XBRL_URL = "https://opendart.fss.or.kr/api/fnlttXbrl.xml"
-OPENDART_OK_STATUS = "000"
-OPENDART_NO_DATA_STATUSES = {"013", "014"}
 XBRLI_NS = "http://www.xbrl.org/2003/instance"
 XLINK_NS = "http://www.w3.org/1999/xlink"
 
@@ -200,21 +200,6 @@ def _parse_label_ko_map(xml_bytes: bytes, prefix_by_uri: dict[str, str]) -> dict
     return fallback
 
 
-def _parse_xbrl_error(payload_bytes: bytes) -> tuple[bool, str | None]:
-    try:
-        root = ET.fromstring(payload_bytes)
-    except ET.ParseError:
-        return False, None
-
-    status = root.findtext(".//status", default="").strip()
-    message = root.findtext(".//message", default="").strip()
-    if status in OPENDART_NO_DATA_STATUSES:
-        return True, None
-    if status and status != OPENDART_OK_STATUS:
-        return False, f"OpenDART error {status}: {message}"
-    return False, None
-
-
 def parse_xbrl_zip_response(
     payload_bytes: bytes,
     corp: DartCorp,
@@ -222,19 +207,11 @@ def parse_xbrl_zip_response(
     reprt_code: str,
     rcept_no: str,
 ) -> DartXbrlResult:
-    """Parse an OpenDART XBRL ZIP payload into document metadata and fact rows."""
-    if not payload_bytes.startswith(b"PK"):
-        no_data, error = _parse_xbrl_error(payload_bytes)
-        return DartXbrlResult(
-            corp_code=corp.corp_code,
-            ticker=corp.ticker or "",
-            bsns_year=bsns_year,
-            reprt_code=reprt_code,
-            rcept_no=rcept_no,
-            no_data=no_data,
-            error=error or f"OpenDART returned a non-ZIP payload: {payload_bytes[:120]!r}",
-        )
+    """Parse an OpenDART XBRL ZIP success payload into document metadata and fact rows.
 
+    Non-ZIP error bodies are classified upstream by ``XBRL_POLICY`` before this
+    parser runs, so this function assumes ``payload_bytes`` is a valid ZIP.
+    """
     with zipfile.ZipFile(io.BytesIO(payload_bytes)) as archive:
         entry_names = sorted(archive.namelist())
         instance_name = next((name for name in entry_names if name.endswith(".xbrl")), "")
@@ -341,25 +318,21 @@ def parse_xbrl_zip_response(
 class OpenDartXbrlProvider:
     """Fetch and parse OpenDART XBRL ZIP documents."""
 
-    def __init__(self, api_key: str, timeout_seconds: float = 60.0) -> None:
-        self._api_key = api_key.strip()
+    def __init__(
+        self,
+        request_executor: OpenDartRequestExecutor,
+        timeout_seconds: float = 60.0,
+    ) -> None:
+        self._request_executor = request_executor
         self._timeout_seconds = timeout_seconds
 
-    @retry(max_attempts=3, base_delay=1.0, backoff_factor=2.0)
-    def _download(self, rcept_no: str) -> bytes:
-        if not self._api_key:
-            raise RuntimeError("OPENDART_API_KEY is required for XBRL sync.")
+    @property
+    def request_executor(self) -> OpenDartRequestExecutor:
+        """Expose the shared executor for run-level metrics."""
+        return self._request_executor
 
-        query = urlencode(
-            {
-                "crtfc_key": self._api_key,
-                "rcept_no": rcept_no,
-            }
-        )
-        url = f"{OPENDART_XBRL_URL}?{query}"
-        logger.info("Downloading OpenDART XBRL ZIP: rcept_no=%s", rcept_no)
-        with urlopen(url, timeout=self._timeout_seconds) as response:
-            return response.read()
+    def _parse_xbrl_payload(self, payload_bytes: bytes) -> OpenDartCallResult:
+        return XBRL_POLICY.classify_xml_zip_payload(payload_bytes)
 
     def fetch_xbrl(
         self,
@@ -368,28 +341,34 @@ class OpenDartXbrlProvider:
         reprt_code: str,
         rcept_no: str,
     ) -> DartXbrlResult:
-        payload_bytes = b""
         try:
-            payload_bytes = self._download(rcept_no)
-            return parse_xbrl_zip_response(payload_bytes, corp, bsns_year, reprt_code, rcept_no)
-        except HTTPError as exc:
-            return DartXbrlResult(
-                corp_code=corp.corp_code,
-                ticker=corp.ticker or "",
-                bsns_year=bsns_year,
-                reprt_code=reprt_code,
-                rcept_no=rcept_no,
-                error=f"OpenDART HTTP error: {exc.code} {exc.reason}",
+            call_result = self._request_executor.fetch_bytes(
+                endpoint_url=OPENDART_XBRL_URL,
+                params={"rcept_no": rcept_no},
+                request_label=f"{corp.ticker}:{bsns_year}:{reprt_code}:{rcept_no}",
+                parser=self._parse_xbrl_payload,
+                timeout_seconds=self._timeout_seconds,
             )
-        except URLError as exc:
-            return DartXbrlResult(
-                corp_code=corp.corp_code,
-                ticker=corp.ticker or "",
-                bsns_year=bsns_year,
-                reprt_code=reprt_code,
-                rcept_no=rcept_no,
-                error=f"OpenDART network error: {exc.reason}",
+            if call_result.error or call_result.no_data:
+                return apply_call_result_meta(
+                    DartXbrlResult(
+                        corp_code=corp.corp_code,
+                        ticker=corp.ticker or "",
+                        bsns_year=bsns_year,
+                        reprt_code=reprt_code,
+                        rcept_no=rcept_no,
+                    ),
+                    call_result,
+                )
+
+            result = parse_xbrl_zip_response(
+                call_result.payload or b"",
+                corp,
+                bsns_year,
+                reprt_code,
+                rcept_no,
             )
+            return apply_call_result_meta(result, call_result)
         except zipfile.BadZipFile:
             return DartXbrlResult(
                 corp_code=corp.corp_code,
@@ -397,7 +376,7 @@ class OpenDartXbrlProvider:
                 bsns_year=bsns_year,
                 reprt_code=reprt_code,
                 rcept_no=rcept_no,
-                error=f"OpenDART returned an invalid ZIP payload: {payload_bytes[:120]!r}",
+                error=f"OpenDART returned an invalid ZIP payload: {(call_result.payload or b'')[:120]!r}",
             )
         except Exception as exc:
             return DartXbrlResult(

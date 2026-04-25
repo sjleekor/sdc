@@ -31,6 +31,20 @@ def sleep_with_jitter(
     sleep_fn(max(0.0, rate_limit_seconds + jitter))
 
 
+def should_retry_opendart_result(result: object) -> bool:
+    """Standard OpenDART retry predicate for ``call_with_retry``.
+
+    Retries when either (a) the executor flagged the individual call as
+    ``retryable`` (status ``020`` / ``800`` / ``900`` / HTTP 429 / 5xx /
+    network), or (b) the executor exhausted the key pool due to all keys
+    being temporarily rate-limited. Permanent failures like ``request_invalid``
+    or ``all_disabled`` are not retried.
+    """
+    return bool(getattr(result, "retryable", False)) or (
+        getattr(result, "exhaustion_reason", None) == "all_rate_limited"
+    )
+
+
 def call_with_retry(
     operation: Callable[[], _T],
     *,
@@ -40,6 +54,7 @@ def call_with_retry(
     backoff_factor: float = 2.0,
     sleep_fn: Callable[[float], None] = time.sleep,
     logger_instance: logging.Logger | None = None,
+    should_retry_result: Callable[[_T], bool] | None = None,
 ) -> _T:
     """Execute one provider call with retry on exceptions or ``result.error``."""
     active_logger = logger_instance or logger
@@ -68,17 +83,28 @@ def call_with_retry(
 
         last_result = result
         error = getattr(result, "error", None)
-        if error and attempt < max_attempts:
+        retry_result = (
+            should_retry_result(result)
+            if should_retry_result is not None
+            else bool(error)
+        )
+        if retry_result and attempt < max_attempts:
+            retry_delay_seconds = getattr(result, "retry_after_seconds", None)
+            effective_delay = (
+                float(retry_delay_seconds)
+                if isinstance(retry_delay_seconds, int | float) and retry_delay_seconds > 0
+                else delay
+            )
             active_logger.warning(
                 "Request %s returned error on attempt %d/%d; retrying in %.1fs: %s",
                 request_label,
                 attempt,
                 max_attempts,
-                delay,
+                effective_delay,
                 error,
             )
-            sleep_fn(delay)
-            delay *= backoff_factor
+            sleep_fn(effective_delay)
+            delay = max(delay * backoff_factor, effective_delay * backoff_factor)
             continue
 
         return result

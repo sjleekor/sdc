@@ -6,14 +6,16 @@ import io
 import logging
 import zipfile
 from datetime import date
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import urlopen
 from xml.etree import ElementTree as ET
 
+from krx_collector.adapters.opendart_common import (
+    CORP_CODE_POLICY,
+    OpenDartCallResult,
+    OpenDartRequestExecutor,
+    apply_call_result_meta,
+)
 from krx_collector.domain.enums import Source
 from krx_collector.domain.models import DartCorp, DartCorpCodeResult
-from krx_collector.util.retry import retry
 from krx_collector.util.time import now_kst
 
 logger = logging.getLogger(__name__)
@@ -67,52 +69,43 @@ def parse_corp_code_zip_bytes(payload: bytes) -> list[DartCorp]:
     return records
 
 
-def parse_opendart_error_message(payload: bytes) -> str:
-    """Best-effort extraction of an OpenDART status/message error payload."""
-    try:
-        root = ET.fromstring(payload.decode("utf-8", errors="ignore"))
-    except ET.ParseError:
-        return "OpenDART returned a non-zip response that could not be parsed."
-
-    status = (root.findtext(".//status") or "").strip()
-    message = (root.findtext(".//message") or "").strip()
-
-    if status or message:
-        return f"OpenDART error {status}: {message}".strip()
-    return "OpenDART returned a non-zip response without a structured error message."
-
-
 class OpenDartCorpCodeProvider:
     """Fetch the OpenDART corporation-code master zip file."""
 
-    def __init__(self, api_key: str, timeout_seconds: float = 30.0) -> None:
-        self._api_key = api_key.strip()
+    def __init__(
+        self,
+        request_executor: OpenDartRequestExecutor,
+        timeout_seconds: float = 30.0,
+    ) -> None:
+        self._request_executor = request_executor
         self._timeout_seconds = timeout_seconds
 
-    @retry(max_attempts=3, base_delay=1.0, backoff_factor=2.0)
-    def _download(self) -> bytes:
-        if not self._api_key:
-            raise RuntimeError("OPENDART_API_KEY is required for corp code sync.")
+    @property
+    def request_executor(self) -> OpenDartRequestExecutor:
+        """Expose the shared executor for run-level metrics."""
+        return self._request_executor
 
-        query = urlencode({"crtfc_key": self._api_key})
-        url = f"{OPENDART_CORP_CODE_URL}?{query}"
-        logger.info("Downloading OpenDART corporation-code master.")
-
-        with urlopen(url, timeout=self._timeout_seconds) as response:
-            return response.read()
+    def _parse_corp_code_payload(self, payload: bytes) -> OpenDartCallResult:
+        return CORP_CODE_POLICY.classify_xml_zip_payload(payload)
 
     def fetch_corp_codes(self) -> DartCorpCodeResult:
         """Download and parse the OpenDART corp-code master."""
-        payload = b""
         try:
-            payload = self._download()
-            records = parse_corp_code_zip_bytes(payload)
-            return DartCorpCodeResult(records=records)
+            call_result = self._request_executor.fetch_bytes(
+                endpoint_url=OPENDART_CORP_CODE_URL,
+                params={},
+                request_label="corp_code_master",
+                parser=self._parse_corp_code_payload,
+                timeout_seconds=self._timeout_seconds,
+            )
+            if call_result.error:
+                return apply_call_result_meta(DartCorpCodeResult(), call_result)
+
+            records = parse_corp_code_zip_bytes(call_result.payload or b"")
+            return apply_call_result_meta(DartCorpCodeResult(records=records), call_result)
         except zipfile.BadZipFile:
-            return DartCorpCodeResult(error=parse_opendart_error_message(payload))
-        except HTTPError as exc:
-            return DartCorpCodeResult(error=f"OpenDART HTTP error: {exc.code} {exc.reason}")
-        except URLError as exc:
-            return DartCorpCodeResult(error=f"OpenDART network error: {exc.reason}")
+            return DartCorpCodeResult(
+                error=f"OpenDART returned an invalid ZIP payload: {(call_result.payload or b'')[:120]!r}"
+            )
         except Exception as exc:
             return DartCorpCodeResult(error=str(exc))

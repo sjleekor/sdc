@@ -4,13 +4,29 @@ from __future__ import annotations
 
 import logging
 
+from krx_collector.adapters.opendart_common.client import OpenDartRequestExecutor
 from krx_collector.domain.enums import RunStatus, RunType, Source
 from krx_collector.domain.models import DartCorp, DartCorpSyncResult, IngestionRun
 from krx_collector.ports.corp_codes import CorpCodeProvider
 from krx_collector.ports.storage import Storage
+from krx_collector.util.pipeline import call_with_retry, should_retry_opendart_result
 from krx_collector.util.time import now_kst
 
 logger = logging.getLogger(__name__)
+
+
+def _get_executor(provider: object) -> OpenDartRequestExecutor | None:
+    executor = getattr(provider, "request_executor", None)
+    return executor if isinstance(executor, OpenDartRequestExecutor) else None
+
+
+def _format_corp_fetch_error(fetch_result: object) -> str:
+    """Compose an error string that also captures the exhaustion reason."""
+    base = getattr(fetch_result, "error", None) or "OpenDART corp fetch failed."
+    reason = getattr(fetch_result, "exhaustion_reason", None)
+    if reason:
+        return f"{base} (exhaustion_reason={reason})"
+    return base
 
 
 def sync_dart_corp_master(
@@ -24,12 +40,20 @@ def sync_dart_corp_master(
         status=RunStatus.RUNNING,
         params={},
     )
+    executor = _get_executor(provider)
+    if executor is not None:
+        run.params["opendart_key_count"] = executor.configured_key_count
     storage.record_run(run)
 
     try:
-        fetch_result = provider.fetch_corp_codes()
+        fetch_result = call_with_retry(
+            provider.fetch_corp_codes,
+            request_label="corp_code_master",
+            logger_instance=logger,
+            should_retry_result=should_retry_opendart_result,
+        )
         if fetch_result.error:
-            raise RuntimeError(fetch_result.error)
+            raise RuntimeError(_format_corp_fetch_error(fetch_result))
 
         active_stocks = storage.get_active_stocks()
         active_stocks_by_ticker = {stock.ticker: stock for stock in active_stocks}
@@ -74,6 +98,8 @@ def sync_dart_corp_master(
             "upsert_updated": upsert_result.updated,
             "upsert_errors": upsert_result.errors,
         }
+        if executor is not None:
+            run.counts.update(executor.snapshot_metrics())
         storage.record_run(run)
 
         return DartCorpSyncResult(
@@ -87,6 +113,8 @@ def sync_dart_corp_master(
         logger.exception("OpenDART corp code sync failed")
         run.ended_at = now_kst()
         run.status = RunStatus.FAILED
+        if executor is not None:
+            run.counts = executor.snapshot_metrics()
         run.error_summary = str(exc)
         storage.record_run(run)
         return DartCorpSyncResult(error=str(exc))

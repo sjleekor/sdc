@@ -434,6 +434,10 @@ class DartCorpCodeResult:
 
     records: list[DartCorp] = field(default_factory=list)
     error: str | None = None
+    status_code: str | None = None
+    retryable: bool = False
+    retry_after_seconds: float | None = None
+    exhaustion_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -448,6 +452,10 @@ class DartFinancialStatementResult:
     records: list[DartFinancialStatementLine] = field(default_factory=list)
     no_data: bool = False
     error: str | None = None
+    status_code: str | None = None
+    retryable: bool = False
+    retry_after_seconds: float | None = None
+    exhaustion_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -461,6 +469,10 @@ class DartShareCountResult:
     records: list[DartShareCountLine] = field(default_factory=list)
     no_data: bool = False
     error: str | None = None
+    status_code: str | None = None
+    retryable: bool = False
+    retry_after_seconds: float | None = None
+    exhaustion_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -475,6 +487,10 @@ class DartShareholderReturnResult:
     records: list[DartShareholderReturnLine] = field(default_factory=list)
     no_data: bool = False
     error: str | None = None
+    status_code: str | None = None
+    retryable: bool = False
+    retry_after_seconds: float | None = None
+    exhaustion_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -490,6 +506,10 @@ class DartXbrlResult:
     facts: list[DartXbrlFactLine] = field(default_factory=list)
     no_data: bool = False
     error: str | None = None
+    status_code: str | None = None
+    retryable: bool = False
+    retry_after_seconds: float | None = None
+    exhaustion_reason: str | None = None
 
 
 @dataclass(slots=True)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from krx_collector.adapters.opendart_common.client import OpenDartRequestExecutor
 from krx_collector.domain.enums import RunStatus, RunType
 from krx_collector.domain.models import DartShareInfoSyncResult, IngestionRun
 from krx_collector.ports.share_info import ShareCountProvider, ShareholderReturnProvider
@@ -13,11 +14,17 @@ from krx_collector.util.pipeline import (
     call_with_retry,
     complete_run,
     fail_run,
+    should_retry_opendart_result,
     sleep_with_jitter,
 )
 from krx_collector.util.time import now_kst
 
 logger = logging.getLogger(__name__)
+
+
+def _get_executor(provider: object) -> OpenDartRequestExecutor | None:
+    executor = getattr(provider, "request_executor", None)
+    return executor if isinstance(executor, OpenDartRequestExecutor) else None
 
 
 def sync_dart_share_info(
@@ -41,6 +48,9 @@ def sync_dart_share_info(
             "rate_limit_seconds": rate_limit_seconds,
         },
     )
+    executor = _get_executor(share_count_provider) or _get_executor(shareholder_return_provider)
+    if executor is not None:
+        run.params["opendart_key_count"] = executor.configured_key_count
     storage.record_run(run)
 
     result = DartShareInfoSyncResult()
@@ -64,6 +74,7 @@ def sync_dart_share_info(
                         ),
                         request_label=f"{request_prefix}:share_count",
                         logger_instance=logger,
+                        should_retry_result=should_retry_opendart_result,
                     )
                     if share_count_result.error:
                         result.errors[f"{request_prefix}:share_count"] = share_count_result.error
@@ -84,6 +95,7 @@ def sync_dart_share_info(
                         ),
                         request_label=f"{request_prefix}:dividend",
                         logger_instance=logger,
+                        should_retry_result=should_retry_opendart_result,
                     )
                     if dividend_result.error:
                         result.errors[f"{request_prefix}:dividend"] = dividend_result.error
@@ -104,6 +116,7 @@ def sync_dart_share_info(
                         ),
                         request_label=f"{request_prefix}:treasury_stock",
                         logger_instance=logger,
+                        should_retry_result=should_retry_opendart_result,
                     )
                     if treasury_result.error:
                         result.errors[f"{request_prefix}:treasury_stock"] = treasury_result.error
@@ -126,6 +139,7 @@ def sync_dart_share_info(
                 share_count_rows_upserted=result.share_count_rows_upserted,
                 shareholder_return_rows_upserted=result.shareholder_return_rows_upserted,
                 no_data_requests=result.no_data_requests,
+                **(executor.snapshot_metrics() if executor is not None else {}),
             ),
             errors=result.errors,
             partial_subject="share info requests",

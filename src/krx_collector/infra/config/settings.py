@@ -19,7 +19,7 @@ from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -79,6 +79,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        populate_by_name=True,
     )
 
     # Database
@@ -100,6 +101,8 @@ class Settings(BaseSettings):
     # Universe
     universe_source_default: UniverseSourceDefault = UniverseSourceDefault.FDR
     opendart_api_key: str = ""
+    opendart_api_keys_raw: str = Field(default="", validation_alias="OPENDART_API_KEYS")
+    opendart_api_keys: tuple[str, ...] = ()
 
     # Rate limiting
     rate_limit_seconds: float = 0.2
@@ -121,6 +124,22 @@ class Settings(BaseSettings):
                 f"postgresql://{self.db_user}:{self.db_password}"
                 f"@{self.db_host}:{self.db_port}/{self.db_name}"
             )
+
+        ordered_keys: list[str] = []
+        seen_keys: set[str] = set()
+
+        for key in self.opendart_api_keys_raw.split(","):
+            normalized = key.strip()
+            if normalized and normalized not in seen_keys:
+                ordered_keys.append(normalized)
+                seen_keys.add(normalized)
+
+        legacy_key = self.opendart_api_key.strip()
+        if legacy_key and legacy_key not in seen_keys:
+            ordered_keys.append(legacy_key)
+
+        self.opendart_api_key = legacy_key
+        self.opendart_api_keys = tuple(ordered_keys)
         return self
 
 

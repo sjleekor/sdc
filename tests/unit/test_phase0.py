@@ -15,6 +15,26 @@ def test_settings_compute_dsn_and_opendart_key() -> None:
 
     assert settings.db_dsn == "postgresql://collector:secret@db-host:15432/krx_db"
     assert settings.opendart_api_key == "test-opendart-key"
+    assert settings.opendart_api_keys == ("test-opendart-key",)
+
+
+def test_settings_normalize_multiple_opendart_keys() -> None:
+    settings = Settings(
+        opendart_api_key=" key_b ",
+        opendart_api_keys_raw=" key_a , key_b ,, key_c , ",
+    )
+
+    assert settings.opendart_api_key == "key_b"
+    assert settings.opendart_api_keys == ("key_a", "key_b", "key_c")
+
+
+def test_settings_allow_empty_multiple_opendart_keys() -> None:
+    settings = Settings(
+        opendart_api_key="",
+        opendart_api_keys_raw=" , , ",
+    )
+
+    assert settings.opendart_api_keys == ()
 
 
 def test_future_sources_and_run_types_are_declared() -> None:

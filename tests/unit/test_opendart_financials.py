@@ -2,6 +2,7 @@ from datetime import date
 from decimal import Decimal
 
 from krx_collector.adapters.opendart_financials.provider import (
+    OpenDartFinancialStatementProvider,
     parse_fnltt_singl_acnt_all_response,
 )
 from krx_collector.domain.enums import Market, RunStatus, RunType, Source
@@ -14,6 +15,7 @@ from krx_collector.domain.models import (
 )
 from krx_collector.service.sync_dart_financials import sync_dart_financial_statements
 from krx_collector.util.time import now_kst
+from tests.helpers.fake_opendart_executor import FakeOpenDartExecutor
 
 
 def _sample_corp() -> DartCorp:
@@ -74,15 +76,68 @@ def test_parse_fnltt_singl_acnt_all_response_success() -> None:
     assert line.ord == 1
 
 
-def test_parse_fnltt_singl_acnt_all_response_no_data() -> None:
+def test_parse_fnltt_singl_acnt_all_response_empty_list() -> None:
     corp = _sample_corp()
-    payload = {"status": "013", "message": "조회된 데이타가 없습니다."}
+    payload = {"status": "000", "message": "정상"}
 
     result = parse_fnltt_singl_acnt_all_response(payload, corp, 2025, "11011", "CFS")
 
-    assert result.no_data is True
     assert result.error is None
     assert result.records == []
+
+
+def test_open_dart_financial_provider_maps_rate_limited_result() -> None:
+    corp = _sample_corp()
+    provider = OpenDartFinancialStatementProvider(
+        request_executor=FakeOpenDartExecutor(
+            [
+                '{"status":"020","message":"요청 제한을 초과하였습니다."}'.encode("utf-8"),
+            ]
+        )
+    )
+
+    result = provider.fetch_financial_statement(corp, 2025, "11011", "CFS")
+
+    assert result.error == "OpenDART error 020: 요청 제한을 초과하였습니다."
+    assert result.status_code == "020"
+    assert result.retryable is True
+
+
+def test_open_dart_financial_provider_maps_no_data_result() -> None:
+    corp = _sample_corp()
+    provider = OpenDartFinancialStatementProvider(
+        request_executor=FakeOpenDartExecutor(
+            [
+                '{"status":"013","message":"조회된 데이타가 없습니다."}'.encode("utf-8"),
+            ]
+        )
+    )
+
+    result = provider.fetch_financial_statement(corp, 2025, "11011", "CFS")
+
+    assert result.no_data is True
+    assert result.error is None
+    assert result.status_code == "013"
+    assert result.retryable is False
+
+
+def test_open_dart_financial_provider_maps_file_missing_as_request_invalid() -> None:
+    corp = _sample_corp()
+    provider = OpenDartFinancialStatementProvider(
+        request_executor=FakeOpenDartExecutor(
+            [
+                '{"status":"014","message":"파일이 존재하지 않습니다."}'.encode("utf-8"),
+            ]
+        )
+    )
+
+    result = provider.fetch_financial_statement(corp, 2025, "11011", "CFS")
+
+    assert result.no_data is False
+    assert result.error == "OpenDART error 014: 파일이 존재하지 않습니다."
+    assert result.status_code == "014"
+    assert result.retryable is False
+    assert result.exhaustion_reason == "request_invalid"
 
 
 class MockFinancialProvider:
@@ -165,6 +220,92 @@ class MockFinancialStorage:
     ) -> UpsertResult:
         self.upserts.extend(records)
         return UpsertResult(updated=len(records))
+
+
+class _RetryTrackingFinancialProvider:
+    """Provider that counts calls per key and configurably varies result flags."""
+
+    def __init__(
+        self,
+        *,
+        retryable_attempts: int,
+        final_error: str = "done",
+        final_retryable: bool = False,
+        final_exhaustion_reason: str | None = None,
+    ) -> None:
+        self._retryable_attempts = retryable_attempts
+        self._final_error = final_error
+        self._final_retryable = final_retryable
+        self._final_exhaustion_reason = final_exhaustion_reason
+        self.calls = 0
+
+    def fetch_financial_statement(
+        self,
+        corp: DartCorp,
+        bsns_year: int,
+        reprt_code: str,
+        fs_div: str,
+    ) -> DartFinancialStatementResult:
+        self.calls += 1
+        if self.calls <= self._retryable_attempts:
+            return DartFinancialStatementResult(
+                corp_code=corp.corp_code,
+                ticker=corp.ticker or "",
+                bsns_year=bsns_year,
+                reprt_code=reprt_code,
+                fs_div=fs_div,
+                error="rate limited",
+                status_code="020",
+                retryable=True,
+            )
+        return DartFinancialStatementResult(
+            corp_code=corp.corp_code,
+            ticker=corp.ticker or "",
+            bsns_year=bsns_year,
+            reprt_code=reprt_code,
+            fs_div=fs_div,
+            error=self._final_error,
+            retryable=self._final_retryable,
+            exhaustion_reason=self._final_exhaustion_reason,
+        )
+
+
+def test_sync_dart_financial_statements_retries_on_retryable_flag() -> None:
+    storage = MockFinancialStorage()
+    provider = _RetryTrackingFinancialProvider(retryable_attempts=1)
+
+    sync_dart_financial_statements(
+        provider=provider,
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        fs_divs=["CFS"],
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+    )
+
+    assert provider.calls == 2
+
+
+def test_sync_dart_financial_statements_does_not_retry_request_invalid() -> None:
+    storage = MockFinancialStorage()
+    provider = _RetryTrackingFinancialProvider(
+        retryable_attempts=0,
+        final_error="OpenDART error 100: bad field",
+        final_exhaustion_reason="request_invalid",
+    )
+
+    sync_dart_financial_statements(
+        provider=provider,
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        fs_divs=["CFS"],
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+    )
+
+    assert provider.calls == 1
 
 
 def test_sync_dart_financial_statements_counts_success_and_no_data() -> None:

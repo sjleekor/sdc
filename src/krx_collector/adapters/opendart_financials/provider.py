@@ -2,27 +2,26 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from decimal import Decimal, InvalidOperation
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import urlopen
 
+from krx_collector.adapters.opendart_common import (
+    FINANCIAL_STATEMENT_POLICY,
+    OpenDartCallResult,
+    OpenDartRequestExecutor,
+    apply_call_result_meta,
+)
 from krx_collector.domain.enums import Source
 from krx_collector.domain.models import (
     DartCorp,
     DartFinancialStatementLine,
     DartFinancialStatementResult,
 )
-from krx_collector.util.retry import retry
 from krx_collector.util.time import now_kst
 
 logger = logging.getLogger(__name__)
 
 OPENDART_FINANCIAL_STATEMENT_URL = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json"
-OPENDART_NO_DATA_STATUS = "013"
-OPENDART_OK_STATUS = "000"
 
 
 def _parse_decimal(value: object) -> Decimal | None:
@@ -52,30 +51,12 @@ def parse_fnltt_singl_acnt_all_response(
     reprt_code: str,
     fs_div: str,
 ) -> DartFinancialStatementResult:
-    """Parse OpenDART financial-statement JSON into raw rows."""
-    status = str(payload.get("status", "")).strip()
-    message = str(payload.get("message", "")).strip()
+    """Parse an OpenDART financial-statement success (``status=000``) JSON payload.
 
-    if status == OPENDART_NO_DATA_STATUS:
-        return DartFinancialStatementResult(
-            corp_code=corp.corp_code,
-            ticker=corp.ticker or "",
-            bsns_year=bsns_year,
-            reprt_code=reprt_code,
-            fs_div=fs_div,
-            no_data=True,
-        )
-
-    if status != OPENDART_OK_STATUS:
-        return DartFinancialStatementResult(
-            corp_code=corp.corp_code,
-            ticker=corp.ticker or "",
-            bsns_year=bsns_year,
-            reprt_code=reprt_code,
-            fs_div=fs_div,
-            error=f"OpenDART error {status}: {message}",
-        )
-
+    Non-success status codes are classified upstream by the endpoint policy,
+    so this parser assumes the payload is a ``000`` response and only turns
+    the ``list`` into raw rows.
+    """
     fetched_at = now_kst()
     records: list[DartFinancialStatementLine] = []
 
@@ -127,35 +108,21 @@ def parse_fnltt_singl_acnt_all_response(
 class OpenDartFinancialStatementProvider:
     """Fetch single-company full financial statements from OpenDART."""
 
-    def __init__(self, api_key: str, timeout_seconds: float = 30.0) -> None:
-        self._api_key = api_key.strip()
+    def __init__(
+        self,
+        request_executor: OpenDartRequestExecutor,
+        timeout_seconds: float = 30.0,
+    ) -> None:
+        self._request_executor = request_executor
         self._timeout_seconds = timeout_seconds
 
-    @retry(max_attempts=3, base_delay=1.0, backoff_factor=2.0)
-    def _download(self, corp_code: str, bsns_year: int, reprt_code: str, fs_div: str) -> bytes:
-        if not self._api_key:
-            raise RuntimeError("OPENDART_API_KEY is required for financial sync.")
+    @property
+    def request_executor(self) -> OpenDartRequestExecutor:
+        """Expose the shared executor for run-level metrics."""
+        return self._request_executor
 
-        query = urlencode(
-            {
-                "crtfc_key": self._api_key,
-                "corp_code": corp_code,
-                "bsns_year": str(bsns_year),
-                "reprt_code": reprt_code,
-                "fs_div": fs_div,
-            }
-        )
-        url = f"{OPENDART_FINANCIAL_STATEMENT_URL}?{query}"
-        logger.info(
-            "Downloading OpenDART financial statement: corp_code=%s year=%s reprt=%s fs_div=%s",
-            corp_code,
-            bsns_year,
-            reprt_code,
-            fs_div,
-        )
-
-        with urlopen(url, timeout=self._timeout_seconds) as response:
-            return response.read()
+    def _parse_financial_payload(self, payload_bytes: bytes) -> OpenDartCallResult:
+        return FINANCIAL_STATEMENT_POLICY.classify_json_payload(payload_bytes)
 
     def fetch_financial_statement(
         self,
@@ -164,40 +131,36 @@ class OpenDartFinancialStatementProvider:
         reprt_code: str,
         fs_div: str,
     ) -> DartFinancialStatementResult:
-        payload_bytes = b""
         try:
-            payload_bytes = self._download(corp.corp_code, bsns_year, reprt_code, fs_div)
-            payload = json.loads(payload_bytes.decode("utf-8"))
+            call_result = self._request_executor.fetch_bytes(
+                endpoint_url=OPENDART_FINANCIAL_STATEMENT_URL,
+                params={
+                    "corp_code": corp.corp_code,
+                    "bsns_year": str(bsns_year),
+                    "reprt_code": reprt_code,
+                    "fs_div": fs_div,
+                },
+                request_label=f"{corp.ticker}:{bsns_year}:{reprt_code}:{fs_div}",
+                parser=self._parse_financial_payload,
+                timeout_seconds=self._timeout_seconds,
+            )
+            if call_result.error or call_result.no_data:
+                return apply_call_result_meta(
+                    DartFinancialStatementResult(
+                        corp_code=corp.corp_code,
+                        ticker=corp.ticker or "",
+                        bsns_year=bsns_year,
+                        reprt_code=reprt_code,
+                        fs_div=fs_div,
+                    ),
+                    call_result,
+                )
+
+            payload = call_result.parsed_payload
             if not isinstance(payload, dict):
                 raise RuntimeError("OpenDART returned an unexpected JSON payload.")
-            return parse_fnltt_singl_acnt_all_response(payload, corp, bsns_year, reprt_code, fs_div)
-        except HTTPError as exc:
-            return DartFinancialStatementResult(
-                corp_code=corp.corp_code,
-                ticker=corp.ticker or "",
-                bsns_year=bsns_year,
-                reprt_code=reprt_code,
-                fs_div=fs_div,
-                error=f"OpenDART HTTP error: {exc.code} {exc.reason}",
-            )
-        except URLError as exc:
-            return DartFinancialStatementResult(
-                corp_code=corp.corp_code,
-                ticker=corp.ticker or "",
-                bsns_year=bsns_year,
-                reprt_code=reprt_code,
-                fs_div=fs_div,
-                error=f"OpenDART network error: {exc.reason}",
-            )
-        except json.JSONDecodeError:
-            return DartFinancialStatementResult(
-                corp_code=corp.corp_code,
-                ticker=corp.ticker or "",
-                bsns_year=bsns_year,
-                reprt_code=reprt_code,
-                fs_div=fs_div,
-                error=f"OpenDART returned invalid JSON: {payload_bytes[:200]!r}",
-            )
+            result = parse_fnltt_singl_acnt_all_response(payload, corp, bsns_year, reprt_code, fs_div)
+            return apply_call_result_meta(result, call_result)
         except Exception as exc:
             return DartFinancialStatementResult(
                 corp_code=corp.corp_code,

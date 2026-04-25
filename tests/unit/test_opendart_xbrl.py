@@ -4,6 +4,7 @@ from datetime import date
 from decimal import Decimal
 
 from krx_collector.adapters.opendart_xbrl.provider import parse_xbrl_zip_response
+from krx_collector.adapters.opendart_xbrl.provider import OpenDartXbrlProvider
 from krx_collector.domain.enums import Market, RunStatus, RunType, Source
 from krx_collector.domain.models import (
     DartCorp,
@@ -16,6 +17,7 @@ from krx_collector.domain.models import (
 )
 from krx_collector.service.sync_dart_xbrl import sync_dart_xbrl
 from krx_collector.util.time import now_kst
+from tests.helpers.fake_opendart_executor import FakeOpenDartExecutor
 
 
 def _sample_corp() -> DartCorp:
@@ -100,6 +102,44 @@ def test_parse_xbrl_zip_response_extracts_document_and_facts() -> None:
     assert weighted.label_ko == "기본주당이익 계산에 사용된 가중평균주식수"
     assert weighted.context_type == "duration"
     assert weighted.period_end == date(2025, 12, 31)
+
+
+def test_open_dart_xbrl_provider_maps_file_missing_as_no_data() -> None:
+    corp = _sample_corp()
+    provider = OpenDartXbrlProvider(
+        request_executor=FakeOpenDartExecutor(
+            [
+                (
+                    "<result><status>014</status><message>파일이 존재하지 않습니다.</message></result>"
+                ).encode("utf-8"),
+            ]
+        )
+    )
+
+    result = provider.fetch_xbrl(corp, 2025, "11011", "20260310002820")
+
+    assert result.no_data is True
+    assert result.status_code == "014"
+    assert result.error is None
+
+
+def test_open_dart_xbrl_provider_maps_no_data_status_013() -> None:
+    corp = _sample_corp()
+    provider = OpenDartXbrlProvider(
+        request_executor=FakeOpenDartExecutor(
+            [
+                (
+                    "<result><status>013</status><message>조회된 데이타가 없습니다.</message></result>"
+                ).encode("utf-8"),
+            ]
+        )
+    )
+
+    result = provider.fetch_xbrl(corp, 2025, "11011", "20260310002820")
+
+    assert result.no_data is True
+    assert result.status_code == "013"
+    assert result.error is None
 
 
 class MockXbrlProvider:
