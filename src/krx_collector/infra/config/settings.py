@@ -19,7 +19,7 @@ from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, model_validator
+from pydantic import Field, PrivateAttr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -102,7 +102,7 @@ class Settings(BaseSettings):
     universe_source_default: UniverseSourceDefault = UniverseSourceDefault.FDR
     opendart_api_key: str = ""
     opendart_api_keys_raw: str = Field(default="", validation_alias="OPENDART_API_KEYS")
-    opendart_api_keys: tuple[str, ...] = ()
+    _opendart_api_keys: tuple[str, ...] = PrivateAttr(default=())
 
     # Rate limiting
     rate_limit_seconds: float = 0.2
@@ -115,6 +115,11 @@ class Settings(BaseSettings):
     remote_db_host_override: str | None = None
     remote_db_ssh_host: str | None = None
     remote_db_ssh_local_port: int | None = None
+
+    @property
+    def opendart_api_keys(self) -> tuple[str, ...]:
+        """Normalized OpenDART key list from OPENDART_API_KEYS and OPENDART_API_KEY."""
+        return self._opendart_api_keys
 
     @model_validator(mode="after")
     def _compute_dsn(self) -> Settings:
@@ -139,7 +144,7 @@ class Settings(BaseSettings):
             ordered_keys.append(legacy_key)
 
         self.opendart_api_key = legacy_key
-        self.opendart_api_keys = tuple(ordered_keys)
+        self._opendart_api_keys = tuple(ordered_keys)
         return self
 
 

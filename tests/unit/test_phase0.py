@@ -28,6 +28,16 @@ def test_settings_normalize_multiple_opendart_keys() -> None:
     assert settings.opendart_api_keys == ("key_a", "key_b", "key_c")
 
 
+def test_settings_accept_comma_separated_opendart_keys_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("OPENDART_API_KEYS", " key_a , key_b ,, key_c , ")
+    monkeypatch.setenv("OPENDART_API_KEY", " key_b ")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.opendart_api_key == "key_b"
+    assert settings.opendart_api_keys == ("key_a", "key_b", "key_c")
+
+
 def test_settings_allow_empty_multiple_opendart_keys() -> None:
     settings = Settings(
         opendart_api_key="",
