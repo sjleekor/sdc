@@ -34,6 +34,18 @@ def _build_opendart_request_executor() -> OpenDartRequestExecutor:
     return OpenDartRequestExecutor(settings.opendart_api_keys)
 
 
+def _exit_if_opendart_key_exhausted(result: object, label: str) -> None:
+    """Stop shell schedulers when every OpenDART key has hit its daily limit."""
+    if getattr(result, "opendart_exhaustion_reason", None) != "all_rate_limited":
+        return
+
+    error = getattr(result, "errors", {}).get(
+        "pipeline", "All OpenDART API keys are temporarily rate limited."
+    )
+    print(f"❌ {label} stopped: {error}", file=sys.stderr)
+    sys.exit(75)
+
+
 # ---------------------------------------------------------------------------
 # Subcommand handlers
 # ---------------------------------------------------------------------------
@@ -180,6 +192,7 @@ def _handle_dart_sync_financials(args: argparse.Namespace) -> None:
     if result.errors:
         for request_key, error in list(result.errors.items())[:10]:
             print(f"   - Error {request_key}: {error}")
+    _exit_if_opendart_key_exhausted(result, "OpenDART financial sync")
 
 
 def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
@@ -231,6 +244,7 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
     if result.errors:
         for request_key, error in list(result.errors.items())[:10]:
             print(f"   - Error {request_key}: {error}")
+    _exit_if_opendart_key_exhausted(result, "OpenDART share info sync")
 
 
 def _handle_dart_sync_xbrl(args: argparse.Namespace) -> None:
@@ -281,6 +295,7 @@ def _handle_dart_sync_xbrl(args: argparse.Namespace) -> None:
     if result.errors:
         for request_key, error in list(result.errors.items())[:10]:
             print(f"   - Error {request_key}: {error}")
+    _exit_if_opendart_key_exhausted(result, "OpenDART XBRL sync")
 
 
 def _handle_metrics_normalize(args: argparse.Namespace) -> None:

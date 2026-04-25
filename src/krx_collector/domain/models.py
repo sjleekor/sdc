@@ -585,6 +585,7 @@ class DartFinancialSyncResult:
     rows_upserted: int = 0
     no_data_requests: int = 0
     errors: dict[str, str] = field(default_factory=dict)
+    opendart_exhaustion_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -600,6 +601,7 @@ class DartShareInfoSyncResult:
     shareholder_return_rows_upserted: int = 0
     no_data_requests: int = 0
     errors: dict[str, str] = field(default_factory=dict)
+    opendart_exhaustion_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -615,6 +617,7 @@ class DartXbrlSyncResult:
     facts_upserted: int = 0
     no_data_requests: int = 0
     errors: dict[str, str] = field(default_factory=dict)
+    opendart_exhaustion_reason: str | None = None
 
 
 @dataclass(slots=True)

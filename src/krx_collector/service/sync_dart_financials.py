@@ -10,10 +10,12 @@ from krx_collector.domain.models import DartFinancialSyncResult, IngestionRun
 from krx_collector.ports.financials import FinancialStatementProvider
 from krx_collector.ports.storage import Storage
 from krx_collector.util.pipeline import (
+    OpenDartKeyExhaustedError,
     build_run_counts,
     call_with_retry,
     complete_run,
     fail_run,
+    is_opendart_daily_limit_exhausted,
     should_retry_opendart_result,
     sleep_with_jitter,
 )
@@ -101,6 +103,11 @@ def sync_dart_financial_statements(
                             should_retry_result=should_retry_opendart_result,
                         )
 
+                        if is_opendart_daily_limit_exhausted(fetch_result):
+                            raise OpenDartKeyExhaustedError(
+                                fetch_result.error
+                                or "All OpenDART API keys are temporarily rate limited."
+                            )
                         if fetch_result.error:
                             logger.warning(
                                 "Financial sync failed for %s: %s", request_key, fetch_result.error
@@ -132,6 +139,12 @@ def sync_dart_financial_statements(
             errors=result.errors,
             partial_subject="financial sync requests",
         )
+        return result
+    except OpenDartKeyExhaustedError as exc:
+        logger.warning("OpenDART financial sync stopped: %s", exc)
+        fail_run(storage, run, exc)
+        result.opendart_exhaustion_reason = "all_rate_limited"
+        result.errors["pipeline"] = str(exc)
         return result
     except Exception as exc:
         logger.exception("OpenDART financial sync failed")

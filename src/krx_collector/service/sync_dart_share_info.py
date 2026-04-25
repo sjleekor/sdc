@@ -10,10 +10,12 @@ from krx_collector.domain.models import DartShareInfoSyncResult, IngestionRun
 from krx_collector.ports.share_info import ShareCountProvider, ShareholderReturnProvider
 from krx_collector.ports.storage import Storage
 from krx_collector.util.pipeline import (
+    OpenDartKeyExhaustedError,
     build_run_counts,
     call_with_retry,
     complete_run,
     fail_run,
+    is_opendart_daily_limit_exhausted,
     should_retry_opendart_result,
     sleep_with_jitter,
 )
@@ -104,6 +106,11 @@ def sync_dart_share_info(
                             logger_instance=logger,
                             should_retry_result=should_retry_opendart_result,
                         )
+                        if is_opendart_daily_limit_exhausted(share_count_result):
+                            raise OpenDartKeyExhaustedError(
+                                share_count_result.error
+                                or "All OpenDART API keys are temporarily rate limited."
+                            )
                         if share_count_result.error:
                             result.errors[f"{request_prefix}:share_count"] = (
                                 share_count_result.error
@@ -137,6 +144,11 @@ def sync_dart_share_info(
                             logger_instance=logger,
                             should_retry_result=should_retry_opendart_result,
                         )
+                        if is_opendart_daily_limit_exhausted(dividend_result):
+                            raise OpenDartKeyExhaustedError(
+                                dividend_result.error
+                                or "All OpenDART API keys are temporarily rate limited."
+                            )
                         if dividend_result.error:
                             result.errors[f"{request_prefix}:dividend"] = dividend_result.error
                         elif dividend_result.no_data:
@@ -170,6 +182,11 @@ def sync_dart_share_info(
                             logger_instance=logger,
                             should_retry_result=should_retry_opendart_result,
                         )
+                        if is_opendart_daily_limit_exhausted(treasury_result):
+                            raise OpenDartKeyExhaustedError(
+                                treasury_result.error
+                                or "All OpenDART API keys are temporarily rate limited."
+                            )
                         if treasury_result.error:
                             result.errors[f"{request_prefix}:treasury_stock"] = (
                                 treasury_result.error
@@ -202,6 +219,12 @@ def sync_dart_share_info(
             errors=result.errors,
             partial_subject="share info requests",
         )
+        return result
+    except OpenDartKeyExhaustedError as exc:
+        logger.warning("OpenDART share info sync stopped: %s", exc)
+        fail_run(storage, run, exc)
+        result.opendart_exhaustion_reason = "all_rate_limited"
+        result.errors["pipeline"] = str(exc)
         return result
     except Exception as exc:
         logger.exception("OpenDART share info sync failed")

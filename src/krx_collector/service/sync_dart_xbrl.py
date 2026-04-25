@@ -10,10 +10,12 @@ from krx_collector.domain.models import DartXbrlSyncResult, IngestionRun
 from krx_collector.ports.storage import Storage
 from krx_collector.ports.xbrl import XbrlProvider
 from krx_collector.util.pipeline import (
+    OpenDartKeyExhaustedError,
     build_run_counts,
     call_with_retry,
     complete_run,
     fail_run,
+    is_opendart_daily_limit_exhausted,
     should_retry_opendart_result,
     sleep_with_jitter,
 )
@@ -112,6 +114,10 @@ def sync_dart_xbrl(
                 should_retry_result=should_retry_opendart_result,
             )
 
+            if is_opendart_daily_limit_exhausted(fetch_result):
+                raise OpenDartKeyExhaustedError(
+                    fetch_result.error or "All OpenDART API keys are temporarily rate limited."
+                )
             if fetch_result.error:
                 logger.warning("XBRL sync failed for %s: %s", request_key, fetch_result.error)
                 result.errors[request_key] = fetch_result.error
@@ -147,6 +153,12 @@ def sync_dart_xbrl(
             errors=result.errors,
             partial_subject="XBRL sync requests",
         )
+        return result
+    except OpenDartKeyExhaustedError as exc:
+        logger.warning("OpenDART XBRL sync stopped: %s", exc)
+        fail_run(storage, run, exc)
+        result.opendart_exhaustion_reason = "all_rate_limited"
+        result.errors["pipeline"] = str(exc)
         return result
     except Exception as exc:
         logger.exception("OpenDART XBRL sync failed")

@@ -16,6 +16,15 @@ from krx_collector.util.time import now_kst
 logger = logging.getLogger(__name__)
 
 
+class OpenDartKeyExhaustedError(RuntimeError):
+    """Raised when every configured OpenDART key has hit the daily limit."""
+
+
+def is_opendart_daily_limit_exhausted(result: object) -> bool:
+    """Return whether an OpenDART result means all keys are rate-limited."""
+    return getattr(result, "exhaustion_reason", None) == "all_rate_limited"
+
+
 def sleep_with_jitter(
     rate_limit_seconds: float,
     jitter_ratio: float = 0.2,
@@ -32,15 +41,14 @@ def sleep_with_jitter(
 def should_retry_opendart_result(result: object) -> bool:
     """Standard OpenDART retry predicate for ``call_with_retry``.
 
-    Retries when either (a) the executor flagged the individual call as
-    ``retryable`` (status ``020`` / ``800`` / ``900`` / HTTP 429 / 5xx /
-    network), or (b) the executor exhausted the key pool due to all keys
-    being temporarily rate-limited. Permanent failures like ``request_invalid``
-    or ``all_disabled`` are not retried.
+    Retries transient per-call failures, but not ``all_rate_limited``. Once
+    every configured key has hit the OpenDART limit, the scheduler should stop
+    this run and continue on the next daily execution after OpenDART resets
+    usage.
     """
-    return bool(getattr(result, "retryable", False)) or (
-        getattr(result, "exhaustion_reason", None) == "all_rate_limited"
-    )
+    if is_opendart_daily_limit_exhausted(result):
+        return False
+    return bool(getattr(result, "retryable", False))
 
 
 def call_with_retry[T](

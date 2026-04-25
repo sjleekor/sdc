@@ -88,6 +88,26 @@ class PartialFinancialProvider:
         )
 
 
+class ExhaustedFinancialProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def fetch_financial_statement(
+        self,
+        corp: DartCorp,
+        bsns_year: int,
+        reprt_code: str,
+        fs_div: str,
+    ) -> DartFinancialStatementResult:
+        del corp, bsns_year, reprt_code, fs_div
+        self.calls += 1
+        return DartFinancialStatementResult(
+            error="All OpenDART API keys are temporarily rate limited.",
+            retryable=True,
+            exhaustion_reason="all_rate_limited",
+        )
+
+
 class PartialFinancialStorage(RecordingStorage):
     def __init__(self) -> None:
         super().__init__()
@@ -181,9 +201,9 @@ def test_should_retry_opendart_result_retries_on_retryable_flag() -> None:
     assert should_retry_opendart_result(_OpenDartProbe(error="e", retryable=True)) is True
 
 
-def test_should_retry_opendart_result_retries_on_all_rate_limited() -> None:
+def test_should_retry_opendart_result_stops_on_all_rate_limited() -> None:
     probe = _OpenDartProbe(error="e", exhaustion_reason="all_rate_limited")
-    assert should_retry_opendart_result(probe) is True
+    assert should_retry_opendart_result(probe) is False
 
 
 def test_should_retry_opendart_result_does_not_retry_request_invalid() -> None:
@@ -292,3 +312,25 @@ def test_sync_dart_financial_statements_marks_partial_run() -> None:
         "partial_failure_count": 1,
         "completed_request_count": 1,
     }
+
+
+def test_sync_dart_financial_statements_stops_on_all_keys_rate_limited() -> None:
+    storage = PartialFinancialStorage()
+    provider = ExhaustedFinancialProvider()
+
+    result = sync_dart_financial_statements(
+        provider=provider,
+        storage=storage,  # type: ignore[arg-type]
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        fs_divs=["CFS", "OFS"],
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+    )
+
+    assert provider.calls == 1
+    assert result.opendart_exhaustion_reason == "all_rate_limited"
+    assert result.errors == {
+        "pipeline": "All OpenDART API keys are temporarily rate limited."
+    }
+    assert storage.runs[-1].status == RunStatus.FAILED
