@@ -377,3 +377,19 @@ class Storage(Protocol):
             if no rows exist yet.
         """
         ...
+
+    def get_daily_price_date_range(
+        self,
+        tickers: list[str] | None = None,
+    ) -> tuple[date, date] | None:
+        """Return the stored daily OHLCV date range for the selected tickers.
+
+        Args:
+            tickers: Optional ticker allowlist. If omitted, all stored price
+                rows are considered.
+
+        Returns:
+            ``(min_trade_date, max_trade_date)`` or ``None`` when no price
+            rows exist for the selection.
+        """
+        ...

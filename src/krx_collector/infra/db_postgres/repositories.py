@@ -1919,3 +1919,26 @@ class PostgresStorage:
         if not row or row[0] is None:
             return None
         return row[0]
+
+    def get_daily_price_date_range(
+        self,
+        tickers: list[str] | None = None,
+    ) -> tuple[date, date] | None:
+        """Return the min/max stored daily OHLCV trade dates for selected tickers."""
+        params: list[object] = []
+        where_clause = ""
+        if tickers:
+            where_clause = "WHERE ticker = ANY(%s)"
+            params.append(tickers)
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT MIN(trade_date), MAX(trade_date) FROM daily_ohlcv {where_clause}",
+                    params,
+                )
+                row = cur.fetchone()
+
+        if not row or row[0] is None or row[1] is None:
+            return None
+        return row[0], row[1]

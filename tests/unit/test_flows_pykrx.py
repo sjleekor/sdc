@@ -8,6 +8,7 @@ from krx_collector.adapters.flows_pykrx.provider import (
     parse_investor_net_volume_frame,
     parse_shorting_frames,
 )
+from krx_collector.cli.app import build_parser
 from krx_collector.domain.enums import ListingStatus, Market, RunStatus, RunType, Source
 from krx_collector.domain.models import (
     IngestionRun,
@@ -178,6 +179,13 @@ class MockFlowStorage:
         self.records.extend(records)
         return UpsertResult(updated=len(records))
 
+    def get_daily_price_date_range(
+        self,
+        tickers: list[str] | None = None,
+    ) -> tuple[date, date] | None:
+        del tickers
+        return date(2026, 4, 16), date(2026, 4, 17)
+
 
 def test_sync_krx_security_flows_writes_rows_and_pending_metrics() -> None:
     storage = MockFlowStorage()
@@ -199,3 +207,11 @@ def test_sync_krx_security_flows_writes_rows_and_pending_metrics() -> None:
     assert len(storage.records) == 3
     assert storage.runs[0].run_type == RunType.KRX_FLOW_SYNC
     assert storage.runs[-1].status == RunStatus.SUCCESS
+
+
+def test_flows_sync_parser_supports_price_range_mode() -> None:
+    args = build_parser().parse_args(["flows", "sync", "--use-price-range"])
+
+    assert args.use_price_range is True
+    assert args.start is None
+    assert args.end is None

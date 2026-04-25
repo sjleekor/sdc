@@ -370,9 +370,12 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
     """Handle ``krx-collector flows sync``."""
     settings = get_settings()
     tickers = [value.strip() for value in args.tickers.split(",")] if args.tickers else None
+    default_flow_date = date.today() - timedelta(days=1)
+    start = args.start or default_flow_date
+    end = args.end or default_flow_date
 
     print(
-        f"→ flows sync: start={args.start}, end={args.end}, "
+        f"→ flows sync: start={start}, end={end}, "
         f"tickers={tickers}, rate_limit={args.rate_limit_seconds}"
     )
 
@@ -382,11 +385,31 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
 
     provider = PykrxFlowProvider()
     storage = PostgresStorage(settings.db_dsn)
+    if args.use_price_range:
+        price_range = storage.get_daily_price_date_range(tickers=tickers)
+        if price_range is None:
+            print(
+                "❌ Flow sync failed: no daily OHLCV rows found for price range.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        price_start, price_end = price_range
+        start = max(start, price_start) if args.start else price_start
+        end = min(end, price_end) if args.end else price_end
+        if start > end:
+            print(
+                f"❌ Flow sync failed: resolved price range is empty "
+                f"(start={start}, end={end}).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"   - Price range resolved: start={start}, end={end}")
+
     result = sync_krx_security_flows(
         provider=provider,
         storage=storage,
-        start=args.start,
-        end=args.end,
+        start=start,
+        end=end,
         tickers=tickers,
         rate_limit_seconds=args.rate_limit_seconds,
     )
@@ -888,13 +911,13 @@ def build_parser() -> argparse.ArgumentParser:
     flows_sync.add_argument(
         "--start",
         type=_parse_date,
-        default=date.today() - timedelta(days=1),
+        default=None,
         help="Start date (YYYY-MM-DD). Default: yesterday.",
     )
     flows_sync.add_argument(
         "--end",
         type=_parse_date,
-        default=date.today() - timedelta(days=1),
+        default=None,
         help="End date (YYYY-MM-DD). Default: yesterday.",
     )
     flows_sync.add_argument(
@@ -907,6 +930,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.2,
         help="Seconds between provider requests (default: 0.2).",
+    )
+    flows_sync.add_argument(
+        "--use-price-range",
+        action="store_true",
+        help=(
+            "Use the stored daily OHLCV min/max trade_date as the flow sync range. "
+            "Optional --start/--end further clamp that range."
+        ),
     )
     flows_sync.set_defaults(handler=_handle_flows_sync)
 
