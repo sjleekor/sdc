@@ -1014,6 +1014,62 @@ class PostgresStorage:
 
         return result
 
+    def count_krx_security_flow_daily_market_tickers(
+        self,
+        start: date,
+        end: date,
+        tickers: list[str],
+        metric_code: str,
+        source: Source,
+    ) -> dict[tuple[date, str], int]:
+        """Count existing tickers by trade_date/market for one flow metric."""
+        if not tickers:
+            return {}
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT trade_date, market, COUNT(DISTINCT ticker)
+                    FROM krx_security_flow_raw
+                    WHERE trade_date BETWEEN %s AND %s
+                      AND ticker = ANY(%s)
+                      AND metric_code = %s
+                      AND source = %s
+                    GROUP BY trade_date, market
+                    """,
+                    (start, end, tickers, metric_code, source.value),
+                )
+                return {(row[0], row[1]): int(row[2]) for row in cur.fetchall()}
+
+    def count_krx_security_flow_ticker_metric_dates(
+        self,
+        start: date,
+        end: date,
+        tickers: list[str],
+        metric_codes: list[str],
+        source: Source,
+    ) -> dict[str, int]:
+        """Count existing distinct (trade_date, metric_code) pairs by ticker."""
+        if not tickers or not metric_codes:
+            return {}
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT ticker, COUNT(DISTINCT (trade_date, metric_code))
+                    FROM krx_security_flow_raw
+                    WHERE trade_date BETWEEN %s AND %s
+                      AND ticker = ANY(%s)
+                      AND metric_code = ANY(%s)
+                      AND source = %s
+                    GROUP BY ticker
+                    """,
+                    (start, end, tickers, metric_codes, source.value),
+                )
+                return {row[0]: int(row[1]) for row in cur.fetchall()}
+
     def upsert_operating_source_documents(
         self,
         records: list[OperatingSourceDocument],

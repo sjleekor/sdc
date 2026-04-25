@@ -21,6 +21,18 @@ from krx_collector.util.time import now_kst
 
 logger = logging.getLogger(__name__)
 
+FOREIGN_HOLDING_METRIC = "foreign_holding_shares"
+INVESTOR_METRICS = [
+    "institution_net_buy_volume",
+    "individual_net_buy_volume",
+    "foreign_net_buy_volume",
+]
+SHORTING_METRICS = [
+    "short_selling_volume",
+    "short_selling_value",
+    "short_selling_balance_quantity",
+]
+
 
 def _filter_targets(stocks: list[Stock], tickers: list[str] | None) -> list[Stock]:
     if tickers is None:
@@ -87,10 +99,54 @@ def sync_krx_security_flows(
         for stock in targets:
             stocks_by_market.setdefault(stock.market.value, []).append(stock)
 
+        target_tickers = [stock.ticker for stock in targets]
+        foreign_ticker_counts = storage.count_krx_security_flow_daily_market_tickers(
+            start=start,
+            end=end,
+            tickers=target_tickers,
+            metric_code=FOREIGN_HOLDING_METRIC,
+            source=Source.PYKRX,
+        )
+        investor_metric_counts = storage.count_krx_security_flow_ticker_metric_dates(
+            start=start,
+            end=end,
+            tickers=target_tickers,
+            metric_codes=INVESTOR_METRICS,
+            source=Source.PYKRX,
+        )
+        shorting_metric_counts = storage.count_krx_security_flow_ticker_metric_dates(
+            start=start,
+            end=end,
+            tickers=target_tickers,
+            metric_codes=SHORTING_METRICS,
+            source=Source.PYKRX,
+        )
+        investor_expected_count = len(trading_days) * len(INVESTOR_METRICS)
+        shorting_expected_count = len(trading_days) * len(SHORTING_METRICS)
+        completed_investor_tickers = {
+            ticker
+            for ticker, count in investor_metric_counts.items()
+            if count >= investor_expected_count
+        }
+        completed_shorting_tickers = {
+            ticker
+            for ticker, count in shorting_metric_counts.items()
+            if count >= shorting_expected_count
+        }
+
         for trade_date in trading_days:
             for market_stocks in stocks_by_market.values():
                 market = market_stocks[0].market
                 market_tickers = [stock.ticker for stock in market_stocks]
+                if foreign_ticker_counts.get((trade_date, market.value), 0) >= len(market_tickers):
+                    logger.debug(
+                        "Skipping existing foreign holding flow request %s:%s",
+                        trade_date.isoformat(),
+                        market.value,
+                    )
+                    result.requests_skipped += 1
+                    continue
+
                 result.requests_attempted += 1
                 request_key = f"foreign:{trade_date.isoformat()}:{market.value}"
                 foreign_result = call_with_retry(
@@ -121,6 +177,15 @@ def sync_krx_security_flows(
                 ("investor", provider.fetch_investor_net_volume),
                 ("shorting", provider.fetch_shorting_metrics),
             ]:
+                if fetch_kind == "investor" and stock.ticker in completed_investor_tickers:
+                    logger.debug("Skipping existing investor flow request %s", stock.ticker)
+                    result.requests_skipped += 1
+                    continue
+                if fetch_kind == "shorting" and stock.ticker in completed_shorting_tickers:
+                    logger.debug("Skipping existing shorting flow request %s", stock.ticker)
+                    result.requests_skipped += 1
+                    continue
+
                 result.requests_attempted += 1
                 request_key = f"{fetch_kind}:{stock.ticker}:{start.isoformat()}:{end.isoformat()}"
                 fetch_result = call_with_retry(
@@ -146,6 +211,7 @@ def sync_krx_security_flows(
             counts=build_run_counts(
                 targets_processed=result.targets_processed,
                 requests_attempted=result.requests_attempted,
+                requests_skipped=result.requests_skipped,
                 rows_upserted=result.rows_upserted,
                 no_data_requests=result.no_data_requests,
                 pending_metric_count=len(result.pending_metrics),

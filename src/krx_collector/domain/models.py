@@ -627,6 +627,7 @@ class KrxFlowSyncResult:
     upsert: UpsertResult = field(default_factory=UpsertResult)
     targets_processed: int = 0
     requests_attempted: int = 0
+    requests_skipped: int = 0
     rows_upserted: int = 0
     no_data_requests: int = 0
     pending_metrics: list[str] = field(default_factory=list)

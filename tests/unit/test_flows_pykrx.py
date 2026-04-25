@@ -76,6 +76,11 @@ def test_parse_shorting_frames() -> None:
 
 
 class MockFlowProvider:
+    def __init__(self) -> None:
+        self.investor_calls = 0
+        self.shorting_calls = 0
+        self.foreign_calls = 0
+
     def fetch_investor_net_volume(
         self,
         ticker: str,
@@ -83,6 +88,7 @@ class MockFlowProvider:
         start: date,
         end: date,
     ) -> SecurityFlowFetchResult:
+        self.investor_calls += 1
         return SecurityFlowFetchResult(
             records=[
                 SecurityFlowLine(
@@ -107,6 +113,7 @@ class MockFlowProvider:
         start: date,
         end: date,
     ) -> SecurityFlowFetchResult:
+        self.shorting_calls += 1
         return SecurityFlowFetchResult(
             records=[
                 SecurityFlowLine(
@@ -130,6 +137,7 @@ class MockFlowProvider:
         market: Market,
         tickers: list[str] | None = None,
     ) -> SecurityFlowFetchResult:
+        self.foreign_calls += 1
         ticker = tickers[0] if tickers else "005930"
         return SecurityFlowFetchResult(
             records=[
@@ -156,6 +164,9 @@ class MockFlowStorage:
     def __init__(self) -> None:
         self.runs: list[IngestionRun] = []
         self.records: list[SecurityFlowLine] = []
+        self.foreign_counts: dict[tuple[date, str], int] = {}
+        self.investor_counts: dict[str, int] = {}
+        self.shorting_counts: dict[str, int] = {}
 
     def record_run(self, run: IngestionRun) -> None:
         self.runs.append(run)
@@ -178,6 +189,30 @@ class MockFlowStorage:
     def upsert_krx_security_flow_raw(self, records: list[SecurityFlowLine]) -> UpsertResult:
         self.records.extend(records)
         return UpsertResult(updated=len(records))
+
+    def count_krx_security_flow_daily_market_tickers(
+        self,
+        start: date,
+        end: date,
+        tickers: list[str],
+        metric_code: str,
+        source: Source,
+    ) -> dict[tuple[date, str], int]:
+        del start, end, tickers, metric_code, source
+        return self.foreign_counts
+
+    def count_krx_security_flow_ticker_metric_dates(
+        self,
+        start: date,
+        end: date,
+        tickers: list[str],
+        metric_codes: list[str],
+        source: Source,
+    ) -> dict[str, int]:
+        del start, end, tickers, source
+        if "institution_net_buy_volume" in metric_codes:
+            return self.investor_counts
+        return self.shorting_counts
 
     def get_daily_price_date_range(
         self,
@@ -206,6 +241,33 @@ def test_sync_krx_security_flows_writes_rows_and_pending_metrics() -> None:
     assert result.pending_metrics == ["borrow_balance_quantity"]
     assert len(storage.records) == 3
     assert storage.runs[0].run_type == RunType.KRX_FLOW_SYNC
+    assert storage.runs[-1].status == RunStatus.SUCCESS
+
+
+def test_sync_krx_security_flows_skips_complete_existing_requests() -> None:
+    storage = MockFlowStorage()
+    storage.foreign_counts[(date(2026, 4, 17), Market.KOSPI.value)] = 1
+    storage.investor_counts["005930"] = 3
+    storage.shorting_counts["005930"] = 3
+    provider = MockFlowProvider()
+
+    result = sync_krx_security_flows(
+        provider=provider,  # type: ignore[arg-type]
+        storage=storage,  # type: ignore[arg-type]
+        start=date(2026, 4, 17),
+        end=date(2026, 4, 17),
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+    )
+
+    assert result.errors == {}
+    assert result.requests_attempted == 0
+    assert result.requests_skipped == 3
+    assert result.rows_upserted == 0
+    assert len(storage.records) == 0
+    assert provider.foreign_calls == 0
+    assert provider.investor_calls == 0
+    assert provider.shorting_calls == 0
     assert storage.runs[-1].status == RunStatus.SUCCESS
 
 

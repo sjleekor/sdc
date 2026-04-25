@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Protocol, runtime_checkable
 
-from krx_collector.domain.enums import Market, RunType
+from krx_collector.domain.enums import Market, RunType, Source
 from krx_collector.domain.models import (
     DailyBar,
     DartCorp,
@@ -181,6 +181,28 @@ class Storage(Protocol):
         records: list[SecurityFlowLine],
     ) -> UpsertResult:
         """Upsert KRX / pykrx security-flow raw rows."""
+        ...
+
+    def count_krx_security_flow_daily_market_tickers(
+        self,
+        start: date,
+        end: date,
+        tickers: list[str],
+        metric_code: str,
+        source: Source,
+    ) -> dict[tuple[date, str], int]:
+        """Return existing ticker counts for a daily market-level flow metric."""
+        ...
+
+    def count_krx_security_flow_ticker_metric_dates(
+        self,
+        start: date,
+        end: date,
+        tickers: list[str],
+        metric_codes: list[str],
+        source: Source,
+    ) -> dict[str, int]:
+        """Return existing distinct (trade_date, metric_code) counts by ticker."""
         ...
 
     def upsert_operating_source_documents(

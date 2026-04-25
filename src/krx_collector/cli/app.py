@@ -421,6 +421,7 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
 
     print(f"   - Targets processed: {result.targets_processed}")
     print(f"   - Requests attempted: {result.requests_attempted}")
+    print(f"   - Requests skipped: {result.requests_skipped}")
     print(f"   - Rows upserted: {result.rows_upserted}")
     print(f"   - No-data requests: {result.no_data_requests}")
     if result.pending_metrics:
