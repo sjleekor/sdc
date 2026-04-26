@@ -307,7 +307,10 @@ def _handle_metrics_normalize(args: argparse.Namespace) -> None:
     reprt_codes = [value.strip() for value in args.reprt_codes.split(",") if value.strip()]
     tickers = [value.strip() for value in args.tickers.split(",")] if args.tickers else None
 
-    print(f"→ metrics normalize: years={bsns_years}, reprt_codes={reprt_codes}, tickers={tickers}")
+    print(
+        f"→ metrics normalize: years={bsns_years}, reprt_codes={reprt_codes}, "
+        f"tickers={tickers}, batch_size={args.batch_size}"
+    )
 
     from krx_collector.infra.config.settings import get_settings as _get_settings
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
@@ -320,6 +323,7 @@ def _handle_metrics_normalize(args: argparse.Namespace) -> None:
         bsns_years=bsns_years,
         reprt_codes=reprt_codes,
         tickers=tickers,
+        batch_size=args.batch_size,
     )
 
     if result.errors:
@@ -895,6 +899,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--tickers",
         default=None,
         help="Optional comma-separated ticker allowlist.",
+    )
+    metrics_normalize.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help=("Ticker batch size (env: SDC_METRICS_NORMALIZE_BATCH_SIZE, " "default 100)."),
     )
     metrics_normalize.set_defaults(handler=_handle_metrics_normalize)
 

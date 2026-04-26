@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
@@ -18,12 +19,38 @@ from krx_collector.service.normalize_metrics import normalize_stock_metrics
 from krx_collector.util.time import now_kst
 
 
+def _filter_rows(rows, bsns_years, reprt_codes, tickers):
+    return [
+        row
+        for row in rows
+        if row.bsns_year in bsns_years
+        and row.reprt_code in reprt_codes
+        and (tickers is None or row.ticker in tickers)
+    ]
+
+
+def _fact_signature(facts: list[StockMetricFact]) -> set[tuple[str, str, int, str, Decimal, str]]:
+    return {
+        (
+            fact.ticker,
+            fact.metric_code,
+            fact.bsns_year,
+            fact.reprt_code,
+            fact.value_numeric,
+            fact.source_key,
+        )
+        for fact in facts
+    }
+
+
 class MockMetricStorage:
     def __init__(self) -> None:
         self.runs: list[IngestionRun] = []
         self.catalog: list[MetricCatalogEntry] = []
         self.rules: list[MetricMappingRule] = []
         self.facts: list[StockMetricFact] = []
+        self.fact_by_key: dict[tuple[str, str, int, str], StockMetricFact] = {}
+        self.extra_financial_rows: list[DartFinancialStatementLine] = []
 
     def record_run(self, run: IngestionRun) -> None:
         self.runs.append(run)
@@ -55,7 +82,18 @@ class MockMetricStorage:
                 is_active=True,
                 source=Source.OPENDART,
                 fetched_at=now_kst(),
-            )
+            ),
+            DartCorp(
+                corp_code="00164779",
+                corp_name="SK하이닉스",
+                ticker="000660",
+                market=Market.KOSPI,
+                stock_name="SK하이닉스",
+                modify_date=date(2026, 3, 10),
+                is_active=True,
+                source=Source.OPENDART,
+                fetched_at=now_kst(),
+            ),
         ]
         if tickers is None:
             return records
@@ -68,7 +106,7 @@ class MockMetricStorage:
         tickers: list[str] | None = None,
     ) -> list[DartFinancialStatementLine]:
         fetched_at = now_kst()
-        return [
+        rows = [
             DartFinancialStatementLine(
                 corp_code="00126380",
                 ticker="005930",
@@ -182,6 +220,18 @@ class MockMetricStorage:
                 raw_payload={},
             ),
         ]
+        rows.append(
+            replace(
+                rows[1],
+                corp_code="00164779",
+                ticker="000660",
+                thstrm_amount=Decimal("300"),
+                thstrm_add_amount=Decimal("300"),
+                rcept_no="h1",
+            )
+        )
+        rows.extend(self.extra_financial_rows)
+        return _filter_rows(rows, bsns_years, reprt_codes, tickers)
 
     def get_dart_share_count_raw(
         self,
@@ -189,7 +239,7 @@ class MockMetricStorage:
         reprt_codes: list[str],
         tickers: list[str] | None = None,
     ) -> list[DartShareCountLine]:
-        return [
+        rows = [
             DartShareCountLine(
                 corp_code="00126380",
                 ticker="005930",
@@ -214,6 +264,7 @@ class MockMetricStorage:
                 raw_payload={},
             )
         ]
+        return _filter_rows(rows, bsns_years, reprt_codes, tickers)
 
     def get_dart_shareholder_return_raw(
         self,
@@ -221,7 +272,7 @@ class MockMetricStorage:
         reprt_codes: list[str],
         tickers: list[str] | None = None,
     ) -> list[DartShareholderReturnLine]:
-        return [
+        rows = [
             DartShareholderReturnLine(
                 corp_code="00126380",
                 ticker="005930",
@@ -245,6 +296,7 @@ class MockMetricStorage:
                 raw_payload={},
             )
         ]
+        return _filter_rows(rows, bsns_years, reprt_codes, tickers)
 
     def get_dart_xbrl_fact_raw(
         self,
@@ -252,7 +304,7 @@ class MockMetricStorage:
         reprt_codes: list[str],
         tickers: list[str] | None = None,
     ) -> list[DartXbrlFactLine]:
-        return [
+        rows = [
             DartXbrlFactLine(
                 corp_code="00126380",
                 ticker="005930",
@@ -280,9 +332,66 @@ class MockMetricStorage:
                 raw_payload={},
             )
         ]
+        return _filter_rows(rows, bsns_years, reprt_codes, tickers)
+
+    def iter_dart_financial_statement_for_normalize(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str],
+        rule_account_ids: list[str] | None = None,
+        page_size: int = 5000,
+    ):
+        del page_size
+        rows = self.get_dart_financial_statement_raw(bsns_years, reprt_codes, tickers)
+        if rule_account_ids is not None:
+            rows = [row for row in rows if row.account_id in rule_account_ids]
+        yield from rows
+
+    def iter_dart_share_count_for_normalize(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str],
+        rule_se_values: list[str] | None = None,
+        page_size: int = 5000,
+    ):
+        del page_size
+        rows = self.get_dart_share_count_raw(bsns_years, reprt_codes, tickers)
+        if rule_se_values is not None:
+            rows = [row for row in rows if row.se in rule_se_values]
+        yield from rows
+
+    def iter_dart_shareholder_return_for_normalize(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str],
+        page_size: int = 5000,
+    ):
+        del page_size
+        yield from self.get_dart_shareholder_return_raw(bsns_years, reprt_codes, tickers)
+
+    def iter_dart_xbrl_fact_for_normalize(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str],
+        rule_concept_ids: list[str] | None = None,
+        page_size: int = 5000,
+    ):
+        del page_size
+        rows = self.get_dart_xbrl_fact_raw(bsns_years, reprt_codes, tickers)
+        if rule_concept_ids is not None:
+            rows = [row for row in rows if row.concept_id in rule_concept_ids]
+        yield from rows
 
     def upsert_stock_metric_facts(self, records: list[StockMetricFact]) -> UpsertResult:
-        self.facts = records
+        for record in records:
+            self.fact_by_key[
+                (record.ticker, record.metric_code, record.bsns_year, record.reprt_code)
+            ] = record
+        self.facts = list(self.fact_by_key.values())
         return UpsertResult(updated=len(records))
 
 
@@ -312,3 +421,53 @@ def test_normalize_stock_metrics_prefers_cfs_and_writes_share_metrics() -> None:
     assert facts["interest_received"].value_numeric == Decimal("15")
     assert facts["weighted_avg_shares"].value_numeric == Decimal("6630180138")
     assert facts["weighted_avg_shares"].source_table == "dart_xbrl_fact_raw"
+
+
+def test_normalize_stock_metrics_is_chunk_size_equivalent() -> None:
+    signatures = []
+
+    for batch_size in (1, 2, 10):
+        storage = MockMetricStorage()
+
+        result = normalize_stock_metrics(
+            storage=storage,
+            bsns_years=[2025],
+            reprt_codes=["11011"],
+            tickers=["005930", "000660"],
+            batch_size=batch_size,
+        )
+
+        assert result.errors == {}
+        assert result.targets_processed == 2
+        signatures.append(_fact_signature(storage.facts))
+
+    assert signatures[0] == signatures[1] == signatures[2]
+    assert ("000660", "revenue", 2025, "11011", Decimal("300"), "h1:ifrs-full_Revenue:1") in (
+        signatures[0]
+    )
+
+
+def test_normalize_stock_metrics_uses_source_key_tiebreaker() -> None:
+    storage = MockMetricStorage()
+    duplicate_revenue = storage.get_dart_financial_statement_raw([2025], ["11011"], ["005930"])[1]
+    storage.extra_financial_rows.append(
+        replace(
+            duplicate_revenue,
+            thstrm_amount=Decimal("175"),
+            thstrm_add_amount=Decimal("175"),
+            rcept_no="r0",
+        )
+    )
+
+    result = normalize_stock_metrics(
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        tickers=["005930"],
+        batch_size=1,
+    )
+
+    assert result.errors == {}
+    revenue = next(fact for fact in storage.facts if fact.metric_code == "revenue")
+    assert revenue.value_numeric == Decimal("175")
+    assert revenue.source_key == "r0:ifrs-full_Revenue:1"

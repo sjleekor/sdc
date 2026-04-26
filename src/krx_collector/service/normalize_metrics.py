@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+import os
+import resource
+import sys
+import time
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
 from krx_collector.domain.enums import RunStatus, RunType
 from krx_collector.domain.models import (
+    DartCorp,
     DartFinancialStatementLine,
     DartShareCountLine,
     DartShareholderReturnLine,
@@ -23,6 +29,22 @@ from krx_collector.ports.storage import Storage
 from krx_collector.util.time import now_kst
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_METRICS_NORMALIZE_BATCH_SIZE = 100
+SelectedFact = tuple[int, int, str, StockMetricFact]
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateBuilder:
+    """Source-specific helpers for converting raw rows into candidate facts."""
+
+    source_table: str
+    rows: Iterable[object]
+    matcher: Callable[[MetricMappingRule, object], bool]
+    key_parts: Callable[[object], tuple[str, int, str, str]]
+    source_key_builder: Callable[[object], str]
+    period_end_builder: Callable[[object], date | None]
+    candidate_rank_builder: Callable[[object], int]
 
 
 def _default_metric_catalog() -> list[MetricCatalogEntry]:
@@ -418,11 +440,238 @@ def _xbrl_candidate_rank(row: DartXbrlFactLine) -> int:
     return rank
 
 
+def _resolve_batch_size(batch_size: int | None = None) -> int:
+    if batch_size is not None:
+        if batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer")
+        return batch_size
+
+    raw = os.environ.get("SDC_METRICS_NORMALIZE_BATCH_SIZE")
+    if not raw:
+        return DEFAULT_METRICS_NORMALIZE_BATCH_SIZE
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("SDC_METRICS_NORMALIZE_BATCH_SIZE must be an integer") from exc
+    if value <= 0:
+        raise ValueError("SDC_METRICS_NORMALIZE_BATCH_SIZE must be a positive integer")
+    return value
+
+
+def _current_rss_mb() -> float:
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if sys.platform == "darwin":
+        return rss / 1024 / 1024
+    return rss / 1024
+
+
+def chunked[T](seq: Iterable[T], size: int) -> Iterator[list[T]]:
+    if size <= 0:
+        raise ValueError("chunk size must be a positive integer")
+
+    buf: list[T] = []
+    for item in seq:
+        buf.append(item)
+        if len(buf) >= size:
+            yield buf
+            buf = []
+    if buf:
+        yield buf
+
+
+def _build_account_filter(rules: Sequence[MetricMappingRule]) -> list[str] | None:
+    """Return account IDs only when every rule is account-specific."""
+    if not rules:
+        return []
+    if any(not rule.account_id for rule in rules):
+        return None
+    return sorted({rule.account_id for rule in rules})
+
+
+def _build_se_filter(rules: Sequence[MetricMappingRule]) -> list[str] | None:
+    """Return share-count ``se`` values only when every rule names a row."""
+    if not rules:
+        return []
+    if any(not rule.row_name for rule in rules):
+        return None
+    return sorted({rule.row_name for rule in rules})
+
+
+def _resolve_target_tickers(
+    tickers: list[str] | None,
+    corp_by_ticker: dict[str, DartCorp],
+) -> list[str]:
+    if tickers is None:
+        return sorted(corp_by_ticker.keys())
+
+    seen: set[str] = set()
+    target_tickers: list[str] = []
+    for ticker in tickers:
+        if ticker in seen or ticker not in corp_by_ticker:
+            continue
+        seen.add(ticker)
+        target_tickers.append(ticker)
+    return target_tickers
+
+
+def _build_candidate_builders(
+    financial_rows: Iterable[DartFinancialStatementLine],
+    share_count_rows: Iterable[DartShareCountLine],
+    shareholder_return_rows: Iterable[DartShareholderReturnLine],
+    xbrl_rows: Iterable[DartXbrlFactLine],
+) -> list[CandidateBuilder]:
+    return [
+        CandidateBuilder(
+            source_table="dart_financial_statement_raw",
+            rows=financial_rows,
+            matcher=_matches_financial,
+            key_parts=lambda row: (row.ticker, row.bsns_year, row.reprt_code, row.fs_div),
+            source_key_builder=lambda row: f"{row.rcept_no}:{row.account_id}:{row.ord}",
+            period_end_builder=lambda row: _infer_period_end(row.bsns_year, row.reprt_code),
+            candidate_rank_builder=lambda row: 0,
+        ),
+        CandidateBuilder(
+            source_table="dart_share_count_raw",
+            rows=share_count_rows,
+            matcher=_matches_share_count,
+            key_parts=lambda row: (row.ticker, row.bsns_year, row.reprt_code, ""),
+            source_key_builder=lambda row: f"{row.rcept_no}:{row.se}",
+            period_end_builder=lambda row: row.stlm_dt
+            or _infer_period_end(row.bsns_year, row.reprt_code),
+            candidate_rank_builder=lambda row: 0,
+        ),
+        CandidateBuilder(
+            source_table="dart_shareholder_return_raw",
+            rows=shareholder_return_rows,
+            matcher=_matches_shareholder_return,
+            key_parts=lambda row: (row.ticker, row.bsns_year, row.reprt_code, ""),
+            source_key_builder=lambda row: (
+                f"{row.rcept_no}:{row.statement_type}:{row.row_name}:{row.stock_knd}:"
+                f"{row.dim1}:{row.dim2}:{row.dim3}:{row.metric_code}"
+            ),
+            period_end_builder=lambda row: row.stlm_dt
+            or _infer_period_end(row.bsns_year, row.reprt_code),
+            candidate_rank_builder=lambda row: 0,
+        ),
+        CandidateBuilder(
+            source_table="dart_xbrl_fact_raw",
+            rows=xbrl_rows,
+            matcher=_matches_xbrl,
+            key_parts=lambda row: (row.ticker, row.bsns_year, row.reprt_code, ""),
+            source_key_builder=lambda row: f"{row.rcept_no}:{row.context_id}:{row.concept_id}",
+            period_end_builder=lambda row: row.instant_date
+            or row.period_end
+            or _infer_period_end(row.bsns_year, row.reprt_code),
+            candidate_rank_builder=_xbrl_candidate_rank,
+        ),
+    ]
+
+
+def _collect_candidates(
+    builders: Sequence[CandidateBuilder],
+    rules_by_source: dict[str, list[MetricMappingRule]],
+    corp_by_ticker: dict[str, DartCorp],
+    unit_by_metric_code: dict[str, str],
+) -> dict[tuple[str, str, int, str], SelectedFact]:
+    selected_facts: dict[tuple[str, str, int, str], SelectedFact] = {}
+    for builder in builders:
+        source_rules = rules_by_source.get(builder.source_table, [])
+        if not source_rules:
+            continue
+
+        for row in builder.rows:
+            ticker, bsns_year, reprt_code, fs_div = builder.key_parts(row)
+            corp = corp_by_ticker.get(ticker)
+            if corp is None:
+                continue
+
+            for rule in source_rules:
+                if not builder.matcher(rule, row):
+                    continue
+
+                value_numeric = _extract_value(row, rule.value_selector)
+                if value_numeric is None:
+                    continue
+
+                source_key = builder.source_key_builder(row)
+                fact = StockMetricFact(
+                    ticker=ticker,
+                    market=corp.market,
+                    corp_code=corp.corp_code,
+                    metric_code=rule.metric_code,
+                    period_type=_reprt_code_to_period_type(reprt_code),
+                    period_end=builder.period_end_builder(row),
+                    bsns_year=bsns_year,
+                    reprt_code=reprt_code,
+                    fs_div=fs_div,
+                    value_numeric=value_numeric,
+                    value_text=str(value_numeric),
+                    unit=unit_by_metric_code.get(rule.metric_code, ""),
+                    source_table=builder.source_table,
+                    source_key=source_key,
+                    mapping_rule_code=rule.rule_code,
+                    fetched_at=row.fetched_at,
+                )
+                fact_key = (ticker, rule.metric_code, bsns_year, reprt_code)
+                candidate_rank = builder.candidate_rank_builder(row)
+                current = selected_facts.get(fact_key)
+                candidate_order = (rule.priority, candidate_rank, source_key)
+                if current is None or candidate_order < (current[0], current[1], current[2]):
+                    selected_facts[fact_key] = (
+                        rule.priority,
+                        candidate_rank,
+                        source_key,
+                        fact,
+                    )
+    return selected_facts
+
+
+def _normalize_chunk(
+    *,
+    storage: Storage,
+    bsns_years: list[int],
+    reprt_codes: list[str],
+    ticker_batch: list[str],
+    corp_by_ticker: dict[str, DartCorp],
+    rules_by_source: dict[str, list[MetricMappingRule]],
+    unit_by_metric_code: dict[str, str],
+) -> list[StockMetricFact]:
+    rule_accounts_fin = _build_account_filter(
+        rules_by_source.get("dart_financial_statement_raw", [])
+    )
+    rule_accounts_xbrl = _build_account_filter(rules_by_source.get("dart_xbrl_fact_raw", []))
+    rule_se_share = _build_se_filter(rules_by_source.get("dart_share_count_raw", []))
+
+    builders = _build_candidate_builders(
+        financial_rows=storage.iter_dart_financial_statement_for_normalize(
+            bsns_years, reprt_codes, ticker_batch, rule_accounts_fin
+        ),
+        share_count_rows=storage.iter_dart_share_count_for_normalize(
+            bsns_years, reprt_codes, ticker_batch, rule_se_share
+        ),
+        shareholder_return_rows=storage.iter_dart_shareholder_return_for_normalize(
+            bsns_years, reprt_codes, ticker_batch
+        ),
+        xbrl_rows=storage.iter_dart_xbrl_fact_for_normalize(
+            bsns_years, reprt_codes, ticker_batch, rule_accounts_xbrl
+        ),
+    )
+    selected = _collect_candidates(
+        builders=builders,
+        rules_by_source=rules_by_source,
+        corp_by_ticker=corp_by_ticker,
+        unit_by_metric_code=unit_by_metric_code,
+    )
+    return [fact for _, _, _, fact in selected.values()]
+
+
 def normalize_stock_metrics(
     storage: Storage,
     bsns_years: list[int],
     reprt_codes: list[str],
     tickers: list[str] | None = None,
+    *,
+    batch_size: int | None = None,
 ) -> MetricNormalizationResult:
     """Seed metric rules and normalize canonical facts from raw tables."""
     run = IngestionRun(
@@ -433,12 +682,16 @@ def normalize_stock_metrics(
             "bsns_years": bsns_years,
             "reprt_codes": reprt_codes,
             "tickers": tickers,
+            "batch_size": batch_size,
         },
     )
     storage.record_run(run)
 
     result = MetricNormalizationResult()
     try:
+        effective_batch_size = _resolve_batch_size(batch_size)
+        run.params["batch_size"] = effective_batch_size
+
         catalog = _default_metric_catalog()
         rules = _default_metric_mapping_rules()
         result.catalog_upsert = storage.upsert_metric_catalog(catalog)
@@ -450,133 +703,46 @@ def normalize_stock_metrics(
         }
         result.targets_processed = len(corp_by_ticker)
 
-        financial_rows = storage.get_dart_financial_statement_raw(bsns_years, reprt_codes, tickers)
-        share_count_rows = storage.get_dart_share_count_raw(bsns_years, reprt_codes, tickers)
-        shareholder_return_rows = storage.get_dart_shareholder_return_raw(
-            bsns_years, reprt_codes, tickers
-        )
-        xbrl_rows = storage.get_dart_xbrl_fact_raw(bsns_years, reprt_codes, tickers)
-
         rules_by_source: dict[str, list[MetricMappingRule]] = {}
         for rule in storage.get_metric_mapping_rules():
             rules_by_source.setdefault(rule.source_table, []).append(rule)
+        unit_by_metric_code = {entry.metric_code: entry.unit for entry in catalog}
+        target_tickers = _resolve_target_tickers(tickers, corp_by_ticker)
 
-        candidate_builders: list[
-            tuple[
-                str,
-                list[object],
-                Callable[[MetricMappingRule, object], bool],
-                Callable[[object], tuple[str, int, str, str]],
-                Callable[[object], str],
-                Callable[[object], date | None],
-                Callable[[object], int],
-            ]
-        ] = [
-            (
-                "dart_financial_statement_raw",
-                list(financial_rows),
-                _matches_financial,
-                lambda row: (row.ticker, row.bsns_year, row.reprt_code, row.fs_div),
-                lambda row: f"{row.rcept_no}:{row.account_id}:{row.ord}",
-                lambda row: _infer_period_end(row.bsns_year, row.reprt_code),
-                lambda row: 0,
-            ),
-            (
-                "dart_share_count_raw",
-                list(share_count_rows),
-                _matches_share_count,
-                lambda row: (row.ticker, row.bsns_year, row.reprt_code, ""),
-                lambda row: f"{row.rcept_no}:{row.se}",
-                lambda row: row.stlm_dt or _infer_period_end(row.bsns_year, row.reprt_code),
-                lambda row: 0,
-            ),
-            (
-                "dart_shareholder_return_raw",
-                list(shareholder_return_rows),
-                _matches_shareholder_return,
-                lambda row: (row.ticker, row.bsns_year, row.reprt_code, ""),
-                lambda row: (
-                    f"{row.rcept_no}:{row.statement_type}:{row.row_name}:{row.stock_knd}:"
-                    f"{row.dim1}:{row.dim2}:{row.dim3}:{row.metric_code}"
-                ),
-                lambda row: row.stlm_dt or _infer_period_end(row.bsns_year, row.reprt_code),
-                lambda row: 0,
-            ),
-            (
-                "dart_xbrl_fact_raw",
-                list(xbrl_rows),
-                _matches_xbrl,
-                lambda row: (row.ticker, row.bsns_year, row.reprt_code, ""),
-                lambda row: f"{row.rcept_no}:{row.context_id}:{row.concept_id}",
-                lambda row: row.instant_date
-                or row.period_end
-                or _infer_period_end(row.bsns_year, row.reprt_code),
-                _xbrl_candidate_rank,
-            ),
-        ]
+        processed_tickers = 0
+        for ticker_batch in chunked(target_tickers, effective_batch_size):
+            chunk_started_at = time.monotonic()
+            chunk_start = processed_tickers + 1
+            processed_tickers += len(ticker_batch)
+            chunk_end = processed_tickers
 
-        selected_facts: dict[tuple[str, str, int, str], tuple[int, int, StockMetricFact]] = {}
-        for (
-            source_table,
-            rows,
-            matcher,
-            key_parts,
-            source_key_builder,
-            period_end_builder,
-            candidate_rank_builder,
-        ) in candidate_builders:
-            source_rules = rules_by_source.get(source_table, [])
-            for row in rows:
-                ticker, bsns_year, reprt_code, fs_div = key_parts(row)
-                corp = corp_by_ticker.get(ticker)
-                if corp is None or corp.market is None:
-                    continue
-
-                for rule in source_rules:
-                    if not matcher(rule, row):
-                        continue
-
-                    value_numeric = _extract_value(row, rule.value_selector)
-                    if value_numeric is None:
-                        continue
-
-                    fact = StockMetricFact(
-                        ticker=ticker,
-                        market=corp.market,
-                        corp_code=corp.corp_code,
-                        metric_code=rule.metric_code,
-                        period_type=_reprt_code_to_period_type(reprt_code),
-                        period_end=period_end_builder(row),
-                        bsns_year=bsns_year,
-                        reprt_code=reprt_code,
-                        fs_div=fs_div,
-                        value_numeric=value_numeric,
-                        value_text=str(value_numeric),
-                        unit=next(
-                            (
-                                entry.unit
-                                for entry in catalog
-                                if entry.metric_code == rule.metric_code
-                            ),
-                            "",
-                        ),
-                        source_table=source_table,
-                        source_key=source_key_builder(row),
-                        mapping_rule_code=rule.rule_code,
-                        fetched_at=row.fetched_at,
-                    )
-                    fact_key = (ticker, rule.metric_code, bsns_year, reprt_code)
-                    candidate_rank = candidate_rank_builder(row)
-                    current = selected_facts.get(fact_key)
-                    if current is None or (rule.priority, candidate_rank) < (
-                        current[0],
-                        current[1],
-                    ):
-                        selected_facts[fact_key] = (rule.priority, candidate_rank, fact)
-
-        facts = [fact for _, _, fact in selected_facts.values()]
-        result.fact_upsert = storage.upsert_stock_metric_facts(facts)
-        result.facts_written = result.fact_upsert.updated
+            chunk_facts = _normalize_chunk(
+                storage=storage,
+                bsns_years=bsns_years,
+                reprt_codes=reprt_codes,
+                ticker_batch=ticker_batch,
+                corp_by_ticker=corp_by_ticker,
+                rules_by_source=rules_by_source,
+                unit_by_metric_code=unit_by_metric_code,
+            )
+            upsert_result = storage.upsert_stock_metric_facts(chunk_facts)
+            result.fact_upsert.inserted += upsert_result.inserted
+            result.fact_upsert.updated += upsert_result.updated
+            result.fact_upsert.errors += upsert_result.errors
+            result.facts_written = result.fact_upsert.updated
+            elapsed = time.monotonic() - chunk_started_at
+            logger.info(
+                "metric normalize chunk start=%s end=%s years=%s reports=%s "
+                "candidates=%s facts=%s elapsed=%.2fs rss_mb=%.0f",
+                chunk_start,
+                chunk_end,
+                bsns_years,
+                reprt_codes,
+                len(chunk_facts),
+                upsert_result.updated,
+                elapsed,
+                _current_rss_mb(),
+            )
 
         run.ended_at = now_kst()
         run.status = RunStatus.SUCCESS

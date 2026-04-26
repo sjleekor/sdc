@@ -8,6 +8,7 @@ touching core logic.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import date
 from typing import Protocol, runtime_checkable
 
@@ -240,6 +241,17 @@ class Storage(Protocol):
         """Return financial statement raw rows for normalization."""
         ...
 
+    def iter_dart_financial_statement_for_normalize(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str],
+        rule_account_ids: list[str] | None = None,
+        page_size: int = 5000,
+    ) -> Iterator[DartFinancialStatementLine]:
+        """Stream skinny financial statement rows for normalization."""
+        ...
+
     def get_dart_share_count_raw(
         self,
         bsns_years: list[int],
@@ -247,6 +259,17 @@ class Storage(Protocol):
         tickers: list[str] | None = None,
     ) -> list[DartShareCountLine]:
         """Return share-count raw rows for normalization."""
+        ...
+
+    def iter_dart_share_count_for_normalize(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str],
+        rule_se_values: list[str] | None = None,
+        page_size: int = 5000,
+    ) -> Iterator[DartShareCountLine]:
+        """Stream skinny share-count rows for normalization."""
         ...
 
     def get_dart_shareholder_return_raw(
@@ -258,6 +281,16 @@ class Storage(Protocol):
         """Return dividend / treasury-stock raw rows for normalization."""
         ...
 
+    def iter_dart_shareholder_return_for_normalize(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str],
+        page_size: int = 5000,
+    ) -> Iterator[DartShareholderReturnLine]:
+        """Stream skinny shareholder-return rows for normalization."""
+        ...
+
     def get_dart_xbrl_fact_raw(
         self,
         bsns_years: list[int],
@@ -265,6 +298,17 @@ class Storage(Protocol):
         tickers: list[str] | None = None,
     ) -> list[DartXbrlFactLine]:
         """Return parsed OpenDART XBRL fact rows for normalization."""
+        ...
+
+    def iter_dart_xbrl_fact_for_normalize(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str],
+        rule_concept_ids: list[str] | None = None,
+        page_size: int = 5000,
+    ) -> Iterator[DartXbrlFactLine]:
+        """Stream skinny XBRL fact rows for normalization."""
         ...
 
     def upsert_stock_metric_facts(self, records: list[StockMetricFact]) -> UpsertResult:

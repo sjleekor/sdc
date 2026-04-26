@@ -7,6 +7,7 @@ using ``psycopg2`` against the schema defined in ``sql/postgres_ddl.sql``.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
 
@@ -1586,6 +1587,341 @@ class PostgresStorage:
                         )
                     )
         return records
+
+    def iter_dart_financial_statement_for_normalize(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str],
+        rule_account_ids: list[str] | None = None,
+        page_size: int = 5000,
+    ) -> Iterator[DartFinancialStatementLine]:
+        """Stream financial rows needed by normalization without raw payloads."""
+        if page_size <= 0:
+            raise ValueError("page_size must be a positive integer")
+        if not tickers:
+            raise ValueError("tickers must be a non-empty list")
+        if rule_account_ids is not None and not rule_account_ids:
+            return
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor(
+                name="normalize_financial",
+                cursor_factory=psycopg2.extras.DictCursor,
+            ) as cur:
+                cur.itersize = page_size
+                query = """
+                    SELECT
+                        corp_code,
+                        ticker,
+                        bsns_year,
+                        reprt_code,
+                        fs_div,
+                        sj_div,
+                        sj_nm,
+                        account_id,
+                        account_nm,
+                        account_detail,
+                        thstrm_nm,
+                        thstrm_amount,
+                        thstrm_add_amount,
+                        frmtrm_nm,
+                        frmtrm_amount,
+                        frmtrm_q_nm,
+                        frmtrm_q_amount,
+                        frmtrm_add_amount,
+                        bfefrmtrm_nm,
+                        bfefrmtrm_amount,
+                        ord,
+                        currency,
+                        rcept_no,
+                        source,
+                        fetched_at
+                    FROM dart_financial_statement_raw
+                    WHERE bsns_year = ANY(%s)
+                      AND reprt_code = ANY(%s)
+                      AND ticker = ANY(%s)
+                """
+                params: list[object] = [bsns_years, reprt_codes, tickers]
+                if rule_account_ids is not None:
+                    query += " AND account_id = ANY(%s)"
+                    params.append(rule_account_ids)
+                query += (
+                    " ORDER BY ticker, bsns_year, reprt_code, fs_div, sj_div, "
+                    "account_id, rcept_no, ord NULLS LAST"
+                )
+                cur.execute(query, params)
+                for row in cur:
+                    yield DartFinancialStatementLine(
+                        corp_code=row["corp_code"],
+                        ticker=row["ticker"],
+                        bsns_year=row["bsns_year"],
+                        reprt_code=row["reprt_code"],
+                        fs_div=row["fs_div"],
+                        sj_div=row["sj_div"],
+                        sj_nm=row["sj_nm"],
+                        account_id=row["account_id"],
+                        account_nm=row["account_nm"],
+                        account_detail=row["account_detail"],
+                        thstrm_nm=row["thstrm_nm"],
+                        thstrm_amount=row["thstrm_amount"],
+                        thstrm_add_amount=row["thstrm_add_amount"],
+                        frmtrm_nm=row["frmtrm_nm"],
+                        frmtrm_amount=row["frmtrm_amount"],
+                        frmtrm_q_nm=row["frmtrm_q_nm"],
+                        frmtrm_q_amount=row["frmtrm_q_amount"],
+                        frmtrm_add_amount=row["frmtrm_add_amount"],
+                        bfefrmtrm_nm=row["bfefrmtrm_nm"],
+                        bfefrmtrm_amount=row["bfefrmtrm_amount"],
+                        ord=row["ord"],
+                        currency=row["currency"] or "",
+                        rcept_no=row["rcept_no"],
+                        source=Source(row["source"]),
+                        fetched_at=row["fetched_at"],
+                        raw_payload={},
+                    )
+
+    def iter_dart_share_count_for_normalize(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str],
+        rule_se_values: list[str] | None = None,
+        page_size: int = 5000,
+    ) -> Iterator[DartShareCountLine]:
+        """Stream share-count rows needed by normalization without raw payloads."""
+        if page_size <= 0:
+            raise ValueError("page_size must be a positive integer")
+        if not tickers:
+            raise ValueError("tickers must be a non-empty list")
+        if rule_se_values is not None and not rule_se_values:
+            return
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor(
+                name="normalize_share_count",
+                cursor_factory=psycopg2.extras.DictCursor,
+            ) as cur:
+                cur.itersize = page_size
+                query = """
+                    SELECT
+                        corp_code,
+                        ticker,
+                        bsns_year,
+                        reprt_code,
+                        rcept_no,
+                        corp_cls,
+                        se,
+                        isu_stock_totqy,
+                        now_to_isu_stock_totqy,
+                        now_to_dcrs_stock_totqy,
+                        redc,
+                        profit_incnr,
+                        rdmstk_repy,
+                        etc,
+                        istc_totqy,
+                        tesstk_co,
+                        distb_stock_co,
+                        stlm_dt,
+                        source,
+                        fetched_at
+                    FROM dart_share_count_raw
+                    WHERE bsns_year = ANY(%s)
+                      AND reprt_code = ANY(%s)
+                      AND ticker = ANY(%s)
+                """
+                params: list[object] = [bsns_years, reprt_codes, tickers]
+                if rule_se_values is not None:
+                    query += " AND se = ANY(%s)"
+                    params.append(rule_se_values)
+                query += " ORDER BY ticker, bsns_year, reprt_code, se, rcept_no"
+                cur.execute(query, params)
+                for row in cur:
+                    yield DartShareCountLine(
+                        corp_code=row["corp_code"],
+                        ticker=row["ticker"],
+                        bsns_year=row["bsns_year"],
+                        reprt_code=row["reprt_code"],
+                        rcept_no=row["rcept_no"],
+                        corp_cls=row["corp_cls"],
+                        se=row["se"],
+                        isu_stock_totqy=row["isu_stock_totqy"],
+                        now_to_isu_stock_totqy=row["now_to_isu_stock_totqy"],
+                        now_to_dcrs_stock_totqy=row["now_to_dcrs_stock_totqy"],
+                        redc=row["redc"],
+                        profit_incnr=row["profit_incnr"],
+                        rdmstk_repy=row["rdmstk_repy"],
+                        etc=row["etc"],
+                        istc_totqy=row["istc_totqy"],
+                        tesstk_co=row["tesstk_co"],
+                        distb_stock_co=row["distb_stock_co"],
+                        stlm_dt=row["stlm_dt"],
+                        source=Source(row["source"]),
+                        fetched_at=row["fetched_at"],
+                        raw_payload={},
+                    )
+
+    def iter_dart_shareholder_return_for_normalize(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str],
+        page_size: int = 5000,
+    ) -> Iterator[DartShareholderReturnLine]:
+        """Stream shareholder-return rows needed by normalization without raw payloads."""
+        if page_size <= 0:
+            raise ValueError("page_size must be a positive integer")
+        if not tickers:
+            raise ValueError("tickers must be a non-empty list")
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor(
+                name="normalize_shareholder_return",
+                cursor_factory=psycopg2.extras.DictCursor,
+            ) as cur:
+                cur.itersize = page_size
+                cur.execute(
+                    """
+                    SELECT
+                        corp_code,
+                        ticker,
+                        bsns_year,
+                        reprt_code,
+                        statement_type,
+                        row_name,
+                        stock_knd,
+                        dim1,
+                        dim2,
+                        dim3,
+                        metric_code,
+                        metric_name,
+                        value_numeric,
+                        value_text,
+                        unit,
+                        rcept_no,
+                        stlm_dt,
+                        source,
+                        fetched_at
+                    FROM dart_shareholder_return_raw
+                    WHERE bsns_year = ANY(%s)
+                      AND reprt_code = ANY(%s)
+                      AND ticker = ANY(%s)
+                    ORDER BY ticker, bsns_year, reprt_code, statement_type, row_name,
+                             stock_knd, dim1, dim2, dim3, metric_code, rcept_no
+                    """,
+                    (bsns_years, reprt_codes, tickers),
+                )
+                for row in cur:
+                    yield DartShareholderReturnLine(
+                        corp_code=row["corp_code"],
+                        ticker=row["ticker"],
+                        bsns_year=row["bsns_year"],
+                        reprt_code=row["reprt_code"],
+                        statement_type=row["statement_type"],
+                        row_name=row["row_name"],
+                        stock_knd=row["stock_knd"],
+                        dim1=row["dim1"],
+                        dim2=row["dim2"],
+                        dim3=row["dim3"],
+                        metric_code=row["metric_code"],
+                        metric_name=row["metric_name"],
+                        value_numeric=row["value_numeric"],
+                        value_text=row["value_text"],
+                        unit=row["unit"] or "",
+                        rcept_no=row["rcept_no"],
+                        stlm_dt=row["stlm_dt"],
+                        source=Source(row["source"]),
+                        fetched_at=row["fetched_at"],
+                        raw_payload={},
+                    )
+
+    def iter_dart_xbrl_fact_for_normalize(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str],
+        rule_concept_ids: list[str] | None = None,
+        page_size: int = 5000,
+    ) -> Iterator[DartXbrlFactLine]:
+        """Stream XBRL fact rows needed by normalization without raw payloads."""
+        if page_size <= 0:
+            raise ValueError("page_size must be a positive integer")
+        if not tickers:
+            raise ValueError("tickers must be a non-empty list")
+        if rule_concept_ids is not None and not rule_concept_ids:
+            return
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor(
+                name="normalize_xbrl_fact",
+                cursor_factory=psycopg2.extras.DictCursor,
+            ) as cur:
+                cur.itersize = page_size
+                query = """
+                    SELECT
+                        corp_code,
+                        ticker,
+                        bsns_year,
+                        reprt_code,
+                        rcept_no,
+                        concept_id,
+                        concept_name,
+                        namespace_uri,
+                        context_id,
+                        context_type,
+                        period_start,
+                        period_end,
+                        instant_date,
+                        dimensions,
+                        unit_id,
+                        unit_measure,
+                        decimals,
+                        value_numeric,
+                        value_text,
+                        is_nil,
+                        label_ko,
+                        source,
+                        fetched_at
+                    FROM dart_xbrl_fact_raw
+                    WHERE bsns_year = ANY(%s)
+                      AND reprt_code = ANY(%s)
+                      AND ticker = ANY(%s)
+                """
+                params: list[object] = [bsns_years, reprt_codes, tickers]
+                if rule_concept_ids is not None:
+                    query += " AND concept_id = ANY(%s)"
+                    params.append(rule_concept_ids)
+                query += (
+                    " ORDER BY ticker, bsns_year, reprt_code, concept_id, " "context_id, rcept_no"
+                )
+                cur.execute(query, params)
+                for row in cur:
+                    yield DartXbrlFactLine(
+                        corp_code=row["corp_code"],
+                        ticker=row["ticker"],
+                        bsns_year=row["bsns_year"],
+                        reprt_code=row["reprt_code"],
+                        rcept_no=row["rcept_no"],
+                        concept_id=row["concept_id"],
+                        concept_name=row["concept_name"],
+                        namespace_uri=row["namespace_uri"],
+                        context_id=row["context_id"],
+                        context_type=row["context_type"],
+                        period_start=row["period_start"],
+                        period_end=row["period_end"],
+                        instant_date=row["instant_date"],
+                        dimensions=list(row["dimensions"] or []),
+                        unit_id=row["unit_id"],
+                        unit_measure=row["unit_measure"],
+                        decimals=row["decimals"],
+                        value_numeric=row["value_numeric"],
+                        value_text=row["value_text"],
+                        is_nil=row["is_nil"],
+                        label_ko=row["label_ko"],
+                        source=Source(row["source"]),
+                        fetched_at=row["fetched_at"],
+                        raw_payload={},
+                    )
 
     def upsert_stock_metric_facts(self, records: list[StockMetricFact]) -> UpsertResult:
         """Upsert normalized canonical metric facts."""
