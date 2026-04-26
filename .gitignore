@@ -15,6 +15,7 @@ env/
 # Environment
 .env
 .agents/
+.claude/
 
 # IDE
 .idea/
