@@ -379,20 +379,14 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
 
     print(
         f"→ flows sync: start={start}, end={end}, "
-        f"tickers={tickers}, provider={args.provider}, rate_limit={args.rate_limit_seconds}"
+        f"tickers={tickers}, rate_limit={args.rate_limit_seconds}"
     )
 
+    from krx_collector.adapters.flows_krx.provider import KrxDirectFlowProvider
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
     from krx_collector.service.sync_krx_flows import sync_krx_security_flows
 
-    if args.provider == "krx":
-        from krx_collector.adapters.flows_krx.provider import KrxDirectFlowProvider
-
-        provider = KrxDirectFlowProvider(login_id=settings.krx_id, login_pw=settings.krx_pw)
-    else:
-        from krx_collector.adapters.flows_pykrx.provider import PykrxFlowProvider
-
-        provider = PykrxFlowProvider()
+    provider = KrxDirectFlowProvider(login_id=settings.krx_id, login_pw=settings.krx_pw)
     storage = PostgresStorage(settings.db_dsn)
     if args.use_price_range:
         price_range = storage.get_daily_price_date_range(tickers=tickers)
@@ -947,16 +941,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional comma-separated ticker allowlist.",
     )
     flows_sync.add_argument(
-        "--provider",
-        choices=["pykrx", "krx"],
-        default="pykrx",
-        help="Flow data provider to use (default: pykrx).",
-    )
-    flows_sync.add_argument(
         "--rate-limit-seconds",
         type=float,
         default=0.2,
-        help="Seconds between provider requests (default: 0.2).",
+        help="Seconds between KRX MDC requests (default: 0.2).",
     )
     flows_sync.add_argument(
         "--use-price-range",

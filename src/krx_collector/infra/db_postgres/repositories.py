@@ -950,7 +950,7 @@ class PostgresStorage:
         self,
         records: list[SecurityFlowLine],
     ) -> UpsertResult:
-        """Upsert KRX / pykrx security-flow raw rows."""
+        """Upsert KRX security-flow raw rows."""
         if not records:
             return UpsertResult()
 

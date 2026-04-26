@@ -622,7 +622,7 @@ class DartXbrlSyncResult:
 
 @dataclass(slots=True)
 class KrxFlowSyncResult:
-    """Outcome of syncing KRX / pykrx security-flow raw rows."""
+    """Outcome of syncing KRX security-flow raw rows."""
 
     upsert: UpsertResult = field(default_factory=UpsertResult)
     targets_processed: int = 0

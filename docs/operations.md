@@ -117,9 +117,8 @@ uv run krx-collector dart sync-xbrl --tickers 005930 --bsns-years 2025 --reprt-c
 # 5) canonical metric 정규화
 uv run krx-collector metrics normalize --tickers 005930 --bsns-years 2025 --reprt-codes 11011
 
-# 6) 수급 raw 적재 (default: pykrx, --provider krx 로 직접 KRX MDC 호출)
+# 6) 수급 raw 적재 (KRX MDC 직접 호출)
 uv run krx-collector flows sync --tickers 005930 --start 2026-04-17 --end 2026-04-17
-uv run krx-collector flows sync --provider krx --tickers 005930 --start 2026-04-17 --end 2026-04-17
 
 # 7) 사업 KPI 파일럿 문서 처리
 uv run krx-collector operating process-document \
@@ -217,9 +216,8 @@ ORDER BY started_at DESC;
 | DB `Connection refused` 발생 | PostgreSQL이 꺼져있거나 DSN 정보가 틀림 | `.env` 파일의 DB 설정 확인 및 `pg_isready`로 DB 상태 점검 |
 | KRX 접근 차단 (Rate-limited) | 너무 빠른 속도로 많은 요청을 보냄 | `.env`에서 `RATE_LIMIT_SECONDS` 값을 더 높게 설정 |
 | 검증 시 휴장일이 정상 거래일로 인식됨 | `docs/holidays_krx.csv` 파일이 비어있음 | CSV 파일에 KRX 휴장일 날짜를 추가 |
-| 수집 중 `JSONDecodeError` 발생 | KRX 웹사이트가 개편되었거나 IP가 차단됨 | 프록시를 사용하거나 `pykrx`, `FinanceDataReader` 라이브러리의 최신 패치가 올라올 때까지 대기 |
+| 수집 중 `JSONDecodeError` 발생 | KRX 웹사이트가 개편되었거나 IP가 차단됨 | 프록시를 사용하거나 KRX MDC client/parser를 최신 응답 형식에 맞게 수정 |
 | `ingestion_runs.status = 'partial'` 발생 | 외부 API 일부 요청 실패, 타임아웃, 개별 종목 no-response | 같은 파라미터로 재실행하고 `error_summary`, `counts.error_count` 및 샘플 request key를 확인 |
-| `flows sync`에서 20초 timeout 반복 | KRX / pykrx 응답 정체 또는 차단 | 종목 수와 기간을 줄여 재실행하고 `--rate-limit-seconds`를 높인 뒤, 계속 실패하면 KRX 응답 상태를 점검 |
-| `flows sync --provider krx`가 `KrxMdcAuthenticationError` 또는 `LOGOUT` 메시지로 실패 | KRX MDC 세션 만료 또는 자격증명 누락 | `.env`에 `KRX_ID` / `KRX_PW`를 설정하면 client가 자동 로그인 후 재시도합니다. 자격증명이 이미 설정되어 있는데도 반복 실패한다면 KRX 계정 상태(중복 로그인/잠금)를 확인 |
-| `flows sync --provider krx` 실행 직후 `Source.KRX` row가 대량 신규 적재됨 | skip 임계값이 source별로 카운트되어 기존 `Source.PYKRX` row를 재사용하지 않음 | 의도된 동작입니다. 처음 KRX provider로 전환할 때는 좁은 ticker/날짜 범위로 단계적으로 실행하고, 두 source row를 비교 검증한 뒤 default 전환을 진행 |
+| `flows sync`에서 20초 timeout 반복 | KRX MDC 응답 정체 또는 차단 | 종목 수와 기간을 줄여 재실행하고 `--rate-limit-seconds`를 높인 뒤, 계속 실패하면 KRX 응답 상태를 점검 |
+| `flows sync`가 `KrxMdcAuthenticationError` 또는 `LOGOUT` 메시지로 실패 | KRX MDC 세션 만료 또는 자격증명 누락 | `.env`에 `KRX_ID` / `KRX_PW`를 설정하면 client가 자동 로그인 후 재시도합니다. 자격증명이 이미 설정되어 있는데도 반복 실패한다면 KRX 계정 상태(중복 로그인/잠금)를 확인 |
 | OpenDART raw/XBRL 단계가 부분 실패 | 일시적 OpenDART 응답 오류 | 동일 파라미터로 재실행. 공통 재시도 로직이 3회까지 복구를 시도하므로 반복 실패 종목만 선별 재처리 |

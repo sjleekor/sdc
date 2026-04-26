@@ -1,15 +1,8 @@
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
-import pandas as pd
+import pytest
 
-from krx_collector.adapters.flows_pykrx.provider import (
-    PykrxCallOutputError,
-    PykrxFlowProvider,
-    parse_foreign_holding_frame,
-    parse_investor_net_volume_frame,
-    parse_shorting_frames,
-)
 from krx_collector.cli.app import build_parser
 from krx_collector.domain.enums import ListingStatus, Market, RunStatus, RunType, Source
 from krx_collector.domain.models import (
@@ -21,79 +14,11 @@ from krx_collector.domain.models import (
 )
 from krx_collector.service.sync_krx_flows import sync_krx_security_flows
 
-
-def test_parse_investor_net_volume_frame() -> None:
-    df = pd.DataFrame(
-        [
-            {"기관합계": -100, "개인": 40, "외국인합계": 60, "전체": 0},
-        ],
-        index=pd.to_datetime(["2026-04-17"]),
-    )
-
-    records = parse_investor_net_volume_frame(df, "005930", Market.KOSPI)
-
-    assert len(records) == 3
-    facts = {record.metric_code: record for record in records}
-    assert facts["institution_net_buy_volume"].value == Decimal("-100")
-    assert facts["individual_net_buy_volume"].value == Decimal("40")
-    assert facts["foreign_net_buy_volume"].value == Decimal("60")
-
-
-def test_parse_foreign_holding_frame() -> None:
-    df = pd.DataFrame(
-        [
-            {"상장주식수": 1000, "보유수량": 250, "지분율": 25.0},
-        ],
-        index=["005930"],
-    )
-
-    records = parse_foreign_holding_frame(df, Market.KOSPI, date(2026, 4, 17), ["005930"])
-
-    assert len(records) == 1
-    assert records[0].metric_code == "foreign_holding_shares"
-    assert records[0].value == Decimal("250")
-
-
-def test_parse_shorting_frames() -> None:
-    status_df = pd.DataFrame(
-        [
-            {"거래량": 123, "거래대금": 4567, "잔고수량": 999},
-        ],
-        index=pd.to_datetime(["2026-04-17"]),
-    )
-    balance_df = pd.DataFrame(
-        [
-            {"공매도잔고": 1000, "공매도금액": 50000},
-        ],
-        index=pd.to_datetime(["2026-04-17"]),
-    )
-
-    records = parse_shorting_frames(status_df, balance_df, "005930", Market.KOSPI)
-
-    assert len(records) == 3
-    facts = {record.metric_code: record for record in records}
-    assert facts["short_selling_volume"].value == Decimal("123")
-    assert facts["short_selling_value"].value == Decimal("4567")
-    assert facts["short_selling_balance_quantity"].value == Decimal("1000")
-
-
-def test_pykrx_printed_internal_error_is_raised() -> None:
-    provider = PykrxFlowProvider(call_timeout_seconds=0)
-
-    def noisy_pykrx_call() -> pd.DataFrame:
-        print("Error occurred in fake_pykrx_call: boom")
-        return pd.DataFrame()
-
-    try:
-        provider._call_with_timeout(noisy_pykrx_call)  # noqa: SLF001
-    except PykrxCallOutputError as exc:
-        assert "fake_pykrx_call" in str(exc)
-    else:
-        raise AssertionError("Expected pykrx printed error to be raised")
+KST = timezone(timedelta(hours=9))
 
 
 class MockFlowProvider:
-    def __init__(self, source: Source = Source.PYKRX) -> None:
+    def __init__(self, source: Source = Source.KRX) -> None:
         self._source = source
         self.investor_calls = 0
         self.shorting_calls = 0
@@ -109,6 +34,7 @@ class MockFlowProvider:
         start: date,
         end: date,
     ) -> SecurityFlowFetchResult:
+        del end
         self.investor_calls += 1
         return SecurityFlowFetchResult(
             records=[
@@ -121,7 +47,7 @@ class MockFlowProvider:
                     value=Decimal("10"),
                     unit="shares",
                     source=self._source,
-                    fetched_at=pd.Timestamp("2026-04-19T00:00:00+09:00").to_pydatetime(),
+                    fetched_at=datetime(2026, 4, 19, tzinfo=KST),
                     raw_payload={},
                 )
             ]
@@ -134,6 +60,7 @@ class MockFlowProvider:
         start: date,
         end: date,
     ) -> SecurityFlowFetchResult:
+        del end
         self.shorting_calls += 1
         return SecurityFlowFetchResult(
             records=[
@@ -146,7 +73,7 @@ class MockFlowProvider:
                     value=Decimal("20"),
                     unit="shares",
                     source=self._source,
-                    fetched_at=pd.Timestamp("2026-04-19T00:00:00+09:00").to_pydatetime(),
+                    fetched_at=datetime(2026, 4, 19, tzinfo=KST),
                     raw_payload={},
                 )
             ]
@@ -171,7 +98,7 @@ class MockFlowProvider:
                     value=Decimal("30"),
                     unit="shares",
                     source=self._source,
-                    fetched_at=pd.Timestamp("2026-04-19T00:00:00+09:00").to_pydatetime(),
+                    fetched_at=datetime(2026, 4, 19, tzinfo=KST),
                     raw_payload={},
                 )
             ]
@@ -201,7 +128,7 @@ class MockFlowStorage:
                 name="삼성전자",
                 status=ListingStatus.ACTIVE,
                 last_seen_date=date(2026, 4, 17),
-                source=Source.PYKRX,
+                source=Source.KRX,
             )
         ]
         if market is None:
@@ -315,15 +242,15 @@ def test_sync_krx_security_flows_uses_provider_source_for_existing_counts() -> N
     assert storage.runs[0].params["provider_source"] == Source.KRX.value
 
 
-def test_flows_sync_parser_supports_price_range_mode() -> None:
+def test_flows_sync_parser_supports_price_range_mode_without_provider_selection() -> None:
     args = build_parser().parse_args(["flows", "sync", "--use-price-range"])
 
     assert args.use_price_range is True
     assert args.start is None
     assert args.end is None
+    assert not hasattr(args, "provider")
 
 
-def test_flows_sync_parser_supports_provider_selection() -> None:
-    args = build_parser().parse_args(["flows", "sync", "--provider", "krx"])
-
-    assert args.provider == "krx"
+def test_flows_sync_parser_rejects_provider_selection() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["flows", "sync", "--provider", "krx"])

@@ -1,4 +1,4 @@
-"""Use-case: Sync KRX / pykrx security-flow raw rows."""
+"""Use-case: Sync KRX security-flow raw rows."""
 
 from __future__ import annotations
 

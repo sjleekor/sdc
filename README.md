@@ -5,7 +5,7 @@
 1. [FinanceDataReader](https://github.com/financedata-org/FinanceDataReader) 및 [pykrx](https://github.com/sharebook-kr/pykrx)를 사용하여 **KOSPI / KOSDAQ 종목 유니버스를 동기화**합니다 (종목 마스터 관리).
 2. pykrx를 사용하여 상장일로부터 **종목별 일봉(OHLCV) 이력 데이터를 수집**합니다.
 3. [OpenDART](https://opendart.fss.or.kr)를 사용하여 **재무제표 / 주식수 / 배당 / 자사주 raw 값과 XBRL fact**를 수집합니다.
-4. pykrx 및 KRX 소스를 사용하여 **일자별 수급 raw**(투자자별 순매수, 공매도 등)를 수집합니다.
+4. KRX MDC 소스를 직접 호출하여 **일자별 수급 raw**(투자자별 순매수, 공매도 등)를 수집합니다.
 5. 공시 원문 기반 **섹터별 사업 KPI extractor 프레임워크**를 제공합니다 (파일럿: 조선/방산 수주).
 6. raw 테이블과 별도로 `metric_catalog` / `metric_mapping_rule` / `stock_metric_fact` 기반 **canonical metric 정규화 계층**을 운영합니다.
 7. 깔끔한 포트/어댑터(Ports & Adapters) 아키텍처를 적용하여 **PostgreSQL에 모든 데이터를 저장**합니다. 핵심 로직의 리팩토링 없이 향후 파일 기반 저장소(CSV / Parquet)로 확장할 수 있도록 설계되었습니다.
@@ -92,17 +92,14 @@ uv run krx-collector metrics normalize --tickers 005930 --bsns-years 2025 --repr
 uv run krx-collector metrics coverage-report --tickers 005930 --bsns-years 2025 --reprt-codes 11011
 ```
 
-### 수급 raw (pykrx / KRX)
+### 수급 raw (KRX)
 
 ```bash
-# 13. 종목/일자 기준 수급 raw 적재 (default: pykrx)
+# 13. 종목/일자 기준 수급 raw 적재
 uv run krx-collector flows sync --tickers 005930 --start 2026-04-17 --end 2026-04-17
-
-# 13-1. KRX MDC를 직접 호출하는 신규 provider 사용
-uv run krx-collector flows sync --provider krx --tickers 005930 --start 2026-04-17 --end 2026-04-17
 ```
 
-`--provider`는 `pykrx` (default) 또는 `krx` 중 선택합니다. `krx`는 pykrx에 의존하지 않고 KRX MDC JSON endpoint를 직접 호출하며, 적재 row의 `source` 컬럼이 `KRX`로 기록됩니다 (기본값은 `PYKRX`). 두 provider는 unique key에 `source`를 포함해 별도로 적재되므로 같은 `(trade_date, ticker, metric_code)`라도 충돌 없이 비교 검증할 수 있습니다. KRX MDC가 비로그인 응답을 거부하면 `.env`의 `KRX_ID` / `KRX_PW` 자격증명으로 자동 로그인 후 재시도합니다. 운영 default는 smoke 검증이 끝날 때까지 `pykrx`로 유지합니다.
+`flows sync`는 KRX MDC JSON endpoint를 직접 호출합니다. 적재 row의 `source` 컬럼은 `KRX`로 기록됩니다. KRX MDC가 비로그인 응답을 거부하면 `.env`의 `KRX_ID` / `KRX_PW` 자격증명으로 자동 로그인 후 재시도합니다.
 
 ### 사업 KPI 파일럿 (섹터별 extractor)
 
@@ -130,7 +127,7 @@ uv run krx-collector operating process-document \
 - `short_selling_value`
 - `short_selling_balance_quantity`
 
-`borrow_balance_quantity`는 `pykrx` 기본 API에서 안정 경로를 확인하지 못해 pending 상태입니다. 또한 KRX 응답 상태에 따라 `pykrx` 호출이 장시간 멈출 수 있어 provider 내부에 호출 타임아웃을 넣었습니다.
+`borrow_balance_quantity`는 KRX MDC provider에 아직 안정 경로를 붙이지 않아 pending 상태입니다.
 
 현재 `operating process-document` 파일럿은 `shipbuilding_defense` 섹터에 대해 다음 metric을 추출합니다.
 
@@ -351,7 +348,7 @@ krx-data-pipeline/
 │   │                                 #   universe_fdr / universe_pykrx / prices_pykrx
 │   │                                 #   opendart_common / opendart_corp / opendart_financials /
 │   │                                 #   opendart_share_info / opendart_xbrl
-│   │                                 #   flows_pykrx / operating_extractors
+│   │                                 #   flows_krx / operating_extractors
 │   ├── service/                      # 유스케이스 오케스트레이션
 │   │                                 #   sync_universe, backfill_daily, validate,
 │   │                                 #   sync_dart_corp / sync_dart_financials /

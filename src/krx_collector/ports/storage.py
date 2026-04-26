@@ -180,7 +180,7 @@ class Storage(Protocol):
         self,
         records: list[SecurityFlowLine],
     ) -> UpsertResult:
-        """Upsert KRX / pykrx security-flow raw rows."""
+        """Upsert KRX security-flow raw rows."""
         ...
 
     def count_krx_security_flow_daily_market_tickers(

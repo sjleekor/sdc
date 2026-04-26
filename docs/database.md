@@ -344,7 +344,7 @@ raw를 정규화해 적재한 종목별 canonical metric fact 테이블입니다
 
 ### 16. `krx_security_flow_raw`
 
-KRX/pykrx 기반 수급 raw 저장용 테이블입니다.
+KRX MDC 기반 수급 raw 저장용 테이블입니다.
 
 | 컬럼명         | 타입              | 비고                              |
 |----------------|-------------------|-----------------------------------|
@@ -356,7 +356,7 @@ KRX/pykrx 기반 수급 raw 저장용 테이블입니다.
 | `metric_name`  | TEXT NOT NULL     | 표시용 metric 명                  |
 | `value`        | NUMERIC(30,4)     | 정규화된 수치 값                  |
 | `unit`         | TEXT              | 주, 원, 비율 등                   |
-| `source`       | TEXT NOT NULL     | `PYKRX` 또는 `KRX`                |
+| `source`       | TEXT NOT NULL     | `KRX`                             |
 | `fetched_at`   | TIMESTAMPTZ       | 데이터를 수집한 시간              |
 | `raw_payload`  | JSONB NOT NULL    | 원본 응답 payload                 |
 
