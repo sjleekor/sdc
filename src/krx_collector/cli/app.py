@@ -380,10 +380,16 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
     default_flow_date = date.today() - timedelta(days=1)
     start = args.start or default_flow_date
     end = args.end or default_flow_date
+    timeout_seconds = (
+        args.timeout_seconds
+        if args.timeout_seconds is not None
+        else settings.krx_mdc_timeout_seconds
+    )
 
     print(
         f"→ flows sync: start={start}, end={end}, "
         f"tickers={tickers}, rate_limit={args.rate_limit_seconds}, "
+        f"timeout={timeout_seconds}, "
         f"progress_interval={args.progress_log_interval_seconds}, "
         f"progress_every={args.progress_log_every_items}"
     )
@@ -392,7 +398,11 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
     from krx_collector.service.sync_krx_flows import sync_krx_security_flows
 
-    provider = KrxDirectFlowProvider(login_id=settings.krx_id, login_pw=settings.krx_pw)
+    provider = KrxDirectFlowProvider(
+        timeout_seconds=timeout_seconds,
+        login_id=settings.krx_id,
+        login_pw=settings.krx_pw,
+    )
     storage = PostgresStorage(settings.db_dsn)
     if args.use_price_range:
         price_range = storage.get_daily_price_date_range(tickers=tickers)
@@ -697,6 +707,26 @@ def _parse_date(value: str) -> date:
         raise argparse.ArgumentTypeError(f"Invalid date format: {value!r} (expected YYYY-MM-DD)")
 
 
+def _parse_positive_seconds(value: str) -> float:
+    """Parse a positive second value, accepting an optional ``s`` suffix."""
+    normalized = value.strip().lower()
+    for suffix in ("seconds", "second", "secs", "sec", "s"):
+        if normalized.endswith(suffix):
+            normalized = normalized[: -len(suffix)].strip()
+            break
+    try:
+        seconds = float(normalized)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"Invalid seconds value: {value!r} (expected positive seconds)"
+        )
+    if seconds <= 0:
+        raise argparse.ArgumentTypeError(
+            f"Invalid seconds value: {value!r} (must be greater than zero)"
+        )
+    return seconds
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build and return the top-level argument parser."""
     parser = argparse.ArgumentParser(
@@ -959,6 +989,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.2,
         help="Seconds between KRX MDC requests (default: 0.2).",
+    )
+    flows_sync.add_argument(
+        "--timeout-seconds",
+        type=_parse_positive_seconds,
+        default=None,
+        help=(
+            "KRX MDC HTTP timeout in seconds "
+            "(default: env KRX_MDC_TIMEOUT_SECONDS or 20; accepts 150 or 150s)."
+        ),
     )
     flows_sync.add_argument(
         "--use-price-range",

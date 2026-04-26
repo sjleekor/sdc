@@ -218,6 +218,6 @@ ORDER BY started_at DESC;
 | 검증 시 휴장일이 정상 거래일로 인식됨 | `docs/holidays_krx.csv` 파일이 비어있음 | CSV 파일에 KRX 휴장일 날짜를 추가 |
 | 수집 중 `JSONDecodeError` 발생 | KRX 웹사이트가 개편되었거나 IP가 차단됨 | 프록시를 사용하거나 KRX MDC client/parser를 최신 응답 형식에 맞게 수정 |
 | `ingestion_runs.status = 'partial'` 발생 | 외부 API 일부 요청 실패, 타임아웃, 개별 종목 no-response | 같은 파라미터로 재실행하고 `error_summary`, `counts.error_count` 및 샘플 request key를 확인 |
-| `flows sync`에서 20초 timeout 반복 | KRX MDC 응답 정체 또는 차단 | 종목 수와 기간을 줄여 재실행하고 `--rate-limit-seconds`를 높인 뒤, 계속 실패하면 KRX 응답 상태를 점검 |
+| `flows sync`에서 KRX MDC timeout 반복 | KRX MDC 응답 정체 또는 차단 | `.env`의 `KRX_MDC_TIMEOUT_SECONDS` 또는 `flows sync --timeout-seconds`를 조정하고, 종목 수/기간을 줄여 재실행. 계속 실패하면 KRX 응답 상태를 점검 |
 | `flows sync`가 `KrxMdcAuthenticationError` 또는 `LOGOUT` 메시지로 실패 | KRX MDC 세션 만료 또는 자격증명 누락 | `.env`에 `KRX_ID` / `KRX_PW`를 설정하면 client가 자동 로그인 후 재시도합니다. 자격증명이 이미 설정되어 있는데도 반복 실패한다면 KRX 계정 상태(중복 로그인/잠금)를 확인 |
 | OpenDART raw/XBRL 단계가 부분 실패 | 일시적 OpenDART 응답 오류 | 동일 파라미터로 재실행. 공통 재시도 로직이 3회까지 복구를 시도하므로 반복 실패 종목만 선별 재처리 |

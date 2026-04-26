@@ -215,19 +215,13 @@ def test_sync_krx_security_flows_logs_progress(caplog: pytest.LogCaptureFixture)
     messages = [record.getMessage() for record in caplog.records]
     assert any("Flow sync started:" in message for message in messages)
     assert any("Flow sync existing coverage loaded:" in message for message in messages)
+    assert any("Flow sync phase started: phase=foreign_holding" in message for message in messages)
     assert any(
-        "Flow sync phase started: phase=foreign_holding" in message for message in messages
+        "Flow sync progress: phase=foreign_holding processed=1/1" in message for message in messages
     )
+    assert any("Flow sync phase started: phase=ticker_metrics" in message for message in messages)
     assert any(
-        "Flow sync progress: phase=foreign_holding processed=1/1" in message
-        for message in messages
-    )
-    assert any(
-        "Flow sync phase started: phase=ticker_metrics" in message for message in messages
-    )
-    assert any(
-        "Flow sync progress: phase=ticker_metrics processed=2/2" in message
-        for message in messages
+        "Flow sync progress: phase=ticker_metrics processed=2/2" in message for message in messages
     )
 
 
@@ -303,6 +297,12 @@ def test_flows_sync_parser_supports_progress_log_options() -> None:
 
     assert args.progress_log_interval_seconds == 5.0
     assert args.progress_log_every_items == 10
+
+
+def test_flows_sync_parser_supports_timeout_seconds_suffix() -> None:
+    args = build_parser().parse_args(["flows", "sync", "--timeout-seconds", "150s"])
+
+    assert args.timeout_seconds == 150.0
 
 
 def test_flows_sync_parser_rejects_provider_selection() -> None:

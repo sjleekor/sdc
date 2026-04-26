@@ -285,6 +285,24 @@ def test_client_splits_730_day_range_requests() -> None:
     assert session.post_calls[1]["data"]["endDd"] == "20220102"
 
 
+def test_client_uses_configured_timeout_for_posts() -> None:
+    session = FakeSession([FakeResponse({"output": []})])
+    client = KrxMdcClient(
+        session=session,
+        timeout_seconds=150.0,
+        warmup=False,
+        auto_login=False,
+    )
+
+    client.post_rows(
+        "dbms/MDC/STAT/standard/MDCSTAT03701",
+        {"trdDd": "20260417"},
+        output_key="output",
+    )
+
+    assert session.post_calls[0]["timeout"] == 150.0
+
+
 class FakeFinderClient:
     def __init__(self) -> None:
         self.calls = 0
@@ -294,10 +312,7 @@ class FakeFinderClient:
         assert bld == "dbms/comm/finder/finder_stkisu"
         assert output_key == "block1"
         del params
-        return [
-            KrxMdcRow(row=row, request={})
-            for row in _fixture("finder_stkisu.json")["block1"]
-        ]
+        return [KrxMdcRow(row=row, request={}) for row in _fixture("finder_stkisu.json")["block1"]]
 
 
 def test_resolver_loads_finder_once_and_filters_by_market() -> None:
@@ -348,9 +363,7 @@ def test_direct_provider_fetches_krx_records_with_krx_source() -> None:
     shorting = provider.fetch_shorting_metrics(
         "005930", Market.KOSPI, date(2026, 4, 17), date(2026, 4, 17)
     )
-    foreign = provider.fetch_foreign_holding_shares(
-        date(2026, 4, 17), Market.KOSPI, ["005930"]
-    )
+    foreign = provider.fetch_foreign_holding_shares(date(2026, 4, 17), Market.KOSPI, ["005930"])
 
     assert provider.source() == Source.KRX
     assert investor.error is None
@@ -387,18 +400,14 @@ def test_direct_provider_rejects_unsupported_market_with_response_error(
         def post_rows(self, *_args, **_kwargs):
             raise AssertionError("client should not be called for unsupported market")
 
-    monkeypatch.setattr(
-        "krx_collector.adapters.flows_krx.provider.MARKET_TO_KRX_ID", {}
-    )
+    monkeypatch.setattr("krx_collector.adapters.flows_krx.provider.MARKET_TO_KRX_ID", {})
 
     provider = KrxDirectFlowProvider(
         client=_UnusedClient(),  # type: ignore[arg-type]
         resolver=FakeResolver(),  # type: ignore[arg-type]
     )
 
-    result = provider.fetch_foreign_holding_shares(
-        date(2026, 4, 17), Market.KOSPI, ["005930"]
-    )
+    result = provider.fetch_foreign_holding_shares(date(2026, 4, 17), Market.KOSPI, ["005930"])
 
     assert result.error is not None
     assert "Unsupported market" in result.error

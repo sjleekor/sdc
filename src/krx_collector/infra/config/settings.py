@@ -19,9 +19,12 @@ import os
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
-from pydantic import Field, PrivateAttr, model_validator
+from pydantic import Field, PrivateAttr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DEFAULT_KRX_MDC_TIMEOUT_SECONDS = 20.0
 
 
 class RunMode(StrEnum):
@@ -74,6 +77,7 @@ class Settings(BaseSettings):
         remote_db_host_override: Optional hostname override for the remote DB.
         remote_db_ssh_host: Optional SSH host for local port forwarding.
         remote_db_ssh_local_port: Optional fixed local port for SSH tunnel.
+        krx_mdc_timeout_seconds: HTTP timeout for KRX MDC requests.
     """
 
     model_config = SettingsConfigDict(
@@ -105,6 +109,7 @@ class Settings(BaseSettings):
     # KRX / pykrx authentication
     krx_id: str = ""
     krx_pw: str = ""
+    krx_mdc_timeout_seconds: float = DEFAULT_KRX_MDC_TIMEOUT_SECONDS
 
     # OpenDART
     opendart_api_key: str = ""
@@ -127,6 +132,29 @@ class Settings(BaseSettings):
     def opendart_api_keys(self) -> tuple[str, ...]:
         """Normalized OpenDART key list from OPENDART_API_KEYS and OPENDART_API_KEY."""
         return self._opendart_api_keys
+
+    @field_validator("krx_mdc_timeout_seconds", mode="before")
+    @classmethod
+    def _parse_krx_mdc_timeout_seconds(cls, value: Any) -> float:
+        """Accept timeout values as seconds, with an optional ``s`` suffix."""
+        if value is None or value == "":
+            return DEFAULT_KRX_MDC_TIMEOUT_SECONDS
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            for suffix in ("seconds", "second", "secs", "sec", "s"):
+                if normalized.endswith(suffix):
+                    normalized = normalized[: -len(suffix)].strip()
+                    break
+            value = normalized
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "KRX_MDC_TIMEOUT_SECONDS must be a positive number of seconds"
+            ) from exc
+        if seconds <= 0:
+            raise ValueError("KRX_MDC_TIMEOUT_SECONDS must be greater than zero")
+        return seconds
 
     @model_validator(mode="after")
     def _compute_dsn(self) -> Settings:

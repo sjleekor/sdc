@@ -40,6 +40,14 @@ def test_settings_accept_comma_separated_opendart_keys_from_env(monkeypatch) -> 
     assert settings.opendart_api_keys == ("key_a", "key_b", "key_c")
 
 
+def test_settings_accept_krx_mdc_timeout_with_seconds_suffix(monkeypatch) -> None:
+    monkeypatch.setenv("KRX_MDC_TIMEOUT_SECONDS", "150s")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.krx_mdc_timeout_seconds == 150.0
+
+
 def test_settings_allow_empty_multiple_opendart_keys() -> None:
     settings = Settings(
         opendart_api_key="",
