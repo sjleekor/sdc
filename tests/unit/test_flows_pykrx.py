@@ -93,10 +93,14 @@ def test_pykrx_printed_internal_error_is_raised() -> None:
 
 
 class MockFlowProvider:
-    def __init__(self) -> None:
+    def __init__(self, source: Source = Source.PYKRX) -> None:
+        self._source = source
         self.investor_calls = 0
         self.shorting_calls = 0
         self.foreign_calls = 0
+
+    def source(self) -> Source:
+        return self._source
 
     def fetch_investor_net_volume(
         self,
@@ -116,7 +120,7 @@ class MockFlowProvider:
                     metric_name="기관 순매수 수량",
                     value=Decimal("10"),
                     unit="shares",
-                    source=Source.PYKRX,
+                    source=self._source,
                     fetched_at=pd.Timestamp("2026-04-19T00:00:00+09:00").to_pydatetime(),
                     raw_payload={},
                 )
@@ -141,7 +145,7 @@ class MockFlowProvider:
                     metric_name="공매도 거래량",
                     value=Decimal("20"),
                     unit="shares",
-                    source=Source.PYKRX,
+                    source=self._source,
                     fetched_at=pd.Timestamp("2026-04-19T00:00:00+09:00").to_pydatetime(),
                     raw_payload={},
                 )
@@ -166,7 +170,7 @@ class MockFlowProvider:
                     metric_name="외국인 보유주식수",
                     value=Decimal("30"),
                     unit="shares",
-                    source=Source.PYKRX,
+                    source=self._source,
                     fetched_at=pd.Timestamp("2026-04-19T00:00:00+09:00").to_pydatetime(),
                     raw_payload={},
                 )
@@ -184,6 +188,7 @@ class MockFlowStorage:
         self.foreign_counts: dict[tuple[date, str], int] = {}
         self.investor_counts: dict[str, int] = {}
         self.shorting_counts: dict[str, int] = {}
+        self.count_sources: list[Source] = []
 
     def record_run(self, run: IngestionRun) -> None:
         self.runs.append(run)
@@ -215,7 +220,8 @@ class MockFlowStorage:
         metric_code: str,
         source: Source,
     ) -> dict[tuple[date, str], int]:
-        del start, end, tickers, metric_code, source
+        del start, end, tickers, metric_code
+        self.count_sources.append(source)
         return self.foreign_counts
 
     def count_krx_security_flow_ticker_metric_dates(
@@ -226,7 +232,8 @@ class MockFlowStorage:
         metric_codes: list[str],
         source: Source,
     ) -> dict[str, int]:
-        del start, end, tickers, source
+        del start, end, tickers
+        self.count_sources.append(source)
         if "institution_net_buy_volume" in metric_codes:
             return self.investor_counts
         return self.shorting_counts
@@ -288,9 +295,35 @@ def test_sync_krx_security_flows_skips_complete_existing_requests() -> None:
     assert storage.runs[-1].status == RunStatus.SUCCESS
 
 
+def test_sync_krx_security_flows_uses_provider_source_for_existing_counts() -> None:
+    storage = MockFlowStorage()
+    provider = MockFlowProvider(source=Source.KRX)
+
+    result = sync_krx_security_flows(
+        provider=provider,  # type: ignore[arg-type]
+        storage=storage,  # type: ignore[arg-type]
+        start=date(2026, 4, 17),
+        end=date(2026, 4, 17),
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+    )
+
+    assert result.errors == {}
+    assert storage.count_sources == [Source.KRX, Source.KRX, Source.KRX]
+    assert storage.records
+    assert {record.source for record in storage.records} == {Source.KRX}
+    assert storage.runs[0].params["provider_source"] == Source.KRX.value
+
+
 def test_flows_sync_parser_supports_price_range_mode() -> None:
     args = build_parser().parse_args(["flows", "sync", "--use-price-range"])
 
     assert args.use_price_range is True
     assert args.start is None
     assert args.end is None
+
+
+def test_flows_sync_parser_supports_provider_selection() -> None:
+    args = build_parser().parse_args(["flows", "sync", "--provider", "krx"])
+
+    assert args.provider == "krx"

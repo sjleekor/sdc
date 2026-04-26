@@ -11,6 +11,14 @@ from decimal import Decimal
 
 import pandas as pd
 
+from krx_collector.adapters.flows_common import (
+    FOREIGN_HOLDING_SHARES,
+    PYKRX_INVESTOR_COLUMNS,
+    SHORT_SELLING_BALANCE_QUANTITY,
+    SHORT_SELLING_VALUE,
+    SHORT_SELLING_VOLUME,
+    UNSUPPORTED_FLOW_METRIC_CODES,
+)
 from krx_collector.adapters.pykrx_auth import get_pykrx_stock_module
 from krx_collector.domain.enums import Market, Source
 from krx_collector.domain.models import SecurityFlowFetchResult, SecurityFlowLine
@@ -61,18 +69,13 @@ def parse_investor_net_volume_frame(
     if df is None or df.empty:
         return []
 
-    metric_specs = {
-        "기관합계": ("institution_net_buy_volume", "기관 순매수 수량"),
-        "개인": ("individual_net_buy_volume", "개인 순매수 수량"),
-        "외국인합계": ("foreign_net_buy_volume", "외국인 순매수 수량"),
-    }
     fetched_at = now_kst()
     records: list[SecurityFlowLine] = []
 
     for trade_date, row in df.iterrows():
         trade_date_value = _parse_trade_date(trade_date)
         row_dict = {key: _json_safe(value) for key, value in row.to_dict().items()}
-        for column_name, (metric_code, metric_name) in metric_specs.items():
+        for column_name, spec in PYKRX_INVESTOR_COLUMNS.items():
             if column_name not in row_dict:
                 continue
             records.append(
@@ -80,10 +83,10 @@ def parse_investor_net_volume_frame(
                     trade_date=trade_date_value,
                     ticker=ticker,
                     market=market,
-                    metric_code=metric_code,
-                    metric_name=metric_name,
+                    metric_code=spec.metric_code,
+                    metric_name=spec.metric_name,
                     value=_parse_decimal(row_dict.get(column_name)),
-                    unit="shares",
+                    unit=spec.unit,
                     source=Source.PYKRX,
                     fetched_at=fetched_at,
                     raw_payload={
@@ -119,10 +122,10 @@ def parse_foreign_holding_frame(
                 trade_date=trade_date,
                 ticker=ticker,
                 market=market,
-                metric_code="foreign_holding_shares",
-                metric_name="외국인 보유주식수",
+                metric_code=FOREIGN_HOLDING_SHARES.metric_code,
+                metric_name=FOREIGN_HOLDING_SHARES.metric_name,
                 value=_parse_decimal(row_dict.get("보유수량")),
-                unit="shares",
+                unit=FOREIGN_HOLDING_SHARES.unit,
                 source=Source.PYKRX,
                 fetched_at=fetched_at,
                 raw_payload={
@@ -168,11 +171,11 @@ def parse_shorting_frames(
             balance_quantity = merged_row.get("status:잔고수량")
 
         specs = [
-            ("short_selling_volume", "공매도 거래량", status_volume, "shares"),
-            ("short_selling_value", "공매도 거래대금", status_value, "KRW"),
-            ("short_selling_balance_quantity", "공매도 잔고 수량", balance_quantity, "shares"),
+            (SHORT_SELLING_VOLUME, status_volume),
+            (SHORT_SELLING_VALUE, status_value),
+            (SHORT_SELLING_BALANCE_QUANTITY, balance_quantity),
         ]
-        for metric_code, metric_name, raw_value, unit in specs:
+        for spec, raw_value in specs:
             if raw_value is None or pd.isna(raw_value):
                 continue
             records.append(
@@ -180,10 +183,10 @@ def parse_shorting_frames(
                     trade_date=trade_date_value,
                     ticker=ticker,
                     market=market,
-                    metric_code=metric_code,
-                    metric_name=metric_name,
+                    metric_code=spec.metric_code,
+                    metric_name=spec.metric_name,
                     value=_parse_decimal(raw_value),
-                    unit=unit,
+                    unit=spec.unit,
                     source=Source.PYKRX,
                     fetched_at=fetched_at,
                     raw_payload={
@@ -200,6 +203,9 @@ class PykrxFlowProvider:
 
     def __init__(self, call_timeout_seconds: float = 20.0) -> None:
         self._call_timeout_seconds = call_timeout_seconds
+
+    def source(self) -> Source:
+        return Source.PYKRX
 
     def _call_with_timeout(self, func, *args):
         def _invoke():
@@ -307,4 +313,4 @@ class PykrxFlowProvider:
             return SecurityFlowFetchResult(error=str(exc))
 
     def unsupported_metric_codes(self) -> list[str]:
-        return ["borrow_balance_quantity"]
+        return list(UNSUPPORTED_FLOW_METRIC_CODES)

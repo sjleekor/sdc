@@ -12,6 +12,7 @@ from pathlib import Path
 from krx_collector.domain.enums import RunStatus, RunType
 from krx_collector.domain.models import IngestionRun
 from krx_collector.infra.db_postgres.remote_sync import (
+    reset_local_public_tables,
     resolve_remote_dsn,
     sync_remote_tables_to_local,
 )
@@ -103,6 +104,13 @@ def sync_remote_db_to_local(
             "ssh_local_port": ssh_local_port,
         },
     )
+
+    if full_refresh and all_tables:
+        dropped = reset_local_public_tables(local_dsn)
+        logger.info(
+            "Reset local pipeline sync tables before full-refresh sync: dropped_tables=%s",
+            dropped,
+        )
 
     storage.init_schema()
     storage.record_run(run)

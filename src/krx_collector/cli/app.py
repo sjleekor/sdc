@@ -379,14 +379,20 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
 
     print(
         f"→ flows sync: start={start}, end={end}, "
-        f"tickers={tickers}, rate_limit={args.rate_limit_seconds}"
+        f"tickers={tickers}, provider={args.provider}, rate_limit={args.rate_limit_seconds}"
     )
 
-    from krx_collector.adapters.flows_pykrx.provider import PykrxFlowProvider
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
     from krx_collector.service.sync_krx_flows import sync_krx_security_flows
 
-    provider = PykrxFlowProvider()
+    if args.provider == "krx":
+        from krx_collector.adapters.flows_krx.provider import KrxDirectFlowProvider
+
+        provider = KrxDirectFlowProvider(login_id=settings.krx_id, login_pw=settings.krx_pw)
+    else:
+        from krx_collector.adapters.flows_pykrx.provider import PykrxFlowProvider
+
+        provider = PykrxFlowProvider()
     storage = PostgresStorage(settings.db_dsn)
     if args.use_price_range:
         price_range = storage.get_daily_price_date_range(tickers=tickers)
@@ -423,6 +429,7 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
         print("✅ KRX flow sync completed.")
 
     print(f"   - Targets processed: {result.targets_processed}")
+    print(f"   - Source: {provider.source().value}")
     print(f"   - Requests attempted: {result.requests_attempted}")
     print(f"   - Requests skipped: {result.requests_skipped}")
     print(f"   - Rows upserted: {result.rows_upserted}")
@@ -728,7 +735,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--all-tables",
         action="store_true",
         default=False,
-        help="Sync all public-schema tables. Requires --full-refresh.",
+        help=(
+            "Sync the managed pipeline data tables. Requires --full-refresh. "
+            "Drops only those local tables and re-applies sql/postgres_ddl.sql "
+            "before copying so stale local schemas are replaced."
+        ),
     )
     db_sync_remote.add_argument(
         "--remote-host",
@@ -934,6 +945,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--tickers",
         default=None,
         help="Optional comma-separated ticker allowlist.",
+    )
+    flows_sync.add_argument(
+        "--provider",
+        choices=["pykrx", "krx"],
+        default="pykrx",
+        help="Flow data provider to use (default: pykrx).",
     )
     flows_sync.add_argument(
         "--rate-limit-seconds",

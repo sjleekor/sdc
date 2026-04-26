@@ -75,7 +75,7 @@ class TableSyncSpec:
 
 @dataclass(frozen=True, slots=True)
 class DatabaseTable:
-    """A physical database table to copy during full database sync."""
+    """A physical database table to copy during full-refresh sync."""
 
     schema: str
     name: str
@@ -86,6 +86,32 @@ class DatabaseTable:
         if self.schema == PUBLIC_SCHEMA:
             return self.name
         return f"{self.schema}.{self.name}"
+
+
+PIPELINE_FULL_REFRESH_TABLE_NAMES: tuple[str, ...] = (
+    # universe sync
+    "stock_master",
+    "stock_master_snapshot",
+    "stock_master_snapshot_items",
+    # prices backfill
+    "daily_ohlcv",
+    # account / financial / XBRL pipeline
+    "dart_corp_master",
+    "dart_financial_statement_raw",
+    "dart_share_count_raw",
+    "dart_shareholder_return_raw",
+    "dart_xbrl_document",
+    "dart_xbrl_fact_raw",
+    "metric_catalog",
+    "metric_mapping_rule",
+    "stock_metric_fact",
+    # audit rows written by these pipeline executions
+    "ingestion_runs",
+)
+PIPELINE_FULL_REFRESH_TABLES: tuple[DatabaseTable, ...] = tuple(
+    DatabaseTable(schema=PUBLIC_SCHEMA, name=name)
+    for name in PIPELINE_FULL_REFRESH_TABLE_NAMES
+)
 
 
 SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
@@ -181,6 +207,66 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
 )
 
 
+def reset_local_public_tables(
+    local_dsn: str,
+    tables: tuple[DatabaseTable, ...] = PIPELINE_FULL_REFRESH_TABLES,
+) -> int:
+    """Drop selected local public-schema tables before schema reinitialization.
+
+    Called before ``init_schema()`` during ``--full-refresh --all-tables`` so the
+    rerun of ``sql/postgres_ddl.sql`` rebuilds pipeline tables that have drifted
+    from the canonical schema (renamed/removed columns, changed constraints)
+    without deleting unrelated local public tables.
+    """
+    target_tables = tuple(dict.fromkeys(tables))
+    if not target_tables:
+        return 0
+    non_public_tables = [
+        table.display_name for table in target_tables if table.schema != PUBLIC_SCHEMA
+    ]
+    if non_public_tables:
+        raise ValueError(
+            "Only public-schema tables can be reset; got: " + ", ".join(non_public_tables)
+        )
+
+    target_names = [table.name for table in target_tables]
+    with contextlib.closing(psycopg2.connect(local_dsn)) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT tablename FROM pg_tables WHERE schemaname = %s "
+                "AND tablename = ANY(%s) ORDER BY tablename",
+                (PUBLIC_SCHEMA, target_names),
+            )
+            existing_names = {row[0] for row in cur.fetchall()}
+
+            tables_to_drop = tuple(
+                table for table in target_tables if table.name in existing_names
+            )
+            if tables_to_drop:
+                table_list = sql.SQL(", ").join(
+                    _table_identifier(table) for table in tables_to_drop
+                )
+                cur.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(table_list))
+
+    if tables_to_drop:
+        logger.info(
+            "Dropped %s local public-schema pipeline tables before schema reinit: %s",
+            len(tables_to_drop),
+            ", ".join(table.display_name for table in tables_to_drop),
+        )
+    return len(tables_to_drop)
+
+
+def reset_local_public_schema(local_dsn: str) -> int:
+    """Drop local pipeline sync tables before schema reinitialization.
+
+    Kept as a compatibility wrapper for older callers; it no longer drops every
+    public-schema table.
+    """
+    return reset_local_public_tables(local_dsn)
+
+
 def load_remote_db_info(path: str | Path) -> RemoteDbInfo:
     """Parse the secret metadata file for the remote PostgreSQL instance."""
     info_path = Path(path)
@@ -265,7 +351,7 @@ def sync_remote_tables_to_local(
         with contextlib.closing(psycopg2.connect(local_dsn)) as local_conn:
             local_conn.autocommit = False
             if all_tables:
-                return _sync_all_public_tables_to_local(
+                return _sync_pipeline_public_tables_to_local(
                     remote_conn=remote_conn,
                     local_conn=local_conn,
                 )
@@ -296,21 +382,27 @@ def sync_remote_tables_to_local(
     return results
 
 
-def _sync_all_public_tables_to_local(*, remote_conn: Any, local_conn: Any) -> dict[str, int]:
-    """Replace local public-schema table data with the remote public-schema data."""
+def _sync_pipeline_public_tables_to_local(
+    *, remote_conn: Any, local_conn: Any
+) -> dict[str, int]:
+    """Replace selected local pipeline tables with the matching remote table data."""
     _prepare_local_full_refresh_session(local_conn)
 
     remote_tables = _list_public_tables(remote_conn)
     local_tables = _list_public_tables(local_conn)
-    _validate_full_database_table_sets(remote_tables=remote_tables, local_tables=local_tables)
+    target_tables = _select_required_public_tables(
+        remote_tables=remote_tables,
+        local_tables=local_tables,
+        required_tables=PIPELINE_FULL_REFRESH_TABLES,
+    )
     _validate_full_database_columns(
         remote_conn=remote_conn,
         local_conn=local_conn,
-        tables=remote_tables,
+        tables=target_tables,
     )
 
     table_order = _sort_tables_by_fk_dependencies(
-        tables=remote_tables,
+        tables=target_tables,
         dependencies=_list_foreign_key_dependencies(remote_conn),
     )
     _truncate_database_tables(local_conn=local_conn, tables=table_order)
@@ -326,7 +418,7 @@ def _sync_all_public_tables_to_local(*, remote_conn: Any, local_conn: Any) -> di
         )
         local_conn.commit()
         results[table.display_name] = copied
-        logger.info("full database sync copied table=%s rows=%s", table.display_name, copied)
+        logger.info("pipeline table sync copied table=%s rows=%s", table.display_name, copied)
 
     _sync_owned_sequences(remote_conn=remote_conn, local_conn=local_conn, tables=table_order)
     _reset_daily_ohlcv_checkpoint_from_local(local_conn)
@@ -350,6 +442,33 @@ def _list_public_tables(conn: Any) -> tuple[DatabaseTable, ...]:
             (PUBLIC_SCHEMA,),
         )
         return tuple(DatabaseTable(schema=row[0], name=row[1]) for row in cur.fetchall())
+
+
+def _select_required_public_tables(
+    *,
+    remote_tables: tuple[DatabaseTable, ...],
+    local_tables: tuple[DatabaseTable, ...],
+    required_tables: tuple[DatabaseTable, ...],
+) -> tuple[DatabaseTable, ...]:
+    """Return required tables when they exist on both sides, allowing extras."""
+    remote_set = set(remote_tables)
+    local_set = set(local_tables)
+    missing_remote = sorted(
+        table.display_name for table in required_tables if table not in remote_set
+    )
+    missing_local = sorted(
+        table.display_name for table in required_tables if table not in local_set
+    )
+
+    messages = []
+    if missing_remote:
+        messages.append(f"missing remotely: {', '.join(missing_remote)}")
+    if missing_local:
+        messages.append(f"missing locally: {', '.join(missing_local)}")
+    if messages:
+        raise ValueError("Required pipeline sync tables are unavailable; " + "; ".join(messages))
+
+    return tuple(table for table in required_tables if table in remote_set)
 
 
 def _validate_full_database_table_sets(
@@ -486,12 +605,12 @@ def _sort_tables_by_fk_dependencies(
 
 
 def _truncate_database_tables(*, local_conn: Any, tables: tuple[DatabaseTable, ...]) -> None:
-    """Truncate all target tables before a full database refresh."""
+    """Truncate target tables before a full refresh."""
     if not tables:
         return
 
     table_list = sql.SQL(", ").join(_table_identifier(table) for table in tables)
-    statement = sql.SQL("TRUNCATE TABLE {} RESTART IDENTITY CASCADE").format(table_list)
+    statement = sql.SQL("TRUNCATE TABLE {} RESTART IDENTITY").format(table_list)
     with local_conn.cursor() as cur:
         cur.execute(statement)
     local_conn.commit()
@@ -591,7 +710,7 @@ def _sync_owned_sequences(
             )
 
     if sequences:
-        logger.info("full database sync copied sequence states count=%s", len(sequences))
+        logger.info("pipeline table sync copied sequence states count=%s", len(sequences))
     return len(sequences)
 
 

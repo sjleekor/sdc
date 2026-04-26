@@ -418,7 +418,7 @@ wheels = [
 
 [[package]]
 name = "krx-data-pipeline"
-version = "0.5.0"
+version = "0.8.0"
 source = { editable = "." }
 dependencies = [
     { name = "finance-datareader" },
@@ -427,6 +427,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pykrx" },
+    { name = "requests" },
     { name = "setuptools" },
 ]
 
@@ -447,6 +448,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.0" },
     { name = "pykrx", specifier = ">=1.2.7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "requests", specifier = ">=2.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
     { name = "setuptools", specifier = "<70.0.0" },
 ]

@@ -95,9 +95,14 @@ uv run krx-collector metrics coverage-report --tickers 005930 --bsns-years 2025 
 ### 수급 raw (pykrx / KRX)
 
 ```bash
-# 13. 종목/일자 기준 수급 raw 적재
+# 13. 종목/일자 기준 수급 raw 적재 (default: pykrx)
 uv run krx-collector flows sync --tickers 005930 --start 2026-04-17 --end 2026-04-17
+
+# 13-1. KRX MDC를 직접 호출하는 신규 provider 사용
+uv run krx-collector flows sync --provider krx --tickers 005930 --start 2026-04-17 --end 2026-04-17
 ```
+
+`--provider`는 `pykrx` (default) 또는 `krx` 중 선택합니다. `krx`는 pykrx에 의존하지 않고 KRX MDC JSON endpoint를 직접 호출하며, 적재 row의 `source` 컬럼이 `KRX`로 기록됩니다 (기본값은 `PYKRX`). 두 provider는 unique key에 `source`를 포함해 별도로 적재되므로 같은 `(trade_date, ticker, metric_code)`라도 충돌 없이 비교 검증할 수 있습니다. KRX MDC가 비로그인 응답을 거부하면 `.env`의 `KRX_ID` / `KRX_PW` 자격증명으로 자동 로그인 후 재시도합니다. 운영 default는 smoke 검증이 끝날 때까지 `pykrx`로 유지합니다.
 
 ### 사업 KPI 파일럿 (섹터별 extractor)
 
@@ -195,24 +200,42 @@ uv run krx-collector db sync-remote --ssh-host whi@sj2-server --full-refresh
 
 #### 3. `--all-tables` (반드시 `--full-refresh`와 함께)
 
-원격 `public` 스키마의 **모든** 테이블을 로컬 `public` 스키마로 통째 복제합니다. 로컬 public 테이블 데이터가 모두 비워지므로 파괴적 작업입니다. `--full-refresh`를 함께 지정하지 않으면 즉시 에러로 중단됩니다.
+유니버스 동기화, 일봉 백필, OpenDART 계정/재무/XBRL 및 canonical metric 정규화가 쓰는 관리 대상 테이블만 원격에서 로컬로 통째 복제합니다. 대상 로컬 테이블은 비워지고 다시 적재되므로 파괴적 작업입니다. `--full-refresh`를 함께 지정하지 않으면 즉시 에러로 중단됩니다.
 
 ```bash
 uv run krx-collector db sync-remote --ssh-host whi@sj2-server --full-refresh --all-tables
 ```
 
+동기화 대상은 다음 테이블입니다.
+
+- `stock_master`
+- `stock_master_snapshot`
+- `stock_master_snapshot_items`
+- `daily_ohlcv`
+- `dart_corp_master`
+- `dart_financial_statement_raw`
+- `dart_share_count_raw`
+- `dart_shareholder_return_raw`
+- `dart_xbrl_document`
+- `dart_xbrl_fact_raw`
+- `metric_catalog`
+- `metric_mapping_rule`
+- `stock_metric_fact`
+- `ingestion_runs`
+
 `--all-tables` 모드는 다음 순서로 동작합니다.
 
-1. **사전 검증** — 원격/로컬 public 테이블 집합과 각 테이블의 컬럼 구성(이름·순서)이 일치하는지 확인합니다. 불일치가 있으면 truncate 전에 즉시 오류로 중단됩니다.
-2. **위상 정렬 후 truncate** — 외래키 의존성을 따라 부모 → 자식 순으로 정렬한 뒤 `TRUNCATE ... RESTART IDENTITY CASCADE`로 모든 대상 테이블을 비웁니다. 순환 FK가 발견되면 오류로 중단됩니다.
-3. **바이너리 COPY 스트리밍** — 각 테이블을 PostgreSQL `COPY ... (FORMAT BINARY)`로 OS 파이프를 통해 원격→로컬 스트리밍합니다. 큰 테이블도 메모리 스파이크 없이 처리됩니다.
-4. **시퀀스 복제** — 각 테이블이 소유한 시퀀스의 `last_value`/`is_called`를 `setval`로 그대로 복제합니다.
-5. **체크포인트 정렬** — 마지막으로 `daily_ohlcv` 증분 체크포인트를 로컬에 적재된 데이터 기준으로 다시 써서, 이후 증분 sync가 올바르게 재개되도록 보정합니다.
+1. **대상 테이블 schema reset** — 위 대상 로컬 테이블만 drop 후 `sql/postgres_ddl.sql`을 다시 적용합니다. 대상 밖의 public 테이블은 삭제하지 않습니다.
+2. **사전 검증** — 대상 테이블이 원격/로컬 양쪽에 모두 있는지와 컬럼 구성(이름·순서)이 일치하는지 확인합니다. 불일치가 있으면 truncate 전에 즉시 오류로 중단됩니다.
+3. **위상 정렬 후 truncate** — 외래키 의존성을 따라 부모 → 자식 순으로 정렬한 뒤 `TRUNCATE ... RESTART IDENTITY`로 대상 테이블만 비웁니다. 순환 FK가 발견되면 오류로 중단됩니다.
+4. **바이너리 COPY 스트리밍** — 각 테이블을 PostgreSQL `COPY ... (FORMAT BINARY)`로 OS 파이프를 통해 원격→로컬 스트리밍합니다. 큰 테이블도 메모리 스파이크 없이 처리됩니다.
+5. **시퀀스 복제** — 각 테이블이 소유한 시퀀스의 `last_value`/`is_called`를 `setval`로 그대로 복제합니다.
+6. **체크포인트 정렬** — 마지막으로 `daily_ohlcv` 증분 체크포인트를 로컬에 적재된 데이터 기준으로 다시 써서, 이후 증분 sync가 올바르게 재개되도록 보정합니다.
 
 ### 옵션
 
 - `--full-refresh`: 기본 4개 테이블을 truncate 후 처음부터 적재합니다.
-- `--all-tables`: 원격 public 스키마의 모든 테이블을 full-refresh 방식으로 복제합니다 (`--full-refresh` 필수).
+- `--all-tables`: 관리 대상 파이프라인 테이블만 full-refresh 방식으로 복제합니다 (`--full-refresh` 필수).
 - `--db-info-path`: 원격 DB 정보 파일 경로를 변경합니다.
 - `--batch-size`: 증분 동기화에서 한 번에 읽어올 행 수를 조절합니다 (`--all-tables` 모드에서는 사용되지 않습니다).
 - `--remote-host`: `db_info`의 host 값을 다른 호스트명으로 덮어씁니다.

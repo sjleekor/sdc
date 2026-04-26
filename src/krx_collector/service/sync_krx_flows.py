@@ -70,6 +70,7 @@ def sync_krx_security_flows(
     rate_limit_seconds: float = 0.2,
 ) -> KrxFlowSyncResult:
     """Synchronise daily investor/shorting/ownership raw metrics."""
+    provider_source = provider.source()
     run = IngestionRun(
         run_type=RunType.KRX_FLOW_SYNC,
         started_at=now_kst(),
@@ -79,6 +80,7 @@ def sync_krx_security_flows(
             "end": end.isoformat(),
             "tickers": tickers,
             "rate_limit_seconds": rate_limit_seconds,
+            "provider_source": provider_source.value,
         },
     )
     storage.record_run(run)
@@ -105,21 +107,21 @@ def sync_krx_security_flows(
             end=end,
             tickers=target_tickers,
             metric_code=FOREIGN_HOLDING_METRIC,
-            source=Source.PYKRX,
+            source=provider_source,
         )
         investor_metric_counts = storage.count_krx_security_flow_ticker_metric_dates(
             start=start,
             end=end,
             tickers=target_tickers,
             metric_codes=INVESTOR_METRICS,
-            source=Source.PYKRX,
+            source=provider_source,
         )
         shorting_metric_counts = storage.count_krx_security_flow_ticker_metric_dates(
             start=start,
             end=end,
             tickers=target_tickers,
             metric_codes=SHORTING_METRICS,
-            source=Source.PYKRX,
+            source=provider_source,
         )
         investor_expected_count = len(trading_days) * len(INVESTOR_METRICS)
         shorting_expected_count = len(trading_days) * len(SHORTING_METRICS)

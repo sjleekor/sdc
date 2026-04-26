@@ -5,13 +5,17 @@ from __future__ import annotations
 from datetime import date
 from typing import Protocol, runtime_checkable
 
-from krx_collector.domain.enums import Market
+from krx_collector.domain.enums import Market, Source
 from krx_collector.domain.models import SecurityFlowFetchResult
 
 
 @runtime_checkable
 class FlowProvider(Protocol):
     """Fetch daily investor/shorting/ownership flow metrics."""
+
+    def source(self) -> Source:
+        """Return the provenance source this provider writes."""
+        ...
 
     def fetch_investor_net_volume(
         self,
