@@ -379,7 +379,9 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
 
     print(
         f"→ flows sync: start={start}, end={end}, "
-        f"tickers={tickers}, rate_limit={args.rate_limit_seconds}"
+        f"tickers={tickers}, rate_limit={args.rate_limit_seconds}, "
+        f"progress_interval={args.progress_log_interval_seconds}, "
+        f"progress_every={args.progress_log_every_items}"
     )
 
     from krx_collector.adapters.flows_krx.provider import KrxDirectFlowProvider
@@ -415,6 +417,8 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
         end=end,
         tickers=tickers,
         rate_limit_seconds=args.rate_limit_seconds,
+        progress_log_interval_seconds=args.progress_log_interval_seconds,
+        progress_log_every_items=args.progress_log_every_items,
     )
 
     if result.errors:
@@ -954,6 +958,18 @@ def build_parser() -> argparse.ArgumentParser:
             "Optional --start/--end further clamp that range."
         ),
     )
+    flows_sync.add_argument(
+        "--progress-log-interval-seconds",
+        type=float,
+        default=30.0,
+        help="Emit flow sync progress at least this often in seconds (0 disables time-based logs).",
+    )
+    flows_sync.add_argument(
+        "--progress-log-every-items",
+        type=int,
+        default=100,
+        help="Emit flow sync progress every N handled items (0 disables count-based logs).",
+    )
     flows_sync.set_defaults(handler=_handle_flows_sync)
 
     # -- operating ------------------------------------------------------------
@@ -1155,6 +1171,11 @@ def main(argv: list[str] | None = None) -> None:
         logger.warning("Command not yet implemented: %s", exc)
         print(f"⚠  Not implemented yet: {exc}", file=sys.stderr)
         sys.exit(1)
+
+
+def dart_main(argv: list[str] | None = None) -> None:
+    """Entrypoint for the ``dart`` console script."""
+    main(["dart", *(sys.argv[1:] if argv is None else argv)])
 
 
 if __name__ == "__main__":

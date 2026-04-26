@@ -1,3 +1,4 @@
+import logging
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -195,6 +196,41 @@ def test_sync_krx_security_flows_writes_rows_and_pending_metrics() -> None:
     assert storage.runs[-1].status == RunStatus.SUCCESS
 
 
+def test_sync_krx_security_flows_logs_progress(caplog: pytest.LogCaptureFixture) -> None:
+    storage = MockFlowStorage()
+    caplog.set_level(logging.INFO, logger="krx_collector.service.sync_krx_flows")
+
+    result = sync_krx_security_flows(
+        provider=MockFlowProvider(),  # type: ignore[arg-type]
+        storage=storage,  # type: ignore[arg-type]
+        start=date(2026, 4, 17),
+        end=date(2026, 4, 17),
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+        progress_log_interval_seconds=0.0,
+        progress_log_every_items=1,
+    )
+
+    assert result.errors == {}
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("Flow sync started:" in message for message in messages)
+    assert any("Flow sync existing coverage loaded:" in message for message in messages)
+    assert any(
+        "Flow sync phase started: phase=foreign_holding" in message for message in messages
+    )
+    assert any(
+        "Flow sync progress: phase=foreign_holding processed=1/1" in message
+        for message in messages
+    )
+    assert any(
+        "Flow sync phase started: phase=ticker_metrics" in message for message in messages
+    )
+    assert any(
+        "Flow sync progress: phase=ticker_metrics processed=2/2" in message
+        for message in messages
+    )
+
+
 def test_sync_krx_security_flows_skips_complete_existing_requests() -> None:
     storage = MockFlowStorage()
     storage.foreign_counts[(date(2026, 4, 17), Market.KOSPI.value)] = 1
@@ -248,7 +284,25 @@ def test_flows_sync_parser_supports_price_range_mode_without_provider_selection(
     assert args.use_price_range is True
     assert args.start is None
     assert args.end is None
+    assert args.progress_log_interval_seconds == 30.0
+    assert args.progress_log_every_items == 100
     assert not hasattr(args, "provider")
+
+
+def test_flows_sync_parser_supports_progress_log_options() -> None:
+    args = build_parser().parse_args(
+        [
+            "flows",
+            "sync",
+            "--progress-log-interval-seconds",
+            "5",
+            "--progress-log-every-items",
+            "10",
+        ]
+    )
+
+    assert args.progress_log_interval_seconds == 5.0
+    assert args.progress_log_every_items == 10
 
 
 def test_flows_sync_parser_rejects_provider_selection() -> None:

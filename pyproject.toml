@@ -1,6 +1,6 @@
 [project]
 name = "krx-data-pipeline"
-version = "0.8.2"
+version = "0.8.3"
 description = "Maintainable Korean stock data pipeline: universe sync, daily OHLCV, OpenDART financials/XBRL, KRX flows, and sector-specific operating KPIs."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -26,6 +26,7 @@ dev = [
 
 [project.scripts]
 krx-collector = "krx_collector.cli.app:main"
+dart = "krx_collector.cli.app:dart_main"
 
 [tool.ruff]
 target-version = "py312"
