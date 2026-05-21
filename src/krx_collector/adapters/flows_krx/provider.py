@@ -19,6 +19,7 @@ from krx_collector.adapters.flows_krx.parsers import (
 )
 from krx_collector.domain.enums import Market, Source
 from krx_collector.domain.models import SecurityFlowFetchResult
+from krx_collector.util.pipeline import HumanThrottle
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +40,13 @@ class KrxDirectFlowProvider:
         timeout_seconds: float = 20.0,
         login_id: str = "",
         login_pw: str = "",
+        human_throttle: HumanThrottle | None = None,
     ) -> None:
         self._client = client or KrxMdcClient(
             timeout_seconds=timeout_seconds,
             login_id=login_id,
             login_pw=login_pw,
+            human_throttle=human_throttle,
         )
         self._resolver = resolver or KrxStockCodeResolver(self._client)
 

@@ -6,6 +6,7 @@ import logging
 import random
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from krx_collector.domain.enums import RunStatus
@@ -14,6 +15,140 @@ from krx_collector.ports.storage import Storage
 from krx_collector.util.time import now_kst
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class HumanThrottlePolicy:
+    """Throttle policy for KRX-facing HTTP requests."""
+
+    min_delay_seconds: float = 0.0
+    max_delay_seconds: float = 0.0
+    long_rest_every: int = 0
+    long_rest_min_seconds: float = 0.0
+    long_rest_max_seconds: float = 0.0
+    auth_cooldown_seconds: float = 0.0
+    error_backoff_min_seconds: float = 0.0
+    error_backoff_max_seconds: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.min_delay_seconds < 0 or self.max_delay_seconds < 0:
+            raise ValueError("HumanThrottlePolicy delays must be non-negative.")
+        if self.min_delay_seconds > self.max_delay_seconds:
+            raise ValueError("HumanThrottlePolicy min_delay_seconds must be <= max_delay_seconds.")
+        if self.long_rest_every < 0:
+            raise ValueError("HumanThrottlePolicy long_rest_every must be non-negative.")
+        if self.long_rest_min_seconds < 0 or self.long_rest_max_seconds < 0:
+            raise ValueError("HumanThrottlePolicy long rest durations must be non-negative.")
+        if self.long_rest_min_seconds > self.long_rest_max_seconds:
+            raise ValueError(
+                "HumanThrottlePolicy long_rest_min_seconds must be <= long_rest_max_seconds."
+            )
+        if self.auth_cooldown_seconds < 0:
+            raise ValueError("HumanThrottlePolicy auth_cooldown_seconds must be non-negative.")
+        if self.error_backoff_min_seconds < 0 or self.error_backoff_max_seconds < 0:
+            raise ValueError("HumanThrottlePolicy error backoff durations must be non-negative.")
+        if self.error_backoff_min_seconds > self.error_backoff_max_seconds:
+            raise ValueError(
+                "HumanThrottlePolicy error_backoff_min_seconds must be <= "
+                "error_backoff_max_seconds."
+            )
+
+    def enabled(self) -> bool:
+        return any(
+            (
+                self.max_delay_seconds > 0,
+                self.long_rest_every > 0 and self.long_rest_max_seconds > 0,
+                self.auth_cooldown_seconds > 0,
+                self.error_backoff_max_seconds > 0,
+            )
+        )
+
+
+class HumanThrottle:
+    """Stateful human-like request throttling."""
+
+    def __init__(
+        self,
+        policy: HumanThrottlePolicy,
+        *,
+        sleep_fn: Callable[[float], None] = time.sleep,
+        monotonic_fn: Callable[[], float] = time.monotonic,
+        rng: random.Random | None = None,
+        logger_instance: logging.Logger | None = None,
+    ) -> None:
+        self._policy = policy
+        self._sleep_fn = sleep_fn
+        self._monotonic_fn = monotonic_fn
+        self._rng = rng or random.Random()
+        self._logger = logger_instance or logger
+        self._completed_requests = 0
+        self._last_request_finished_at: float | None = None
+
+    def before_request(self, label: str) -> None:
+        if not self._policy.enabled():
+            return
+
+        if (
+            self._policy.long_rest_every > 0
+            and self._completed_requests > 0
+            and self._completed_requests % self._policy.long_rest_every == 0
+        ):
+            self._sleep_random(
+                self._policy.long_rest_min_seconds,
+                self._policy.long_rest_max_seconds,
+                reason=f"KRX long rest before {label}",
+            )
+
+        self._sleep_to_spacing(
+            self._policy.min_delay_seconds,
+            self._policy.max_delay_seconds,
+            reason=f"KRX request spacing before {label}",
+        )
+
+    def after_request(self) -> None:
+        self._completed_requests += 1
+        self._last_request_finished_at = self._monotonic_fn()
+
+    def cooldown_after_auth(self, label: str) -> None:
+        if self._policy.auth_cooldown_seconds <= 0:
+            return
+        self._sleep_exact(
+            self._policy.auth_cooldown_seconds,
+            reason=f"KRX auth cooldown after {label}",
+        )
+
+    def backoff_after_error(self, label: str) -> None:
+        if self._policy.error_backoff_max_seconds <= 0:
+            return
+        self._sleep_random(
+            self._policy.error_backoff_min_seconds,
+            self._policy.error_backoff_max_seconds,
+            reason=f"KRX error backoff after {label}",
+        )
+
+    def _sleep_to_spacing(self, minimum: float, maximum: float, *, reason: str) -> None:
+        if maximum <= 0:
+            return
+
+        target_spacing = self._rng.uniform(minimum, maximum)
+        if self._last_request_finished_at is None:
+            sleep_for = target_spacing
+        else:
+            elapsed = self._monotonic_fn() - self._last_request_finished_at
+            sleep_for = max(0.0, target_spacing - elapsed)
+        self._sleep_exact(sleep_for, reason=reason)
+
+    def _sleep_random(self, minimum: float, maximum: float, *, reason: str) -> None:
+        if maximum <= 0:
+            return
+        self._sleep_exact(self._rng.uniform(minimum, maximum), reason=reason)
+
+    def _sleep_exact(self, seconds: float, *, reason: str) -> None:
+        if seconds <= 0:
+            return
+        self._logger.debug("%s: sleeping %.2fs", reason, seconds)
+        self._sleep_fn(seconds)
+        self._last_request_finished_at = self._monotonic_fn()
 
 
 class OpenDartKeyExhaustedError(RuntimeError):

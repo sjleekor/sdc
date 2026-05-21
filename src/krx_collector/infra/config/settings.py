@@ -78,6 +78,16 @@ class Settings(BaseSettings):
         remote_db_ssh_host: Optional SSH host for local port forwarding.
         remote_db_ssh_local_port: Optional fixed local port for SSH tunnel.
         krx_mdc_timeout_seconds: HTTP timeout for KRX MDC requests.
+        krx_logical_rate_limit_seconds: Delay between higher-level KRX flow
+            requests.
+        krx_min_delay_seconds: Minimum delay between actual KRX HTTP calls.
+        krx_max_delay_seconds: Maximum delay between actual KRX HTTP calls.
+        krx_long_rest_every: Number of KRX HTTP calls between long rests.
+        krx_long_rest_min_seconds: Minimum duration of a long KRX rest.
+        krx_long_rest_max_seconds: Maximum duration of a long KRX rest.
+        krx_auth_cooldown_seconds: Delay after a successful KRX login.
+        krx_error_backoff_min_seconds: Minimum delay after a KRX error.
+        krx_error_backoff_max_seconds: Maximum delay after a KRX error.
     """
 
     model_config = SettingsConfigDict(
@@ -110,6 +120,15 @@ class Settings(BaseSettings):
     krx_id: str = ""
     krx_pw: str = ""
     krx_mdc_timeout_seconds: float = DEFAULT_KRX_MDC_TIMEOUT_SECONDS
+    krx_logical_rate_limit_seconds: float = 8.0
+    krx_min_delay_seconds: float = 1.5
+    krx_max_delay_seconds: float = 4.0
+    krx_long_rest_every: int = 15
+    krx_long_rest_min_seconds: float = 30.0
+    krx_long_rest_max_seconds: float = 90.0
+    krx_auth_cooldown_seconds: float = 10.0
+    krx_error_backoff_min_seconds: float = 45.0
+    krx_error_backoff_max_seconds: float = 180.0
 
     # OpenDART
     opendart_api_key: str = ""

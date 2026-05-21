@@ -28,6 +28,7 @@ from krx_collector.adapters.flows_krx.parsers import (
 )
 from krx_collector.adapters.flows_krx.provider import KrxDirectFlowProvider
 from krx_collector.domain.enums import Market, Source
+from krx_collector.util.pipeline import HumanThrottle, HumanThrottlePolicy
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "flows_krx"
 
@@ -301,6 +302,41 @@ def test_client_uses_configured_timeout_for_posts() -> None:
     )
 
     assert session.post_calls[0]["timeout"] == 150.0
+
+
+def test_client_applies_human_throttle_spacing_and_auth_cooldown() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(text="LOGOUT"),
+            FakeResponse({"_error_code": "CD001", "_error_message": "정상"}),
+            FakeResponse({"output": []}),
+        ]
+    )
+    sleeps: list[float] = []
+    throttle = HumanThrottle(
+        HumanThrottlePolicy(
+            min_delay_seconds=1.0,
+            max_delay_seconds=1.0,
+            auth_cooldown_seconds=2.0,
+        ),
+        sleep_fn=sleeps.append,
+    )
+    client = KrxMdcClient(
+        session=session,
+        warmup=False,
+        login_id="user",
+        login_pw="secret",
+        human_throttle=throttle,
+    )
+
+    client.post_rows(
+        "dbms/MDC/STAT/standard/MDCSTAT03701",
+        {"trdDd": "20260417"},
+        output_key="output",
+    )
+
+    assert 2.0 in sleeps
+    assert sum(abs(duration - 1.0) < 0.01 for duration in sleeps) >= 4
 
 
 class FakeFinderClient:

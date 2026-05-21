@@ -9,6 +9,8 @@ from typing import Any
 
 import requests
 
+from krx_collector.util.pipeline import HumanThrottle
+
 logger = logging.getLogger(__name__)
 
 KRX_MDC_URL = "https://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
@@ -70,12 +72,14 @@ class KrxMdcClient:
         login_pw: str = "",
         auto_login: bool = True,
         warmup: bool = True,
+        human_throttle: HumanThrottle | None = None,
     ) -> None:
         self._session = session or requests.Session()
         self._timeout_seconds = timeout_seconds
         self._login_id = login_id
         self._login_pw = login_pw
         self._auto_login = auto_login
+        self._human_throttle = human_throttle
         self._warmed_up = False
         if warmup:
             self.warmup()
@@ -93,16 +97,20 @@ class KrxMdcClient:
         if self._warmed_up:
             return
         try:
+            self._before_http("warmup_login_page")
             self._session.get(
                 KRX_LOGIN_PAGE,
                 headers={"User-Agent": USER_AGENT},
                 timeout=self._timeout_seconds,
             )
+            self._after_http()
+            self._before_http("warmup_login_jsp")
             self._session.get(
                 KRX_LOGIN_JSP,
                 headers={"User-Agent": USER_AGENT, "Referer": KRX_LOGIN_PAGE},
                 timeout=self._timeout_seconds,
             )
+            self._after_http()
             self._warmed_up = True
         except requests.RequestException as exc:
             logger.debug("KRX warmup failed: %s", exc)
@@ -184,26 +192,43 @@ class KrxMdcClient:
             raise KrxMdcAuthenticationError(
                 f"KRX login failed with code={error_code or 'missing'}: {message}"
             )
+        self._cooldown_after_auth("login")
 
     def _post_login(self, payload: dict[str, Any]) -> dict[str, Any]:
-        response = self._session.post(
-            KRX_LOGIN_URL,
-            headers={"User-Agent": USER_AGENT, "Referer": KRX_LOGIN_PAGE},
-            data=payload,
-            timeout=self._timeout_seconds,
-        )
-        return self._decode_json_response(response, bld="login", request=payload)
+        self._before_http("login_post")
+        try:
+            response = self._session.post(
+                KRX_LOGIN_URL,
+                headers={"User-Agent": USER_AGENT, "Referer": KRX_LOGIN_PAGE},
+                data=payload,
+                timeout=self._timeout_seconds,
+            )
+        finally:
+            self._after_http()
+        try:
+            return self._decode_json_response(response, bld="login", request=payload)
+        except KrxMdcError:
+            self._backoff_after_error("login_post")
+            raise
 
     def _post_json_once(self, bld: str, params: dict[str, Any]) -> dict[str, Any]:
         request_payload = dict(params)
         request_payload["bld"] = bld
-        response = self._session.post(
-            KRX_MDC_URL,
-            headers=self.headers,
-            data=request_payload,
-            timeout=self._timeout_seconds,
-        )
-        return self._decode_json_response(response, bld=bld, request=request_payload)
+        self._before_http(bld)
+        try:
+            response = self._session.post(
+                KRX_MDC_URL,
+                headers=self.headers,
+                data=request_payload,
+                timeout=self._timeout_seconds,
+            )
+        finally:
+            self._after_http()
+        try:
+            return self._decode_json_response(response, bld=bld, request=request_payload)
+        except KrxMdcError:
+            self._backoff_after_error(bld)
+            raise
 
     def _decode_json_response(
         self,
@@ -249,6 +274,22 @@ class KrxMdcClient:
             )
 
         return data
+
+    def _before_http(self, label: str) -> None:
+        if self._human_throttle is not None:
+            self._human_throttle.before_request(label)
+
+    def _after_http(self) -> None:
+        if self._human_throttle is not None:
+            self._human_throttle.after_request()
+
+    def _cooldown_after_auth(self, label: str) -> None:
+        if self._human_throttle is not None:
+            self._human_throttle.cooldown_after_auth(label)
+
+    def _backoff_after_error(self, label: str) -> None:
+        if self._human_throttle is not None:
+            self._human_throttle.backoff_after_error(label)
 
     def _iter_chunked_params(
         self,

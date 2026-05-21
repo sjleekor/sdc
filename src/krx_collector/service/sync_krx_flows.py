@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import time
 from datetime import date
 
@@ -168,6 +169,7 @@ def sync_krx_security_flows(
     rate_limit_seconds: float = 0.2,
     progress_log_interval_seconds: float = DEFAULT_PROGRESS_LOG_INTERVAL_SECONDS,
     progress_log_every_items: int = DEFAULT_PROGRESS_LOG_EVERY_ITEMS,
+    randomize_request_order: bool = True,
 ) -> KrxFlowSyncResult:
     """Synchronise daily investor/shorting/ownership raw metrics."""
     provider_source = provider.source()
@@ -182,6 +184,7 @@ def sync_krx_security_flows(
             "rate_limit_seconds": rate_limit_seconds,
             "progress_log_interval_seconds": progress_log_interval_seconds,
             "progress_log_every_items": progress_log_every_items,
+            "randomize_request_order": randomize_request_order,
             "provider_source": provider_source.value,
         },
     )
@@ -275,68 +278,32 @@ def sync_krx_security_flows(
             interval_seconds=progress_log_interval_seconds,
             every_items=progress_log_every_items,
         )
+        rng = random.SystemRandom()
 
         foreign_processed = 0
+        foreign_work = [
+            (trade_date, market_stocks)
+            for trade_date in trading_days
+            for market_stocks in stocks_by_market.values()
+        ]
+        if randomize_request_order and len(foreign_work) > 1:
+            rng.shuffle(foreign_work)
         progress.start_phase(
             "foreign_holding",
             foreign_total_market_days,
             details=f"trading_days={len(trading_days)} markets={len(stocks_by_market)}",
         )
-        for trade_date in trading_days:
-            for market_stocks in stocks_by_market.values():
-                market = market_stocks[0].market
-                market_tickers = [stock.ticker for stock in market_stocks]
-                current = f"{trade_date.isoformat()}:{market.value}"
-                if foreign_ticker_counts.get((trade_date, market.value), 0) >= len(market_tickers):
-                    logger.debug(
-                        "Skipping existing foreign holding flow request %s:%s",
-                        trade_date.isoformat(),
-                        market.value,
-                    )
-                    result.requests_skipped += 1
-                    foreign_processed += 1
-                    progress.tick(
-                        processed=foreign_processed,
-                        attempted=result.requests_attempted,
-                        skipped=result.requests_skipped,
-                        rows_upserted=result.rows_upserted,
-                        no_data=result.no_data_requests,
-                        errors=len(result.errors),
-                        current=current,
-                    )
-                    continue
-
-                result.requests_attempted += 1
-                request_key = f"foreign:{trade_date.isoformat()}:{market.value}"
-                logger.debug("Fetching flow request: request=%s", request_key)
-                request_started_at = time.monotonic()
-                foreign_result = call_with_retry(
-                    lambda: provider.fetch_foreign_holding_shares(
-                        trade_date=trade_date,
-                        market=market,
-                        tickers=market_tickers,
-                    ),
-                    request_label=request_key,
-                    logger_instance=logger,
+        for trade_date, market_stocks in foreign_work:
+            market = market_stocks[0].market
+            market_tickers = [stock.ticker for stock in market_stocks]
+            current = f"{trade_date.isoformat()}:{market.value}"
+            if foreign_ticker_counts.get((trade_date, market.value), 0) >= len(market_tickers):
+                logger.debug(
+                    "Skipping existing foreign holding flow request %s:%s",
+                    trade_date.isoformat(),
+                    market.value,
                 )
-                _log_flow_request_result(
-                    request_key,
-                    time.monotonic() - request_started_at,
-                    foreign_result,
-                )
-                if foreign_result.error:
-                    logger.warning(
-                        "Foreign holding sync failed for %s: %s", request_key, foreign_result.error
-                    )
-                    result.errors[request_key] = foreign_result.error
-                elif foreign_result.no_data:
-                    result.no_data_requests += 1
-                elif foreign_result.records:
-                    upsert = storage.upsert_krx_security_flow_raw(foreign_result.records)
-                    result.upsert.updated += upsert.updated
-                    result.upsert.errors += upsert.errors
-                    result.rows_upserted += upsert.updated
-                sleep_with_jitter(rate_limit_seconds)
+                result.requests_skipped += 1
                 foreign_processed += 1
                 progress.tick(
                     processed=foreign_processed,
@@ -347,73 +314,72 @@ def sync_krx_security_flows(
                     errors=len(result.errors),
                     current=current,
                 )
+                continue
+
+            result.requests_attempted += 1
+            request_key = f"foreign:{trade_date.isoformat()}:{market.value}"
+            logger.debug("Fetching flow request: request=%s", request_key)
+            request_started_at = time.monotonic()
+            foreign_result = call_with_retry(
+                lambda: provider.fetch_foreign_holding_shares(
+                    trade_date=trade_date,
+                    market=market,
+                    tickers=market_tickers,
+                ),
+                request_label=request_key,
+                logger_instance=logger,
+            )
+            _log_flow_request_result(
+                request_key,
+                time.monotonic() - request_started_at,
+                foreign_result,
+            )
+            if foreign_result.error:
+                logger.warning(
+                    "Foreign holding sync failed for %s: %s",
+                    request_key,
+                    foreign_result.error,
+                )
+                result.errors[request_key] = foreign_result.error
+            elif foreign_result.no_data:
+                result.no_data_requests += 1
+            elif foreign_result.records:
+                upsert = storage.upsert_krx_security_flow_raw(foreign_result.records)
+                result.upsert.updated += upsert.updated
+                result.upsert.errors += upsert.errors
+                result.rows_upserted += upsert.updated
+            sleep_with_jitter(rate_limit_seconds, jitter_ratio=0.4)
+            foreign_processed += 1
+            progress.tick(
+                processed=foreign_processed,
+                attempted=result.requests_attempted,
+                skipped=result.requests_skipped,
+                rows_upserted=result.rows_upserted,
+                no_data=result.no_data_requests,
+                errors=len(result.errors),
+                current=current,
+            )
 
         ticker_metric_total = len(targets) * 2
         ticker_metric_processed = 0
+        ticker_metric_work = [
+            (stock, "investor", provider.fetch_investor_net_volume)
+            for stock in targets
+        ] + [
+            (stock, "shorting", provider.fetch_shorting_metrics)
+            for stock in targets
+        ]
+        if randomize_request_order and len(ticker_metric_work) > 1:
+            rng.shuffle(ticker_metric_work)
         progress.start_phase(
             "ticker_metrics",
             ticker_metric_total,
             details=f"targets={len(targets)} metric_groups=2",
         )
-        for stock in targets:
-            for fetch_kind, fetch_fn in [
-                ("investor", provider.fetch_investor_net_volume),
-                ("shorting", provider.fetch_shorting_metrics),
-            ]:
-                if fetch_kind == "investor" and stock.ticker in completed_investor_tickers:
-                    logger.debug("Skipping existing investor flow request %s", stock.ticker)
-                    result.requests_skipped += 1
-                    ticker_metric_processed += 1
-                    progress.tick(
-                        processed=ticker_metric_processed,
-                        attempted=result.requests_attempted,
-                        skipped=result.requests_skipped,
-                        rows_upserted=result.rows_upserted,
-                        no_data=result.no_data_requests,
-                        errors=len(result.errors),
-                        current=f"{fetch_kind}:{stock.ticker}",
-                    )
-                    continue
-                if fetch_kind == "shorting" and stock.ticker in completed_shorting_tickers:
-                    logger.debug("Skipping existing shorting flow request %s", stock.ticker)
-                    result.requests_skipped += 1
-                    ticker_metric_processed += 1
-                    progress.tick(
-                        processed=ticker_metric_processed,
-                        attempted=result.requests_attempted,
-                        skipped=result.requests_skipped,
-                        rows_upserted=result.rows_upserted,
-                        no_data=result.no_data_requests,
-                        errors=len(result.errors),
-                        current=f"{fetch_kind}:{stock.ticker}",
-                    )
-                    continue
-
-                result.requests_attempted += 1
-                request_key = f"{fetch_kind}:{stock.ticker}:{start.isoformat()}:{end.isoformat()}"
-                logger.debug("Fetching flow request: request=%s", request_key)
-                request_started_at = time.monotonic()
-                fetch_result = call_with_retry(
-                    lambda: fetch_fn(stock.ticker, stock.market, start, end),
-                    request_label=request_key,
-                    logger_instance=logger,
-                )
-                _log_flow_request_result(
-                    request_key,
-                    time.monotonic() - request_started_at,
-                    fetch_result,
-                )
-                if fetch_result.error:
-                    logger.warning("Flow sync failed for %s: %s", request_key, fetch_result.error)
-                    result.errors[request_key] = fetch_result.error
-                elif fetch_result.no_data:
-                    result.no_data_requests += 1
-                elif fetch_result.records:
-                    upsert = storage.upsert_krx_security_flow_raw(fetch_result.records)
-                    result.upsert.updated += upsert.updated
-                    result.upsert.errors += upsert.errors
-                    result.rows_upserted += upsert.updated
-                sleep_with_jitter(rate_limit_seconds)
+        for stock, fetch_kind, fetch_fn in ticker_metric_work:
+            if fetch_kind == "investor" and stock.ticker in completed_investor_tickers:
+                logger.debug("Skipping existing investor flow request %s", stock.ticker)
+                result.requests_skipped += 1
                 ticker_metric_processed += 1
                 progress.tick(
                     processed=ticker_metric_processed,
@@ -424,6 +390,57 @@ def sync_krx_security_flows(
                     errors=len(result.errors),
                     current=f"{fetch_kind}:{stock.ticker}",
                 )
+                continue
+            if fetch_kind == "shorting" and stock.ticker in completed_shorting_tickers:
+                logger.debug("Skipping existing shorting flow request %s", stock.ticker)
+                result.requests_skipped += 1
+                ticker_metric_processed += 1
+                progress.tick(
+                    processed=ticker_metric_processed,
+                    attempted=result.requests_attempted,
+                    skipped=result.requests_skipped,
+                    rows_upserted=result.rows_upserted,
+                    no_data=result.no_data_requests,
+                    errors=len(result.errors),
+                    current=f"{fetch_kind}:{stock.ticker}",
+                )
+                continue
+
+            result.requests_attempted += 1
+            request_key = f"{fetch_kind}:{stock.ticker}:{start.isoformat()}:{end.isoformat()}"
+            logger.debug("Fetching flow request: request=%s", request_key)
+            request_started_at = time.monotonic()
+            fetch_result = call_with_retry(
+                lambda: fetch_fn(stock.ticker, stock.market, start, end),
+                request_label=request_key,
+                logger_instance=logger,
+            )
+            _log_flow_request_result(
+                request_key,
+                time.monotonic() - request_started_at,
+                fetch_result,
+            )
+            if fetch_result.error:
+                logger.warning("Flow sync failed for %s: %s", request_key, fetch_result.error)
+                result.errors[request_key] = fetch_result.error
+            elif fetch_result.no_data:
+                result.no_data_requests += 1
+            elif fetch_result.records:
+                upsert = storage.upsert_krx_security_flow_raw(fetch_result.records)
+                result.upsert.updated += upsert.updated
+                result.upsert.errors += upsert.errors
+                result.rows_upserted += upsert.updated
+            sleep_with_jitter(rate_limit_seconds, jitter_ratio=0.4)
+            ticker_metric_processed += 1
+            progress.tick(
+                processed=ticker_metric_processed,
+                attempted=result.requests_attempted,
+                skipped=result.requests_skipped,
+                rows_upserted=result.rows_upserted,
+                no_data=result.no_data_requests,
+                errors=len(result.errors),
+                current=f"{fetch_kind}:{stock.ticker}",
+            )
 
         complete_run(
             storage,

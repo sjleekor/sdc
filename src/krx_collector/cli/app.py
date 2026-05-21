@@ -385,10 +385,59 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
         if args.timeout_seconds is not None
         else settings.krx_mdc_timeout_seconds
     )
+    rate_limit_seconds = (
+        args.rate_limit_seconds
+        if args.rate_limit_seconds is not None
+        else settings.krx_logical_rate_limit_seconds
+    )
+    http_min_delay_seconds = (
+        args.http_min_delay_seconds
+        if args.http_min_delay_seconds is not None
+        else settings.krx_min_delay_seconds
+    )
+    http_max_delay_seconds = (
+        args.http_max_delay_seconds
+        if args.http_max_delay_seconds is not None
+        else settings.krx_max_delay_seconds
+    )
+    long_rest_every = (
+        args.long_rest_every if args.long_rest_every is not None else settings.krx_long_rest_every
+    )
+    long_rest_min_seconds = (
+        args.long_rest_min_seconds
+        if args.long_rest_min_seconds is not None
+        else settings.krx_long_rest_min_seconds
+    )
+    long_rest_max_seconds = (
+        args.long_rest_max_seconds
+        if args.long_rest_max_seconds is not None
+        else settings.krx_long_rest_max_seconds
+    )
+    auth_cooldown_seconds = (
+        args.auth_cooldown_seconds
+        if args.auth_cooldown_seconds is not None
+        else settings.krx_auth_cooldown_seconds
+    )
+    error_backoff_min_seconds = (
+        args.error_backoff_min_seconds
+        if args.error_backoff_min_seconds is not None
+        else settings.krx_error_backoff_min_seconds
+    )
+    error_backoff_max_seconds = (
+        args.error_backoff_max_seconds
+        if args.error_backoff_max_seconds is not None
+        else settings.krx_error_backoff_max_seconds
+    )
 
     print(
         f"→ flows sync: start={start}, end={end}, "
-        f"tickers={tickers}, rate_limit={args.rate_limit_seconds}, "
+        f"tickers={tickers}, logical_rate_limit={rate_limit_seconds}, "
+        f"http_delay={http_min_delay_seconds}..{http_max_delay_seconds}s, "
+        f"long_rest_every={long_rest_every}, "
+        f"long_rest={long_rest_min_seconds}..{long_rest_max_seconds}s, "
+        f"auth_cooldown={auth_cooldown_seconds}s, "
+        f"error_backoff={error_backoff_min_seconds}..{error_backoff_max_seconds}s, "
+        f"randomize_requests={not args.ordered_requests}, "
         f"timeout={timeout_seconds}, "
         f"progress_interval={args.progress_log_interval_seconds}, "
         f"progress_every={args.progress_log_every_items}"
@@ -397,11 +446,27 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
     from krx_collector.adapters.flows_krx.provider import KrxDirectFlowProvider
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
     from krx_collector.service.sync_krx_flows import sync_krx_security_flows
+    from krx_collector.util.pipeline import HumanThrottle, HumanThrottlePolicy
+
+    human_throttle = HumanThrottle(
+        HumanThrottlePolicy(
+            min_delay_seconds=http_min_delay_seconds,
+            max_delay_seconds=http_max_delay_seconds,
+            long_rest_every=long_rest_every,
+            long_rest_min_seconds=long_rest_min_seconds,
+            long_rest_max_seconds=long_rest_max_seconds,
+            auth_cooldown_seconds=auth_cooldown_seconds,
+            error_backoff_min_seconds=error_backoff_min_seconds,
+            error_backoff_max_seconds=error_backoff_max_seconds,
+        ),
+        logger_instance=logger,
+    )
 
     provider = KrxDirectFlowProvider(
         timeout_seconds=timeout_seconds,
         login_id=settings.krx_id,
         login_pw=settings.krx_pw,
+        human_throttle=human_throttle,
     )
     storage = PostgresStorage(settings.db_dsn)
     if args.use_price_range:
@@ -430,9 +495,10 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
         start=start,
         end=end,
         tickers=tickers,
-        rate_limit_seconds=args.rate_limit_seconds,
+        rate_limit_seconds=rate_limit_seconds,
         progress_log_interval_seconds=args.progress_log_interval_seconds,
         progress_log_every_items=args.progress_log_every_items,
+        randomize_request_order=not args.ordered_requests,
     )
 
     if result.errors:
@@ -987,8 +1053,11 @@ def build_parser() -> argparse.ArgumentParser:
     flows_sync.add_argument(
         "--rate-limit-seconds",
         type=float,
-        default=0.2,
-        help="Seconds between KRX MDC requests (default: 0.2).",
+        default=None,
+        help=(
+            "Seconds between higher-level flow requests "
+            "(default: env KRX_LOGICAL_RATE_LIMIT_SECONDS or 8.0)."
+        ),
     )
     flows_sync.add_argument(
         "--timeout-seconds",
@@ -1008,6 +1077,72 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     flows_sync.add_argument(
+        "--http-min-delay-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Minimum seconds between actual KRX HTTP calls "
+            "(default: env KRX_MIN_DELAY_SECONDS or 1.5)."
+        ),
+    )
+    flows_sync.add_argument(
+        "--http-max-delay-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Maximum seconds between actual KRX HTTP calls "
+            "(default: env KRX_MAX_DELAY_SECONDS or 4.0)."
+        ),
+    )
+    flows_sync.add_argument(
+        "--long-rest-every",
+        type=int,
+        default=None,
+        help=(
+            "Take a long random rest after this many KRX HTTP calls "
+            "(default: env KRX_LONG_REST_EVERY or 15)."
+        ),
+    )
+    flows_sync.add_argument(
+        "--long-rest-min-seconds",
+        type=float,
+        default=None,
+        help="Minimum seconds for a long KRX rest (default: env KRX_LONG_REST_MIN_SECONDS or 30).",
+    )
+    flows_sync.add_argument(
+        "--long-rest-max-seconds",
+        type=float,
+        default=None,
+        help="Maximum seconds for a long KRX rest (default: env KRX_LONG_REST_MAX_SECONDS or 90).",
+    )
+    flows_sync.add_argument(
+        "--auth-cooldown-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Seconds to wait after a successful KRX login "
+            "(default: env KRX_AUTH_COOLDOWN_SECONDS or 10)."
+        ),
+    )
+    flows_sync.add_argument(
+        "--error-backoff-min-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Minimum seconds to wait after a KRX error "
+            "(default: env KRX_ERROR_BACKOFF_MIN_SECONDS or 45)."
+        ),
+    )
+    flows_sync.add_argument(
+        "--error-backoff-max-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Maximum seconds to wait after a KRX error "
+            "(default: env KRX_ERROR_BACKOFF_MAX_SECONDS or 180)."
+        ),
+    )
+    flows_sync.add_argument(
         "--progress-log-interval-seconds",
         type=float,
         default=30.0,
@@ -1018,6 +1153,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=100,
         help="Emit flow sync progress every N handled items (0 disables count-based logs).",
+    )
+    flows_sync.add_argument(
+        "--ordered-requests",
+        action="store_true",
+        help="Disable randomized request order and preserve deterministic traversal.",
     )
     flows_sync.set_defaults(handler=_handle_flows_sync)
 

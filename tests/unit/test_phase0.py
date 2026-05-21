@@ -48,6 +48,20 @@ def test_settings_accept_krx_mdc_timeout_with_seconds_suffix(monkeypatch) -> Non
     assert settings.krx_mdc_timeout_seconds == 150.0
 
 
+def test_settings_expose_conservative_krx_throttle_defaults() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.krx_logical_rate_limit_seconds == 8.0
+    assert settings.krx_min_delay_seconds == 1.5
+    assert settings.krx_max_delay_seconds == 4.0
+    assert settings.krx_long_rest_every == 15
+    assert settings.krx_long_rest_min_seconds == 30.0
+    assert settings.krx_long_rest_max_seconds == 90.0
+    assert settings.krx_auth_cooldown_seconds == 10.0
+    assert settings.krx_error_backoff_min_seconds == 45.0
+    assert settings.krx_error_backoff_max_seconds == 180.0
+
+
 def test_settings_allow_empty_multiple_opendart_keys() -> None:
     settings = Settings(
         opendart_api_key="",

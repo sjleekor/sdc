@@ -299,6 +299,27 @@ def test_flows_sync_parser_supports_progress_log_options() -> None:
     assert args.progress_log_every_items == 10
 
 
+def test_flows_sync_parser_supports_human_throttle_options() -> None:
+    args = build_parser().parse_args(
+        [
+            "flows",
+            "sync",
+            "--http-min-delay-seconds",
+            "1.5",
+            "--http-max-delay-seconds",
+            "4.0",
+            "--long-rest-every",
+            "15",
+            "--ordered-requests",
+        ]
+    )
+
+    assert args.http_min_delay_seconds == 1.5
+    assert args.http_max_delay_seconds == 4.0
+    assert args.long_rest_every == 15
+    assert args.ordered_requests is True
+
+
 def test_flows_sync_parser_supports_timeout_seconds_suffix() -> None:
     args = build_parser().parse_args(["flows", "sync", "--timeout-seconds", "150s"])
 
