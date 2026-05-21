@@ -18,9 +18,11 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import date
+from typing import Any
 
 import FinanceDataReader as fdr
 
+from krx_collector.adapters.universe_pykrx.provider import PykrxUniverseProvider
 from krx_collector.domain.enums import ListingStatus, Market, Source
 from krx_collector.domain.models import Stock, StockUniverseSnapshot, UniverseResult
 from krx_collector.util.time import now_kst, today_kst
@@ -49,10 +51,11 @@ class FdrUniverseProvider:
         Returns:
             ``UniverseResult`` with the snapshot.
         """
+        reference_date = as_of or today_kst()
+        fetched_at = now_kst()
+
         try:
             records: list[Stock] = []
-            reference_date = as_of or today_kst()
-            fetched_at = now_kst()
 
             for market in markets:
                 logger.info("Fetching FDR universe for market: %s", market.value)
@@ -62,24 +65,7 @@ class FdrUniverseProvider:
                     logger.warning("FDR returned empty DataFrame for market: %s", market.value)
                     continue
 
-                for _, row in df.iterrows():
-                    # FDR columns have changed: 'Code' instead of 'Symbol', 'Name' is still there.
-                    # 'ListingDate' seems to be removed in the new FDR output.
-                    ticker = str(row.get("Code", ""))
-                    if not ticker:
-                        continue
-
-                    name = str(row.get("Name", ""))
-
-                    stock = Stock(
-                        ticker=ticker,
-                        market=market,
-                        name=name,
-                        status=ListingStatus.ACTIVE,  # FDR current listing only returns active
-                        last_seen_date=reference_date,
-                        source=Source.FDR,
-                    )
-                    records.append(stock)
+                records.extend(self._stocks_from_rows(df.iterrows(), market, reference_date))
 
             snapshot = StockUniverseSnapshot(
                 snapshot_id=str(uuid.uuid4()),
@@ -91,5 +77,36 @@ class FdrUniverseProvider:
             return UniverseResult(snapshot=snapshot)
 
         except Exception as exc:
-            logger.exception("Failed to fetch FDR universe: %s", exc)
-            return UniverseResult(error=str(exc))
+            logger.warning("FDR universe fetch failed; falling back to pykrx: %s", exc)
+            fallback_result = PykrxUniverseProvider().fetch_universe(markets, as_of)
+            if fallback_result.error:
+                logger.exception("Failed to fetch FDR universe and pykrx fallback failed: %s", exc)
+                return UniverseResult(
+                    error=f"FDR failed: {exc}; pykrx fallback failed: {fallback_result.error}"
+                )
+            return fallback_result
+
+    @staticmethod
+    def _stocks_from_rows(
+        rows: Any,
+        market: Market,
+        reference_date: date,
+    ) -> list[Stock]:
+        records: list[Stock] = []
+        for _, row in rows:
+            # FDR has used both 'Code' and 'Symbol' across versions / endpoints.
+            ticker = str(row.get("Code") or row.get("Symbol") or "").strip()
+            if not ticker:
+                continue
+
+            records.append(
+                Stock(
+                    ticker=ticker,
+                    market=market,
+                    name=str(row.get("Name", "")).strip(),
+                    status=ListingStatus.ACTIVE,
+                    last_seen_date=reference_date,
+                    source=Source.FDR,
+                )
+            )
+        return records

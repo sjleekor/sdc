@@ -1,14 +1,14 @@
 [project]
 name = "krx-data-pipeline"
-version = "0.8.5"
+version = "0.8.6"
 description = "Maintainable Korean stock data pipeline: universe sync, daily OHLCV, OpenDART financials/XBRL, KRX flows, and sector-specific operating KPIs."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "KRX Pipeline Team" }]
 dependencies = [
-    "finance-datareader>=0.9",
-    "pykrx>=1.2.7",
+    "finance-datareader>=0.9.110",
+    "pykrx>=1.2.8",
     "pandas>=2.0",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
