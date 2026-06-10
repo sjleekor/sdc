@@ -164,6 +164,13 @@ def build_common_feature_daily_facts(
         return result
 
 
+# Multi-input transforms and the input roles each one consumes (in order).
+_MULTI_INPUT_TRANSFORMS = {
+    "spread": ("spread_long", "spread_short"),
+    "ratio": ("numerator", "denominator"),
+}
+
+
 def _build_feature_facts(
     *,
     feature: CommonFeatureCatalogEntry,
@@ -174,8 +181,22 @@ def _build_feature_facts(
     generation_run_id: str,
     stale_calendar: list[date],
 ) -> list[CommonFeatureDailyFact] | str:
+    if feature.transform_code in _MULTI_INPUT_TRANSFORMS:
+        return _build_multi_input_facts(
+            feature=feature,
+            series_by_id=series_by_id,
+            observations_by_series=observations_by_series,
+            feature_dates=feature_dates,
+            generated_at=generated_at,
+            generation_run_id=generation_run_id,
+            stale_calendar=stale_calendar,
+        )
+
     if len(feature.input_series_ids) != 1:
-        return "PR 3-A supports only single-input common feature transforms"
+        return (
+            f"Transform {feature.transform_code!r} requires a single input series; "
+            f"got {len(feature.input_series_ids)}"
+        )
 
     series_id = feature.input_series_ids[0]
     series = series_by_id.get(series_id)
@@ -233,6 +254,105 @@ def _build_feature_facts(
             )
         )
     return facts
+
+
+def _build_multi_input_facts(
+    *,
+    feature: CommonFeatureCatalogEntry,
+    series_by_id: dict[str, CommonFeatureSeries],
+    observations_by_series: dict[str, list[CommonFeatureObservation]],
+    feature_dates: list[date],
+    generated_at: datetime,
+    generation_run_id: str,
+    stale_calendar: list[date],
+) -> list[CommonFeatureDailyFact] | str:
+    required_roles = _MULTI_INPUT_TRANSFORMS[feature.transform_code]
+    series_by_role = feature.series_by_role()
+    missing_roles = [role for role in required_roles if role not in series_by_role]
+    if missing_roles:
+        return (
+            f"Transform {feature.transform_code!r} requires roles "
+            f"{required_roles}; missing {tuple(missing_roles)}"
+        )
+
+    resolved: list[tuple[str, CommonFeatureSeries, list[CommonFeatureObservation]]] = []
+    for role in required_roles:
+        series_id = series_by_role[role]
+        series = series_by_id.get(series_id)
+        if series is None:
+            return f"Missing active common feature series: {series_id}"
+        resolved.append((series_id, series, observations_by_series.get(series_id, [])))
+
+    facts: list[CommonFeatureDailyFact] = []
+    for feature_date in feature_dates:
+        source_series_ids = [series_id for series_id, _, _ in resolved]
+        source_observation_ids: list[int] = []
+        asof_available_date = feature_date
+        selected_vintage = ""
+        inputs: list[Decimal | None] = []
+
+        for index, (_series_id, series, observations) in enumerate(resolved):
+            current = _asof_current(observations, feature_date)
+            if current is None:
+                inputs.append(None)
+                continue
+            observation = current.observation
+            asof_available_date = max(
+                asof_available_date, observation.available_from_date or feature_date
+            )
+            # Trace the long/numerator vintage; it drives revision tracking.
+            if index == 0:
+                selected_vintage = observation.vintage
+            if observation.raw_id is not None:
+                _trace(source_observation_ids, observation)
+            if _is_stale(
+                observation,
+                feature_date,
+                max_stale_business_days=series.max_stale_business_days,
+                stale_calendar=stale_calendar,
+            ):
+                inputs.append(None)
+            else:
+                inputs.append(observation.value_numeric)
+
+        value_numeric = _combine_inputs(feature.transform_code, inputs)
+        facts.append(
+            CommonFeatureDailyFact(
+                feature_date=feature_date,
+                feature_code=feature.feature_code,
+                value_numeric=value_numeric,
+                value_text="",
+                unit=feature.unit,
+                source_series_ids=source_series_ids,
+                source_observation_ids=source_observation_ids,
+                asof_available_date=asof_available_date,
+                selected_vintage=selected_vintage,
+                generated_at=generated_at,
+                generation_run_id=generation_run_id,
+            )
+        )
+    return facts
+
+
+def _combine_inputs(transform_code: str, inputs: list[Decimal | None]) -> Decimal | None:
+    if any(value is None for value in inputs):
+        return None
+    long_or_num, short_or_denom = inputs[0], inputs[1]
+    if transform_code == "spread":
+        return long_or_num - short_or_denom  # type: ignore[operator]
+    if transform_code == "ratio":
+        if short_or_denom == 0:
+            return None
+        return long_or_num / short_or_denom  # type: ignore[operator]
+    return None
+
+
+def _asof_current(
+    observations: list[CommonFeatureObservation],
+    feature_date: date,
+) -> _SeriesValue | None:
+    history = _asof_history(observations, feature_date)
+    return history[-1] if history else None
 
 
 def _transform_value(

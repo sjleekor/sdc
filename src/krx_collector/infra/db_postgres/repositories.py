@@ -2488,9 +2488,11 @@ class PostgresStorage:
                     (feature_codes,),
                 )
                 input_args = [
-                    (record.feature_code, series_id, "primary")
+                    (record.feature_code, series_id, role)
                     for record in deduped_records.values()
-                    for series_id in record.input_series_ids
+                    for series_id, role in zip(
+                        record.input_series_ids, record.roles(), strict=False
+                    )
                 ]
                 if input_args:
                     psycopg2.extras.execute_values(
@@ -2525,7 +2527,12 @@ class PostgresStorage:
                             array_agg(i.series_id ORDER BY i.role, i.series_id)
                                 FILTER (WHERE i.series_id IS NOT NULL),
                             ARRAY[]::text[]
-                        ) AS input_series_ids
+                        ) AS input_series_ids,
+                        COALESCE(
+                            array_agg(i.role ORDER BY i.role, i.series_id)
+                                FILTER (WHERE i.series_id IS NOT NULL),
+                            ARRAY[]::text[]
+                        ) AS input_roles
                     FROM common_feature_catalog c
                     LEFT JOIN common_feature_catalog_input i
                         ON i.feature_code = c.feature_code
@@ -2550,6 +2557,7 @@ class PostgresStorage:
                             transform_code=row["transform_code"],
                             description=row["description"],
                             input_series_ids=tuple(row["input_series_ids"]),
+                            input_roles=tuple(row["input_roles"]),
                             active=row["active"],
                         )
                     )

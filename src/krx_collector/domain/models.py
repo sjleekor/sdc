@@ -428,7 +428,13 @@ class CommonFeatureObservation:
 
 @dataclass(frozen=True, slots=True)
 class CommonFeatureCatalogEntry:
-    """Model-facing feature definition derived from one or more source series."""
+    """Model-facing feature definition derived from one or more source series.
+
+    ``input_roles`` runs parallel to ``input_series_ids`` and names each
+    input's role in the transform (e.g. ``spread_long``/``spread_short`` or
+    ``numerator``/``denominator``). When empty, every input defaults to
+    ``primary`` — the single-input case.
+    """
 
     feature_code: str
     feature_name_kr: str
@@ -438,7 +444,18 @@ class CommonFeatureCatalogEntry:
     transform_code: str = ""
     description: str = ""
     input_series_ids: tuple[str, ...] = ()
+    input_roles: tuple[str, ...] = ()
     active: bool = True
+
+    def roles(self) -> tuple[str, ...]:
+        """Return one role per input series, defaulting absent roles to primary."""
+        if not self.input_roles:
+            return tuple("primary" for _ in self.input_series_ids)
+        return self.input_roles
+
+    def series_by_role(self) -> dict[str, str]:
+        """Map role -> series_id. Assumes each role is used at most once."""
+        return dict(zip(self.roles(), self.input_series_ids, strict=False))
 
 
 @dataclass(frozen=True, slots=True)

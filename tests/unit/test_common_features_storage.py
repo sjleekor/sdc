@@ -9,7 +9,11 @@ from typing import Any
 import pytest
 
 from krx_collector.domain.enums import Source
-from krx_collector.domain.models import CommonFeatureObservation, CommonFeatureSeries
+from krx_collector.domain.models import (
+    CommonFeatureCatalogEntry,
+    CommonFeatureObservation,
+    CommonFeatureSeries,
+)
 from krx_collector.infra.db_postgres import repositories
 from krx_collector.infra.db_postgres.repositories import PostgresStorage
 
@@ -128,3 +132,53 @@ def test_upsert_common_feature_series_maps_domain_fields(monkeypatch: pytest.Mon
     )
     assert args[0][10].adapted == {"index_code": "1001"}
     assert args[0][11] == "next_krx_session"
+
+
+def test_upsert_common_feature_catalog_writes_input_roles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_cursor = _FakeCursor()
+    execute_values_calls: list[tuple[str, list[tuple[Any, ...]], int]] = []
+
+    @contextmanager
+    def fake_get_connection(_dsn: str) -> Iterator[_FakeConnection]:
+        yield _FakeConnection(fake_cursor)
+
+    def fake_execute_values(
+        cur: _FakeCursor,
+        sql: str,
+        args: list[tuple[Any, ...]],
+        page_size: int,
+    ) -> None:
+        execute_values_calls.append((sql, args, page_size))
+        cur.rowcount = len(args)
+
+    monkeypatch.setattr(repositories, "get_connection", fake_get_connection)
+    monkeypatch.setattr(repositories.psycopg2.extras, "execute_values", fake_execute_values)
+
+    storage = PostgresStorage("postgresql://unused")
+    storage.upsert_common_feature_catalog(
+        [
+            CommonFeatureCatalogEntry(
+                feature_code="market_kospi_close",
+                feature_name_kr="KOSPI 종가",
+                category="market_index",
+                input_series_ids=("market_kospi",),
+            ),
+            CommonFeatureCatalogEntry(
+                feature_code="rate_kr_term_spread_10y_3y",
+                feature_name_kr="국고채 10년-3년 스프레드",
+                category="rate",
+                transform_code="spread",
+                input_series_ids=("rate_kr_gov10y", "rate_kr_gov3y"),
+                input_roles=("spread_long", "spread_short"),
+            ),
+        ]
+    )
+
+    # Second execute_values call is the link-table insert with role tuples.
+    link_sql, link_args, _ = execute_values_calls[1]
+    assert "INSERT INTO common_feature_catalog_input" in link_sql
+    assert ("market_kospi_close", "market_kospi", "primary") in link_args
+    assert ("rate_kr_term_spread_10y_3y", "rate_kr_gov10y", "spread_long") in link_args
+    assert ("rate_kr_term_spread_10y_3y", "rate_kr_gov3y", "spread_short") in link_args

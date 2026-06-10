@@ -628,3 +628,201 @@ def test_build_daily_facts_computes_mom_from_prior_month() -> None:
     assert len(storage.facts) == 1
     assert storage.facts[0].value_numeric == Decimal("0.02")
     assert storage.facts[0].source_observation_ids == [2, 1]
+
+
+def _multi_feature(
+    feature_code: str,
+    *,
+    transform_code: str,
+    inputs: tuple[tuple[str, str], ...],
+) -> CommonFeatureCatalogEntry:
+    return CommonFeatureCatalogEntry(
+        feature_code=feature_code,
+        feature_name_kr=feature_code,
+        category="rate",
+        unit="pctp",
+        transform_code=transform_code,
+        input_series_ids=tuple(series_id for series_id, _ in inputs),
+        input_roles=tuple(role for _, role in inputs),
+    )
+
+
+def test_build_daily_facts_computes_spread_from_two_inputs() -> None:
+    storage = MockCommonFeatureBuildStorage(
+        series=[
+            _series("rate_kr_gov10y", source=Source.ECOS),
+            _series("rate_kr_gov3y", source=Source.ECOS),
+        ],
+        catalog=[
+            _multi_feature(
+                "rate_kr_term_spread_10y_3y",
+                transform_code="spread",
+                inputs=(
+                    ("rate_kr_gov10y", "spread_long"),
+                    ("rate_kr_gov3y", "spread_short"),
+                ),
+            )
+        ],
+        observations=[
+            _obs(
+                1, "rate_kr_gov10y", date(2026, 6, 8), date(2026, 6, 9), "3.40", source=Source.ECOS
+            ),
+            _obs(
+                2, "rate_kr_gov3y", date(2026, 6, 8), date(2026, 6, 9), "3.25", source=Source.ECOS
+            ),
+        ],
+    )
+
+    result = build_common_feature_daily_facts(
+        storage=storage,  # type: ignore[arg-type]
+        start=date(2026, 6, 9),
+        end=date(2026, 6, 9),
+        krx_trading_days=_krx_days,
+    )
+
+    assert result.errors == {}
+    assert len(storage.facts) == 1
+    fact = storage.facts[0]
+    assert fact.value_numeric == Decimal("0.15")
+    assert fact.source_series_ids == ["rate_kr_gov10y", "rate_kr_gov3y"]
+    assert sorted(fact.source_observation_ids) == [1, 2]
+    assert fact.asof_available_date == date(2026, 6, 9)
+
+
+def test_build_daily_facts_spread_is_null_when_one_input_missing() -> None:
+    storage = MockCommonFeatureBuildStorage(
+        series=[
+            _series("rate_kr_gov10y", source=Source.ECOS),
+            _series("rate_kr_gov3y", source=Source.ECOS),
+        ],
+        catalog=[
+            _multi_feature(
+                "rate_kr_term_spread_10y_3y",
+                transform_code="spread",
+                inputs=(
+                    ("rate_kr_gov10y", "spread_long"),
+                    ("rate_kr_gov3y", "spread_short"),
+                ),
+            )
+        ],
+        observations=[
+            # only the long leg is available on this date
+            _obs(
+                1, "rate_kr_gov10y", date(2026, 6, 8), date(2026, 6, 9), "3.40", source=Source.ECOS
+            ),
+        ],
+    )
+
+    build_common_feature_daily_facts(
+        storage=storage,  # type: ignore[arg-type]
+        start=date(2026, 6, 9),
+        end=date(2026, 6, 9),
+        krx_trading_days=_krx_days,
+    )
+
+    assert len(storage.facts) == 1
+    assert storage.facts[0].value_numeric is None
+
+
+def test_build_daily_facts_spread_uses_latest_asof_across_inputs() -> None:
+    # long leg available 6/9, short leg only available 6/10 -> spread first
+    # usable on 6/10, asof = max(available_from) across legs.
+    storage = MockCommonFeatureBuildStorage(
+        series=[
+            _series("rate_kr_gov10y", source=Source.ECOS),
+            _series("rate_kr_gov3y", source=Source.ECOS),
+        ],
+        catalog=[
+            _multi_feature(
+                "rate_kr_term_spread_10y_3y",
+                transform_code="spread",
+                inputs=(
+                    ("rate_kr_gov10y", "spread_long"),
+                    ("rate_kr_gov3y", "spread_short"),
+                ),
+            )
+        ],
+        observations=[
+            _obs(
+                1, "rate_kr_gov10y", date(2026, 6, 8), date(2026, 6, 9), "3.40", source=Source.ECOS
+            ),
+            _obs(
+                2, "rate_kr_gov3y", date(2026, 6, 9), date(2026, 6, 10), "3.25", source=Source.ECOS
+            ),
+        ],
+    )
+
+    build_common_feature_daily_facts(
+        storage=storage,  # type: ignore[arg-type]
+        start=date(2026, 6, 9),
+        end=date(2026, 6, 10),
+        krx_trading_days=_krx_days,
+    )
+
+    by_date = {fact.feature_date: fact for fact in storage.facts}
+    assert by_date[date(2026, 6, 9)].value_numeric is None
+    assert by_date[date(2026, 6, 10)].value_numeric == Decimal("0.15")
+    assert by_date[date(2026, 6, 10)].asof_available_date == date(2026, 6, 10)
+
+
+def test_build_daily_facts_computes_ratio_and_guards_zero_denominator() -> None:
+    storage = MockCommonFeatureBuildStorage(
+        series=[
+            _series("series_num", source=Source.ECOS),
+            _series("series_den", source=Source.ECOS),
+        ],
+        catalog=[
+            _multi_feature(
+                "some_ratio",
+                transform_code="ratio",
+                inputs=(
+                    ("series_num", "numerator"),
+                    ("series_den", "denominator"),
+                ),
+            )
+        ],
+        observations=[
+            _obs(1, "series_num", date(2026, 6, 8), date(2026, 6, 9), "6", source=Source.ECOS),
+            _obs(2, "series_den", date(2026, 6, 8), date(2026, 6, 9), "3", source=Source.ECOS),
+            _obs(3, "series_num", date(2026, 6, 9), date(2026, 6, 10), "6", source=Source.ECOS),
+            _obs(4, "series_den", date(2026, 6, 9), date(2026, 6, 10), "0", source=Source.ECOS),
+        ],
+    )
+
+    build_common_feature_daily_facts(
+        storage=storage,  # type: ignore[arg-type]
+        start=date(2026, 6, 9),
+        end=date(2026, 6, 10),
+        krx_trading_days=_krx_days,
+    )
+
+    by_date = {fact.feature_date: fact for fact in storage.facts}
+    assert by_date[date(2026, 6, 9)].value_numeric == Decimal("2")
+    assert by_date[date(2026, 6, 10)].value_numeric is None  # zero denominator
+
+
+def test_build_daily_facts_reports_partial_when_spread_role_missing() -> None:
+    storage = MockCommonFeatureBuildStorage(
+        series=[_series("rate_kr_gov10y", source=Source.ECOS)],
+        catalog=[
+            # spread declared with only the long role wired
+            _multi_feature(
+                "rate_kr_term_spread_10y_3y",
+                transform_code="spread",
+                inputs=(("rate_kr_gov10y", "spread_long"),),
+            )
+        ],
+        observations=[],
+    )
+
+    result = build_common_feature_daily_facts(
+        storage=storage,  # type: ignore[arg-type]
+        start=date(2026, 6, 9),
+        end=date(2026, 6, 9),
+        krx_trading_days=_krx_days,
+    )
+
+    assert result.facts_built == 0
+    assert "rate_kr_term_spread_10y_3y" in result.errors
+    assert "spread_short" in result.errors["rate_kr_term_spread_10y_3y"]
+    assert storage.runs[-1].status == RunStatus.PARTIAL

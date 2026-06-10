@@ -63,6 +63,37 @@ def test_common_feature_catalog_entry_tracks_input_series() -> None:
     assert entry.active is True
 
 
+def test_common_feature_catalog_entry_defaults_roles_to_primary() -> None:
+    entry = CommonFeatureCatalogEntry(
+        feature_code="market_kospi_close",
+        feature_name_kr="KOSPI 종가",
+        category="market_index",
+        input_series_ids=("market_kospi",),
+    )
+
+    assert entry.input_roles == ()
+    assert entry.roles() == ("primary",)
+    assert entry.series_by_role() == {"primary": "market_kospi"}
+
+
+def test_common_feature_catalog_entry_tracks_explicit_input_roles() -> None:
+    entry = CommonFeatureCatalogEntry(
+        feature_code="rate_kr_term_spread_10y_3y",
+        feature_name_kr="국고채 10년-3년 스프레드",
+        category="rate",
+        unit="pctp",
+        transform_code="spread",
+        input_series_ids=("rate_kr_gov10y", "rate_kr_gov3y"),
+        input_roles=("spread_long", "spread_short"),
+    )
+
+    assert entry.roles() == ("spread_long", "spread_short")
+    assert entry.series_by_role() == {
+        "spread_long": "rate_kr_gov10y",
+        "spread_short": "rate_kr_gov3y",
+    }
+
+
 def test_common_feature_daily_fact_defaults_do_not_share_lists() -> None:
     generated_at = datetime(2026, 6, 8, 18, 40, tzinfo=UTC)
     first = CommonFeatureDailyFact(
