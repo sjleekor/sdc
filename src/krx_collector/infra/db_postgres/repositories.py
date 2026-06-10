@@ -15,6 +15,10 @@ import psycopg2.extras
 
 from krx_collector.domain.enums import ListingStatus, Market, RunStatus, RunType, Source
 from krx_collector.domain.models import (
+    CommonFeatureCatalogEntry,
+    CommonFeatureDailyFact,
+    CommonFeatureObservation,
+    CommonFeatureSeries,
     DailyBar,
     DartCorp,
     DartFinancialStatementLine,
@@ -2108,6 +2112,578 @@ class PostgresStorage:
                         )
                     )
         return records
+
+    def upsert_common_feature_series(
+        self,
+        records: list[CommonFeatureSeries],
+    ) -> UpsertResult:
+        """Upsert source-series catalog rows for common features."""
+        if not records:
+            return UpsertResult()
+
+        result = UpsertResult()
+        deduped_records = {record.series_id: record for record in records}
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        record.series_id,
+                        record.source.value,
+                        record.source_series_key,
+                        record.category,
+                        record.frequency,
+                        record.name_kr,
+                        record.name_en,
+                        record.unit,
+                        record.country,
+                        record.market,
+                        psycopg2.extras.Json(record.endpoint_params),
+                        record.availability_policy,
+                        record.manual_lag_days,
+                        record.source_timezone,
+                        record.history_start_date,
+                        record.max_stale_business_days,
+                        record.default_transform,
+                        record.active,
+                        record.notes,
+                    )
+                    for record in deduped_records.values()
+                ]
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO common_feature_series (
+                        series_id,
+                        source,
+                        source_series_key,
+                        category,
+                        frequency,
+                        name_kr,
+                        name_en,
+                        unit,
+                        country,
+                        market,
+                        endpoint_params,
+                        availability_policy,
+                        manual_lag_days,
+                        source_timezone,
+                        history_start_date,
+                        max_stale_business_days,
+                        default_transform,
+                        active,
+                        notes
+                    )
+                    VALUES %s
+                    ON CONFLICT (series_id) DO UPDATE SET
+                        source = EXCLUDED.source,
+                        source_series_key = EXCLUDED.source_series_key,
+                        category = EXCLUDED.category,
+                        frequency = EXCLUDED.frequency,
+                        name_kr = EXCLUDED.name_kr,
+                        name_en = EXCLUDED.name_en,
+                        unit = EXCLUDED.unit,
+                        country = EXCLUDED.country,
+                        market = EXCLUDED.market,
+                        endpoint_params = EXCLUDED.endpoint_params,
+                        availability_policy = EXCLUDED.availability_policy,
+                        manual_lag_days = EXCLUDED.manual_lag_days,
+                        source_timezone = EXCLUDED.source_timezone,
+                        history_start_date = EXCLUDED.history_start_date,
+                        max_stale_business_days = EXCLUDED.max_stale_business_days,
+                        default_transform = EXCLUDED.default_transform,
+                        active = EXCLUDED.active,
+                        notes = EXCLUDED.notes,
+                        updated_at = now()
+                    """,
+                    args,
+                    page_size=1000,
+                )
+                result.updated = cur.rowcount
+        return result
+
+    def get_common_feature_series(
+        self,
+        sources: list[Source] | None = None,
+        series_ids: list[str] | None = None,
+        active_only: bool = True,
+    ) -> list[CommonFeatureSeries]:
+        """Return common feature source-series catalog rows."""
+        records: list[CommonFeatureSeries] = []
+        with get_connection(self._dsn) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                sql = "SELECT * FROM common_feature_series WHERE 1=1"
+                params: list[object] = []
+                if sources:
+                    sql += " AND source = ANY(%s)"
+                    params.append([source.value for source in sources])
+                if series_ids:
+                    sql += " AND series_id = ANY(%s)"
+                    params.append(series_ids)
+                if active_only:
+                    sql += " AND active = TRUE"
+                sql += " ORDER BY series_id"
+                cur.execute(sql, params)
+                for row in cur.fetchall():
+                    records.append(
+                        CommonFeatureSeries(
+                            series_id=row["series_id"],
+                            source=Source(row["source"]),
+                            source_series_key=row["source_series_key"],
+                            category=row["category"],
+                            frequency=row["frequency"],
+                            name_kr=row["name_kr"],
+                            name_en=row["name_en"],
+                            unit=row["unit"],
+                            country=row["country"],
+                            market=row["market"],
+                            endpoint_params=row["endpoint_params"] or {},
+                            availability_policy=row["availability_policy"],
+                            manual_lag_days=row["manual_lag_days"],
+                            source_timezone=row["source_timezone"],
+                            history_start_date=row["history_start_date"],
+                            max_stale_business_days=row["max_stale_business_days"],
+                            default_transform=row["default_transform"],
+                            active=row["active"],
+                            notes=row["notes"],
+                        )
+                    )
+        return records
+
+    def upsert_common_feature_observations(
+        self,
+        records: list[CommonFeatureObservation],
+    ) -> UpsertResult:
+        """Upsert raw common feature observations."""
+        if not records:
+            return UpsertResult()
+        missing_availability = [
+            record.series_id
+            for record in records
+            if record.available_from_date is None
+        ]
+        if missing_availability:
+            raise ValueError(
+                "common feature observations require available_from_date before upsert"
+            )
+
+        result = UpsertResult()
+        deduped_records = {
+            (
+                record.source,
+                record.series_id,
+                record.observation_date,
+                record.period_end_date,
+                record.release_date,
+                record.vintage,
+            ): record
+            for record in records
+        }
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        record.source.value,
+                        record.series_id,
+                        record.observation_date,
+                        record.period_end_date,
+                        record.release_date,
+                        record.available_from_date,
+                        record.vintage,
+                        record.value_numeric,
+                        record.value_text,
+                        record.unit,
+                        record.frequency,
+                        record.source_updated_at,
+                        record.fetched_at,
+                        psycopg2.extras.Json(record.raw_payload),
+                    )
+                    for record in deduped_records.values()
+                ]
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO common_feature_observation_raw (
+                        source,
+                        series_id,
+                        observation_date,
+                        period_end_date,
+                        release_date,
+                        available_from_date,
+                        vintage,
+                        value_numeric,
+                        value_text,
+                        unit,
+                        frequency,
+                        source_updated_at,
+                        fetched_at,
+                        raw_payload
+                    )
+                    VALUES %s
+                    ON CONFLICT ON CONSTRAINT uq_common_feature_observation_raw
+                    DO UPDATE SET
+                        available_from_date = EXCLUDED.available_from_date,
+                        value_numeric = EXCLUDED.value_numeric,
+                        value_text = EXCLUDED.value_text,
+                        unit = EXCLUDED.unit,
+                        frequency = EXCLUDED.frequency,
+                        source_updated_at = EXCLUDED.source_updated_at,
+                        fetched_at = EXCLUDED.fetched_at,
+                        raw_payload = EXCLUDED.raw_payload
+                    """,
+                    args,
+                    page_size=1000,
+                )
+                result.updated = cur.rowcount
+        return result
+
+    def count_common_feature_observations(
+        self,
+        series_ids: list[str] | None = None,
+        start: date | None = None,
+        end: date | None = None,
+        source: Source | None = None,
+    ) -> dict[str, int]:
+        """Return raw observation counts grouped by series_id."""
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                sql = """
+                    SELECT series_id, COUNT(*)::int
+                    FROM common_feature_observation_raw
+                    WHERE 1=1
+                """
+                params: list[object] = []
+                if series_ids:
+                    sql += " AND series_id = ANY(%s)"
+                    params.append(series_ids)
+                if start:
+                    sql += " AND observation_date >= %s"
+                    params.append(start)
+                if end:
+                    sql += " AND observation_date <= %s"
+                    params.append(end)
+                if source:
+                    sql += " AND source = %s"
+                    params.append(source.value)
+                sql += " GROUP BY series_id"
+                cur.execute(sql, params)
+                return {row[0]: row[1] for row in cur.fetchall()}
+
+    def get_common_feature_observations(
+        self,
+        series_ids: list[str] | None = None,
+        start: date | None = None,
+        end: date | None = None,
+        source: Source | None = None,
+        available_from_end: date | None = None,
+    ) -> list[CommonFeatureObservation]:
+        """Return raw common feature observations for sync/build services."""
+        records: list[CommonFeatureObservation] = []
+        with get_connection(self._dsn) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                sql = "SELECT * FROM common_feature_observation_raw WHERE 1=1"
+                params: list[object] = []
+                if series_ids:
+                    sql += " AND series_id = ANY(%s)"
+                    params.append(series_ids)
+                if start:
+                    sql += " AND observation_date >= %s"
+                    params.append(start)
+                if end:
+                    sql += " AND observation_date <= %s"
+                    params.append(end)
+                if source:
+                    sql += " AND source = %s"
+                    params.append(source.value)
+                if available_from_end:
+                    sql += " AND available_from_date <= %s"
+                    params.append(available_from_end)
+                sql += """
+                    ORDER BY
+                        series_id,
+                        observation_date,
+                        release_date NULLS LAST,
+                        vintage,
+                        raw_id
+                """
+                cur.execute(sql, params)
+                for row in cur.fetchall():
+                    records.append(
+                        CommonFeatureObservation(
+                            raw_id=row["raw_id"],
+                            source=Source(row["source"]),
+                            series_id=row["series_id"],
+                            observation_date=row["observation_date"],
+                            period_end_date=row["period_end_date"],
+                            release_date=row["release_date"],
+                            available_from_date=row["available_from_date"],
+                            vintage=row["vintage"],
+                            value_numeric=row["value_numeric"],
+                            value_text=row["value_text"],
+                            unit=row["unit"],
+                            frequency=row["frequency"],
+                            source_updated_at=row["source_updated_at"],
+                            fetched_at=row["fetched_at"],
+                            raw_payload=row["raw_payload"] or {},
+                        )
+                    )
+        return records
+
+    def upsert_common_feature_catalog(
+        self,
+        records: list[CommonFeatureCatalogEntry],
+    ) -> UpsertResult:
+        """Upsert model-facing common feature catalog rows and input links."""
+        if not records:
+            return UpsertResult()
+
+        result = UpsertResult()
+        deduped_records = {record.feature_code: record for record in records}
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        record.feature_code,
+                        record.feature_name_kr,
+                        record.category,
+                        record.frequency,
+                        record.unit,
+                        record.transform_code,
+                        record.description,
+                        record.active,
+                    )
+                    for record in deduped_records.values()
+                ]
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO common_feature_catalog (
+                        feature_code,
+                        feature_name_kr,
+                        category,
+                        frequency,
+                        unit,
+                        transform_code,
+                        description,
+                        active
+                    )
+                    VALUES %s
+                    ON CONFLICT (feature_code) DO UPDATE SET
+                        feature_name_kr = EXCLUDED.feature_name_kr,
+                        category = EXCLUDED.category,
+                        frequency = EXCLUDED.frequency,
+                        unit = EXCLUDED.unit,
+                        transform_code = EXCLUDED.transform_code,
+                        description = EXCLUDED.description,
+                        active = EXCLUDED.active,
+                        updated_at = now()
+                    """,
+                    args,
+                    page_size=1000,
+                )
+                result.updated = cur.rowcount
+
+                feature_codes = list(deduped_records)
+                cur.execute(
+                    "DELETE FROM common_feature_catalog_input WHERE feature_code = ANY(%s)",
+                    (feature_codes,),
+                )
+                input_args = [
+                    (record.feature_code, series_id, "primary")
+                    for record in deduped_records.values()
+                    for series_id in record.input_series_ids
+                ]
+                if input_args:
+                    psycopg2.extras.execute_values(
+                        cur,
+                        """
+                        INSERT INTO common_feature_catalog_input (
+                            feature_code,
+                            series_id,
+                            role
+                        )
+                        VALUES %s
+                        ON CONFLICT (feature_code, series_id, role) DO NOTHING
+                        """,
+                        input_args,
+                        page_size=1000,
+                    )
+        return result
+
+    def get_common_feature_catalog(
+        self,
+        feature_codes: list[str] | None = None,
+        active_only: bool = True,
+    ) -> list[CommonFeatureCatalogEntry]:
+        """Return model-facing common feature catalog rows."""
+        records: list[CommonFeatureCatalogEntry] = []
+        with get_connection(self._dsn) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                sql = """
+                    SELECT
+                        c.*,
+                        COALESCE(
+                            array_agg(i.series_id ORDER BY i.role, i.series_id)
+                                FILTER (WHERE i.series_id IS NOT NULL),
+                            ARRAY[]::text[]
+                        ) AS input_series_ids
+                    FROM common_feature_catalog c
+                    LEFT JOIN common_feature_catalog_input i
+                        ON i.feature_code = c.feature_code
+                    WHERE 1=1
+                """
+                params: list[object] = []
+                if feature_codes:
+                    sql += " AND c.feature_code = ANY(%s)"
+                    params.append(feature_codes)
+                if active_only:
+                    sql += " AND c.active = TRUE"
+                sql += " GROUP BY c.feature_code ORDER BY c.feature_code"
+                cur.execute(sql, params)
+                for row in cur.fetchall():
+                    records.append(
+                        CommonFeatureCatalogEntry(
+                            feature_code=row["feature_code"],
+                            feature_name_kr=row["feature_name_kr"],
+                            category=row["category"],
+                            frequency=row["frequency"],
+                            unit=row["unit"],
+                            transform_code=row["transform_code"],
+                            description=row["description"],
+                            input_series_ids=tuple(row["input_series_ids"]),
+                            active=row["active"],
+                        )
+                    )
+        return records
+
+    def upsert_common_feature_daily_facts(
+        self,
+        records: list[CommonFeatureDailyFact],
+    ) -> UpsertResult:
+        """Upsert KRX-date-aligned common feature facts."""
+        if not records:
+            return UpsertResult()
+
+        result = UpsertResult()
+        deduped_records = {
+            (record.feature_date, record.feature_code): record
+            for record in records
+        }
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        record.feature_date,
+                        record.feature_code,
+                        record.value_numeric,
+                        record.value_text,
+                        record.unit,
+                        psycopg2.extras.Json(record.source_series_ids),
+                        psycopg2.extras.Json(record.source_observation_ids),
+                        record.asof_available_date,
+                        record.selected_vintage,
+                        record.generated_at,
+                        record.generation_run_id,
+                    )
+                    for record in deduped_records.values()
+                ]
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO common_feature_daily_fact (
+                        feature_date,
+                        feature_code,
+                        value_numeric,
+                        value_text,
+                        unit,
+                        source_series_ids,
+                        source_observation_ids,
+                        asof_available_date,
+                        selected_vintage,
+                        generated_at,
+                        generation_run_id
+                    )
+                    VALUES %s
+                    ON CONFLICT (feature_date, feature_code) DO UPDATE SET
+                        value_numeric = EXCLUDED.value_numeric,
+                        value_text = EXCLUDED.value_text,
+                        unit = EXCLUDED.unit,
+                        source_series_ids = EXCLUDED.source_series_ids,
+                        source_observation_ids = EXCLUDED.source_observation_ids,
+                        asof_available_date = EXCLUDED.asof_available_date,
+                        selected_vintage = EXCLUDED.selected_vintage,
+                        generated_at = EXCLUDED.generated_at,
+                        generation_run_id = EXCLUDED.generation_run_id
+                    """,
+                    args,
+                    page_size=1000,
+                )
+                result.updated = cur.rowcount
+        return result
+
+    def get_common_feature_daily_facts(
+        self,
+        start: date,
+        end: date,
+        feature_codes: list[str] | None = None,
+    ) -> list[CommonFeatureDailyFact]:
+        """Return KRX-date-aligned common feature facts."""
+        records: list[CommonFeatureDailyFact] = []
+        with get_connection(self._dsn) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                sql = """
+                    SELECT *
+                    FROM common_feature_daily_fact
+                    WHERE feature_date BETWEEN %s AND %s
+                """
+                params: list[object] = [start, end]
+                if feature_codes:
+                    sql += " AND feature_code = ANY(%s)"
+                    params.append(feature_codes)
+                sql += " ORDER BY feature_date, feature_code"
+                cur.execute(sql, params)
+                for row in cur.fetchall():
+                    records.append(
+                        CommonFeatureDailyFact(
+                            feature_date=row["feature_date"],
+                            feature_code=row["feature_code"],
+                            value_numeric=row["value_numeric"],
+                            value_text=row["value_text"],
+                            unit=row["unit"],
+                            source_series_ids=list(row["source_series_ids"] or []),
+                            source_observation_ids=list(row["source_observation_ids"] or []),
+                            asof_available_date=row["asof_available_date"],
+                            selected_vintage=row["selected_vintage"],
+                            generated_at=row["generated_at"],
+                            generation_run_id=(
+                                str(row["generation_run_id"])
+                                if row["generation_run_id"] is not None
+                                else None
+                            ),
+                        )
+                    )
+        return records
+
+    def count_common_feature_daily_facts(
+        self,
+        start: date,
+        end: date,
+        feature_codes: list[str] | None = None,
+    ) -> dict[str, int]:
+        """Return daily fact counts grouped by feature_code."""
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                sql = """
+                    SELECT feature_code, COUNT(*)::int
+                    FROM common_feature_daily_fact
+                    WHERE feature_date BETWEEN %s AND %s
+                """
+                params: list[object] = [start, end]
+                if feature_codes:
+                    sql += " AND feature_code = ANY(%s)"
+                    params.append(feature_codes)
+                sql += " GROUP BY feature_code"
+                cur.execute(sql, params)
+                return {row[0]: row[1] for row in cur.fetchall()}
 
     # -- Daily OHLCV ----------------------------------------------------------
 

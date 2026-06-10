@@ -40,6 +40,15 @@ def test_settings_accept_comma_separated_opendart_keys_from_env(monkeypatch) -> 
     assert settings.opendart_api_keys == ("key_a", "key_b", "key_c")
 
 
+def test_settings_accept_ecos_api_key_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("ECOS_API_KEY", "ecos-key")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.ecos_api_key == "ecos-key"
+    assert settings.ecos_timeout_seconds == 20.0
+
+
 def test_settings_accept_krx_mdc_timeout_with_seconds_suffix(monkeypatch) -> None:
     monkeypatch.setenv("KRX_MDC_TIMEOUT_SECONDS", "150s")
 
@@ -85,6 +94,14 @@ def test_settings_exports_krx_credentials_to_environment(monkeypatch) -> None:
 def test_future_sources_and_run_types_are_declared() -> None:
     assert Source.OPENDART.value == "OPENDART"
     assert Source.KRX.value == "KRX"
+    assert Source.ECOS.value == "ECOS"
+    assert Source.FRED.value == "FRED"
+    assert Source.KOSIS.value == "KOSIS"
+    assert Source.CUSTOMS.value == "CUSTOMS"
+    assert Source.KITA.value == "KITA"
+    assert Source.NASDAQ_DATA_LINK.value == "NASDAQ_DATA_LINK"
     assert RunType.DART_CORP_SYNC.value == "dart_corp_sync"
     assert RunType.DART_FINANCIAL_SYNC.value == "dart_financial_sync"
     assert RunType.KRX_FLOW_SYNC.value == "krx_flow_sync"
+    assert RunType.COMMON_FEATURE_SYNC.value == "common_feature_sync"
+    assert RunType.COMMON_FEATURE_BUILD.value == "common_feature_build"

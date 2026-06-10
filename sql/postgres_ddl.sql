@@ -610,6 +610,119 @@ CREATE INDEX IF NOT EXISTS ix_operating_metric_fact_lookup
     ON operating_metric_fact (ticker, sector_key, metric_code, period_end DESC);
 
 -- =============================================================================
+-- Common market / macro feature layer
+-- =============================================================================
+
+-- 19) common_feature_series ─ source series catalog and collection policy
+CREATE TABLE IF NOT EXISTS common_feature_series (
+    series_id               TEXT        PRIMARY KEY,
+    source                  TEXT        NOT NULL,
+    source_series_key       TEXT        NOT NULL,
+    category                TEXT        NOT NULL,
+    frequency               TEXT        NOT NULL,
+    name_kr                 TEXT        NOT NULL,
+    name_en                 TEXT        NOT NULL DEFAULT '',
+    unit                    TEXT        NOT NULL DEFAULT '',
+    country                 TEXT        NOT NULL DEFAULT '',
+    market                  TEXT        NOT NULL DEFAULT '',
+    endpoint_params         JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    availability_policy     TEXT        NOT NULL DEFAULT 'release_date',
+    manual_lag_days         INT         NOT NULL DEFAULT 0,
+    source_timezone         TEXT        NOT NULL DEFAULT 'Asia/Seoul',
+    history_start_date      DATE,
+    max_stale_business_days INT         NOT NULL DEFAULT 5,
+    default_transform       TEXT        NOT NULL DEFAULT '',
+    active                  BOOLEAN     NOT NULL DEFAULT TRUE,
+    notes                   TEXT        NOT NULL DEFAULT '',
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ix_common_feature_series_source_active
+    ON common_feature_series (source, active, series_id);
+
+-- 20) common_feature_observation_raw ─ raw source observations with PIT availability
+CREATE TABLE IF NOT EXISTS common_feature_observation_raw (
+    raw_id                BIGSERIAL   PRIMARY KEY,
+    source                TEXT        NOT NULL,
+    series_id             TEXT        NOT NULL REFERENCES common_feature_series(series_id),
+    observation_date      DATE        NOT NULL,
+    period_end_date       DATE,
+    release_date          DATE,
+    available_from_date   DATE        NOT NULL,
+    vintage               TEXT        NOT NULL DEFAULT '',
+    value_numeric         NUMERIC(30, 8),
+    value_text            TEXT        NOT NULL DEFAULT '',
+    unit                  TEXT        NOT NULL DEFAULT '',
+    frequency             TEXT        NOT NULL,
+    source_updated_at     TIMESTAMPTZ,
+    fetched_at            TIMESTAMPTZ NOT NULL,
+    raw_payload           JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    CONSTRAINT uq_common_feature_observation_raw
+        UNIQUE NULLS NOT DISTINCT (
+            source,
+            series_id,
+            observation_date,
+            period_end_date,
+            release_date,
+            vintage
+        )
+);
+
+CREATE INDEX IF NOT EXISTS ix_common_feature_observation_lookup
+    ON common_feature_observation_raw (
+        series_id,
+        available_from_date DESC,
+        observation_date DESC
+    );
+
+CREATE INDEX IF NOT EXISTS ix_common_feature_observation_date
+    ON common_feature_observation_raw (series_id, observation_date DESC);
+
+-- 21) common_feature_catalog ─ model-facing feature catalog
+CREATE TABLE IF NOT EXISTS common_feature_catalog (
+    feature_code          TEXT        PRIMARY KEY,
+    feature_name_kr       TEXT        NOT NULL,
+    category              TEXT        NOT NULL,
+    frequency             TEXT        NOT NULL DEFAULT 'D',
+    unit                  TEXT        NOT NULL DEFAULT '',
+    transform_code        TEXT        NOT NULL DEFAULT '',
+    description           TEXT        NOT NULL DEFAULT '',
+    active                BOOLEAN     NOT NULL DEFAULT TRUE,
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 22) common_feature_catalog_input ─ feature to raw-series link table
+CREATE TABLE IF NOT EXISTS common_feature_catalog_input (
+    feature_code          TEXT        NOT NULL
+        REFERENCES common_feature_catalog(feature_code) ON DELETE CASCADE,
+    series_id             TEXT        NOT NULL REFERENCES common_feature_series(series_id),
+    role                  TEXT        NOT NULL DEFAULT 'primary',
+    PRIMARY KEY (feature_code, series_id, role)
+);
+
+CREATE INDEX IF NOT EXISTS ix_common_feature_catalog_input_series
+    ON common_feature_catalog_input (series_id);
+
+-- 23) common_feature_daily_fact ─ KRX-session-aligned long feature facts
+CREATE TABLE IF NOT EXISTS common_feature_daily_fact (
+    feature_date           DATE        NOT NULL,
+    feature_code           TEXT        NOT NULL REFERENCES common_feature_catalog(feature_code),
+    value_numeric          NUMERIC(30, 8),
+    value_text             TEXT        NOT NULL DEFAULT '',
+    unit                   TEXT        NOT NULL DEFAULT '',
+    source_series_ids      JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    source_observation_ids JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    asof_available_date    DATE        NOT NULL,
+    selected_vintage       TEXT        NOT NULL DEFAULT '',
+    generated_at           TIMESTAMPTZ NOT NULL,
+    generation_run_id      UUID,
+    PRIMARY KEY (feature_date, feature_code)
+);
+
+CREATE INDEX IF NOT EXISTS ix_common_feature_daily_fact_lookup
+    ON common_feature_daily_fact (feature_code, feature_date DESC);
+
+-- =============================================================================
 -- Future extension: intraday_ohlcv (OUT OF SCOPE)
 -- =============================================================================
 -- CREATE TABLE IF NOT EXISTS intraday_ohlcv (

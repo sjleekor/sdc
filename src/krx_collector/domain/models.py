@@ -380,6 +380,84 @@ class StockMetricFact:
     fetched_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class CommonFeatureSeries:
+    """Source series definition for a common market or macro feature."""
+
+    series_id: str
+    source: Source
+    source_series_key: str
+    category: str
+    frequency: str
+    name_kr: str
+    name_en: str = ""
+    unit: str = ""
+    country: str = ""
+    market: str = ""
+    endpoint_params: dict[str, object] = field(default_factory=dict)
+    availability_policy: str = "release_date"
+    manual_lag_days: int = 0
+    source_timezone: str = "Asia/Seoul"
+    history_start_date: date | None = None
+    max_stale_business_days: int = 5
+    default_transform: str = ""
+    active: bool = True
+    notes: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class CommonFeatureObservation:
+    """Single raw observation for a common feature source series."""
+
+    source: Source
+    series_id: str
+    observation_date: date
+    frequency: str
+    fetched_at: datetime
+    period_end_date: date | None = None
+    release_date: date | None = None
+    available_from_date: date | None = None
+    vintage: str = ""
+    value_numeric: Decimal | None = None
+    value_text: str = ""
+    unit: str = ""
+    source_updated_at: datetime | None = None
+    raw_payload: dict[str, object] = field(default_factory=dict)
+    raw_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CommonFeatureCatalogEntry:
+    """Model-facing feature definition derived from one or more source series."""
+
+    feature_code: str
+    feature_name_kr: str
+    category: str
+    frequency: str = "D"
+    unit: str = ""
+    transform_code: str = ""
+    description: str = ""
+    input_series_ids: tuple[str, ...] = ()
+    active: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class CommonFeatureDailyFact:
+    """KRX-date-aligned common feature value safe for point-in-time joins."""
+
+    feature_date: date
+    feature_code: str
+    asof_available_date: date
+    generated_at: datetime
+    value_numeric: Decimal | None = None
+    value_text: str = ""
+    unit: str = ""
+    source_series_ids: list[str] = field(default_factory=list)
+    source_observation_ids: list[int] = field(default_factory=list)
+    selected_vintage: str = ""
+    generation_run_id: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Result / aggregate types
 # ---------------------------------------------------------------------------
@@ -522,6 +600,17 @@ class SecurityFlowFetchResult:
 
 
 @dataclass(slots=True)
+class CommonFeatureFetchResult:
+    """Result of fetching one common feature source series."""
+
+    records: list[CommonFeatureObservation] = field(default_factory=list)
+    no_data: bool = False
+    error: str | None = None
+    retryable: bool = False
+    retry_after_seconds: float | None = None
+
+
+@dataclass(slots=True)
 class OperatingMetricExtractionResult:
     """Result of extracting metrics from one operating source document."""
 
@@ -635,6 +724,40 @@ class KrxFlowSyncResult:
 
 
 @dataclass(slots=True)
+class CommonFeatureSyncResult:
+    """Outcome of syncing common feature raw observations."""
+
+    upsert: UpsertResult = field(default_factory=UpsertResult)
+    series_processed: int = 0
+    requests_attempted: int = 0
+    requests_skipped: int = 0
+    rows_upserted: int = 0
+    no_data_requests: int = 0
+    errors: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class CommonFeatureBuildResult:
+    """Outcome of building KRX-date-aligned common feature facts."""
+
+    upsert: UpsertResult = field(default_factory=UpsertResult)
+    features_processed: int = 0
+    feature_dates_processed: int = 0
+    facts_built: int = 0
+    null_facts: int = 0
+    facts_upserted: int = 0
+    errors: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class CommonFeatureCatalogSeedResult:
+    """Outcome of seeding common feature series and catalog rows."""
+
+    series_upsert: UpsertResult = field(default_factory=UpsertResult)
+    catalog_upsert: UpsertResult = field(default_factory=UpsertResult)
+
+
+@dataclass(slots=True)
 class OperatingMetricSyncResult:
     """Outcome of processing operating KPI source documents."""
 
@@ -676,6 +799,57 @@ class MetricCoverageReport:
 
     target_count: int = 0
     rows: list[MetricCoverageRow] = field(default_factory=list)
+    errors: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class CommonFeatureCoverageRow:
+    """Coverage summary for one KRX-date-aligned common feature."""
+
+    feature_code: str
+    feature_name_kr: str
+    target_count: int
+    fact_count: int
+    non_null_count: int
+    null_count: int
+    missing_count: int
+    coverage_ratio: Decimal
+    pit_violation_count: int
+
+
+@dataclass(slots=True)
+class CommonFeatureCoverageReport:
+    """Coverage report over common feature daily facts."""
+
+    target_count: int = 0
+    rows: list[CommonFeatureCoverageRow] = field(default_factory=list)
+    errors: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class CommonFeatureReadinessRow:
+    """Active-readiness decision for one KRX-date-aligned common feature."""
+
+    feature_code: str
+    feature_name_kr: str
+    target_count: int
+    fact_count: int
+    non_null_count: int
+    null_count: int
+    missing_count: int
+    coverage_ratio: Decimal
+    pit_violation_count: int
+    required_coverage_ratio: Decimal
+    ready: bool
+    blockers: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
+class CommonFeatureReadinessReport:
+    """Readiness report for common feature active-transition decisions."""
+
+    target_count: int = 0
+    rows: list[CommonFeatureReadinessRow] = field(default_factory=list)
     errors: dict[str, str] = field(default_factory=dict)
 
 

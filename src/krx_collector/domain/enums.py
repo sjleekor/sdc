@@ -17,15 +17,21 @@ class Market(StrEnum):
 class Source(StrEnum):
     """Data source identifier.
 
-    FDR and PYKRX are implemented today. OPENDART and KRX are reserved
-    for the upcoming account/flow ingestion phases. KIS and KIWOOM remain
-    reserved for future broker-API integrations.
+    FDR and PYKRX are implemented for market data fallbacks. OPENDART, KRX,
+    and the macro/common-feature sources identify raw upstream systems.
+    KIS and KIWOOM remain reserved for future broker-API integrations.
     """
 
     FDR = "FDR"
     PYKRX = "PYKRX"
     OPENDART = "OPENDART"
     KRX = "KRX"
+    ECOS = "ECOS"
+    FRED = "FRED"
+    KOSIS = "KOSIS"
+    CUSTOMS = "CUSTOMS"
+    KITA = "KITA"
+    NASDAQ_DATA_LINK = "NASDAQ_DATA_LINK"
     # Future sources (not implemented):
     # KIS = "KIS"
     # KIWOOM = "KIWOOM"
@@ -55,6 +61,8 @@ class RunType(StrEnum):
     KRX_FLOW_SYNC = "krx_flow_sync"
     XBRL_PARSE = "xbrl_parse"
     OPERATING_METRIC_SYNC = "operating_metric_sync"
+    COMMON_FEATURE_SYNC = "common_feature_sync"
+    COMMON_FEATURE_BUILD = "common_feature_build"
 
 
 class RunStatus(StrEnum):

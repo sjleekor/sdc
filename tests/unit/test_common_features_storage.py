@@ -1,0 +1,130 @@
+from __future__ import annotations
+
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, date, datetime
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from krx_collector.domain.enums import Source
+from krx_collector.domain.models import CommonFeatureObservation, CommonFeatureSeries
+from krx_collector.infra.db_postgres import repositories
+from krx_collector.infra.db_postgres.repositories import PostgresStorage
+
+
+def _normalized_ddl() -> str:
+    return " ".join(Path("sql/postgres_ddl.sql").read_text(encoding="utf-8").split())
+
+
+def test_common_feature_tables_are_declared_in_postgres_ddl() -> None:
+    ddl = _normalized_ddl()
+
+    assert "CREATE TABLE IF NOT EXISTS common_feature_series" in ddl
+    assert "CREATE TABLE IF NOT EXISTS common_feature_observation_raw" in ddl
+    assert "CREATE TABLE IF NOT EXISTS common_feature_catalog" in ddl
+    assert "CREATE TABLE IF NOT EXISTS common_feature_catalog_input" in ddl
+    assert "CREATE TABLE IF NOT EXISTS common_feature_daily_fact" in ddl
+    assert "UNIQUE NULLS NOT DISTINCT" in ddl
+    assert "REFERENCES common_feature_series(series_id)" in ddl
+    assert "PRIMARY KEY (feature_date, feature_code)" in ddl
+
+
+def test_common_feature_empty_upserts_do_not_connect() -> None:
+    storage = PostgresStorage("postgresql://unused")
+
+    assert storage.upsert_common_feature_series([]).updated == 0
+    assert storage.upsert_common_feature_observations([]).updated == 0
+    assert storage.upsert_common_feature_catalog([]).updated == 0
+    assert storage.upsert_common_feature_daily_facts([]).updated == 0
+
+
+def test_common_feature_observation_upsert_requires_available_from_date() -> None:
+    storage = PostgresStorage("postgresql://unused")
+    observation = CommonFeatureObservation(
+        source=Source.PYKRX,
+        series_id="market_kospi",
+        observation_date=date(2026, 6, 8),
+        frequency="D",
+        fetched_at=datetime(2026, 6, 8, 18, 30, tzinfo=UTC),
+    )
+
+    with pytest.raises(ValueError, match="available_from_date"):
+        storage.upsert_common_feature_observations([observation])
+
+
+class _FakeCursor:
+    def __init__(self) -> None:
+        self.rowcount = 0
+        self.executed: list[tuple[object, object]] = []
+
+    def __enter__(self) -> _FakeCursor:
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        return None
+
+    def execute(self, statement: object, params: object = None) -> None:
+        self.executed.append((statement, params))
+
+
+class _FakeConnection:
+    def __init__(self, cursor: _FakeCursor) -> None:
+        self._cursor = cursor
+
+    def cursor(self, *args: object, **kwargs: object) -> _FakeCursor:
+        return self._cursor
+
+
+def test_upsert_common_feature_series_maps_domain_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_cursor = _FakeCursor()
+    execute_values_calls: list[tuple[str, list[tuple[Any, ...]], int]] = []
+
+    @contextmanager
+    def fake_get_connection(_dsn: str) -> Iterator[_FakeConnection]:
+        yield _FakeConnection(fake_cursor)
+
+    def fake_execute_values(
+        cur: _FakeCursor,
+        sql: str,
+        args: list[tuple[Any, ...]],
+        page_size: int,
+    ) -> None:
+        execute_values_calls.append((sql, args, page_size))
+        cur.rowcount = len(args)
+
+    monkeypatch.setattr(repositories, "get_connection", fake_get_connection)
+    monkeypatch.setattr(repositories.psycopg2.extras, "execute_values", fake_execute_values)
+
+    storage = PostgresStorage("postgresql://unused")
+    result = storage.upsert_common_feature_series(
+        [
+            CommonFeatureSeries(
+                series_id="market_kospi",
+                source=Source.PYKRX,
+                source_series_key="1001",
+                category="market_index",
+                frequency="D",
+                name_kr="KOSPI",
+                endpoint_params={"index_code": "1001"},
+                availability_policy="next_krx_session",
+            )
+        ]
+    )
+
+    assert result.updated == 1
+    sql, args, page_size = execute_values_calls[0]
+    assert "INSERT INTO common_feature_series" in sql
+    assert "ON CONFLICT (series_id) DO UPDATE" in sql
+    assert page_size == 1000
+    assert args[0][0:6] == (
+        "market_kospi",
+        "PYKRX",
+        "1001",
+        "market_index",
+        "D",
+        "KOSPI",
+    )
+    assert args[0][10].adapted == {"index_code": "1001"}
+    assert args[0][11] == "next_krx_session"

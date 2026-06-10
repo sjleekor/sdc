@@ -20,6 +20,7 @@ import argparse
 import logging
 import sys
 from datetime import date, timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from krx_collector.adapters.opendart_common.client import OpenDartRequestExecutor
@@ -45,6 +46,61 @@ def _exit_if_opendart_key_exhausted(result: object, label: str) -> None:
     )
     print(f"❌ {label} stopped: {error}", file=sys.stderr)
     sys.exit(75)
+
+
+def _split_csv(value: str | None) -> list[str] | None:
+    """Split a comma-separated CLI value into stripped non-empty tokens."""
+    if value is None:
+        return None
+    values = [item.strip() for item in value.split(",") if item.strip()]
+    return values or None
+
+
+def _parse_common_sources(value: str) -> list[object]:
+    """Parse a comma-separated common feature source allowlist."""
+    from krx_collector.domain.enums import Source
+
+    source_by_name = {
+        "pykrx": Source.PYKRX,
+        "fdr": Source.FDR,
+        "ecos": Source.ECOS,
+    }
+    sources: list[Source] = []
+    for raw_source in value.split(","):
+        normalized = raw_source.strip().lower()
+        if not normalized:
+            continue
+        source = source_by_name.get(normalized)
+        if source is None:
+            supported = ", ".join(sorted(source_by_name))
+            raise argparse.ArgumentTypeError(
+                f"Unsupported common feature source: {raw_source!r} (supported: {supported})"
+            )
+        sources.append(source)
+    if not sources:
+        raise argparse.ArgumentTypeError("At least one common feature source is required.")
+    return sources
+
+
+def _build_common_feature_providers(sources: list[object]) -> list[object]:
+    """Instantiate common feature providers for a source allowlist."""
+    from krx_collector.adapters.common_features_ecos import EcosCommonFeatureProvider
+    from krx_collector.adapters.common_features_fdr import FdrCommonFeatureProvider
+    from krx_collector.adapters.common_features_pykrx import PykrxCommonFeatureProvider
+    from krx_collector.domain.enums import Source
+
+    provider_by_source = {
+        Source.PYKRX: PykrxCommonFeatureProvider,
+        Source.FDR: FdrCommonFeatureProvider,
+        Source.ECOS: EcosCommonFeatureProvider,
+    }
+    providers = []
+    for source in sources:
+        provider_factory = provider_by_source.get(source)
+        if provider_factory is None:
+            raise ValueError(f"Unsupported common feature source: {source}")
+        providers.append(provider_factory())
+    return providers
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +426,205 @@ def _handle_metrics_coverage_report(args: argparse.Namespace) -> None:
         print(
             f"   - {row.metric_code}: {row.covered_count}/{row.target_count} "
             f"({row.coverage_ratio})"
+        )
+
+
+def _handle_common_seed_catalog(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector common seed-catalog``."""
+    settings = get_settings()
+
+    print(f"→ common seed-catalog: init_schema={args.init_schema}")
+
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.default_common_feature_catalog import seed_common_feature_catalog
+
+    storage = PostgresStorage(settings.db_dsn)
+    if args.init_schema:
+        storage.init_schema()
+
+    result = seed_common_feature_catalog(storage)
+
+    print("✅ Common feature catalog seed completed.")
+    print(f"   - Series upserted: {result.series_upsert.updated}")
+    print(f"   - Feature catalog upserted: {result.catalog_upsert.updated}")
+
+
+def _handle_common_sync(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector common sync``."""
+    settings = get_settings()
+    sources = args.sources
+    series_ids = _split_csv(args.series)
+    include_inactive = bool(args.include_inactive)
+    if include_inactive and not series_ids:
+        raise SystemExit("--include-inactive requires an explicit --series allowlist.")
+    providers = _build_common_feature_providers(sources)
+
+    print(
+        f"→ common sync: sources={[source.value for source in sources]}, "
+        f"series={series_ids}, start={args.start}, end={args.end}, "
+        f"force={args.force}, rate_limit={args.rate_limit_seconds}, "
+        f"include_inactive={include_inactive}, init_schema={args.init_schema}"
+    )
+
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.sync_common_features import sync_common_features
+
+    storage = PostgresStorage(settings.db_dsn)
+    if args.init_schema:
+        storage.init_schema()
+
+    result = sync_common_features(
+        providers=providers,
+        storage=storage,
+        start=args.start,
+        end=args.end,
+        sources=sources,
+        series_ids=series_ids,
+        active_only=not include_inactive,
+        force=args.force,
+        rate_limit_seconds=args.rate_limit_seconds,
+    )
+
+    if result.errors:
+        print(f"⚠ Common feature sync completed with {len(result.errors)} errors.", file=sys.stderr)
+    else:
+        print("✅ Common feature sync completed.")
+
+    print(f"   - Series processed: {result.series_processed}")
+    print(f"   - Requests attempted: {result.requests_attempted}")
+    print(f"   - Requests skipped: {result.requests_skipped}")
+    print(f"   - Rows upserted: {result.rows_upserted}")
+    print(f"   - No-data requests: {result.no_data_requests}")
+    if result.errors:
+        for request_key, error in list(result.errors.items())[:10]:
+            print(f"   - Error {request_key}: {error}")
+
+
+def _handle_common_build_daily(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector common build-daily``."""
+    settings = get_settings()
+    feature_codes = _split_csv(args.feature_codes)
+    include_inactive = bool(args.include_inactive)
+    if include_inactive and not feature_codes:
+        raise SystemExit("--include-inactive requires an explicit --feature-codes allowlist.")
+
+    print(
+        f"→ common build-daily: feature_codes={feature_codes}, "
+        f"start={args.start}, end={args.end}, include_inactive={include_inactive}, "
+        f"init_schema={args.init_schema}"
+    )
+
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.build_common_feature_daily_facts import (
+        build_common_feature_daily_facts,
+    )
+
+    storage = PostgresStorage(settings.db_dsn)
+    if args.init_schema:
+        storage.init_schema()
+
+    result = build_common_feature_daily_facts(
+        storage=storage,
+        start=args.start,
+        end=args.end,
+        feature_codes=feature_codes,
+        active_only=not include_inactive,
+    )
+
+    if result.errors:
+        print(
+            f"⚠ Common feature daily build completed with {len(result.errors)} errors.",
+            file=sys.stderr,
+        )
+    else:
+        print("✅ Common feature daily build completed.")
+
+    print(f"   - Features processed: {result.features_processed}")
+    print(f"   - Feature dates processed: {result.feature_dates_processed}")
+    print(f"   - Facts built: {result.facts_built}")
+    print(f"   - Null facts: {result.null_facts}")
+    print(f"   - Facts upserted: {result.facts_upserted}")
+    if result.errors:
+        for feature_code, error in list(result.errors.items())[:10]:
+            print(f"   - Error {feature_code}: {error}")
+
+
+def _handle_common_coverage_report(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector common coverage-report``."""
+    settings = get_settings()
+    feature_codes = _split_csv(args.feature_codes)
+    include_inactive = bool(args.include_inactive)
+    if include_inactive and not feature_codes:
+        raise SystemExit("--include-inactive requires an explicit --feature-codes allowlist.")
+
+    print(
+        f"→ common coverage-report: feature_codes={feature_codes}, "
+        f"start={args.start}, end={args.end}, include_inactive={include_inactive}"
+    )
+
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.report_common_feature_coverage import (
+        build_common_feature_coverage_report,
+    )
+
+    storage = PostgresStorage(settings.db_dsn)
+    report = build_common_feature_coverage_report(
+        storage=storage,
+        start=args.start,
+        end=args.end,
+        feature_codes=feature_codes,
+        active_only=not include_inactive,
+    )
+
+    print(f"✅ Common feature coverage report generated. Target dates: {report.target_count}")
+    print("   feature_code | facts | non_null | nulls | missing | coverage | pit_violations")
+    for row in report.rows[:50]:
+        print(
+            f"   {row.feature_code}: "
+            f"{row.fact_count}/{row.non_null_count}/{row.null_count}/"
+            f"{row.missing_count} coverage={row.coverage_ratio} "
+            f"pit_violations={row.pit_violation_count}"
+        )
+
+
+def _handle_common_readiness_report(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector common readiness-report``."""
+    settings = get_settings()
+    feature_codes = _split_csv(args.feature_codes)
+    include_inactive = bool(args.include_inactive)
+    if include_inactive and not feature_codes:
+        raise SystemExit("--include-inactive requires an explicit --feature-codes allowlist.")
+
+    print(
+        f"→ common readiness-report: feature_codes={feature_codes}, "
+        f"start={args.start}, end={args.end}, include_inactive={include_inactive}, "
+        f"required_coverage_ratio={args.required_coverage_ratio}"
+    )
+
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.report_common_feature_readiness import (
+        build_common_feature_readiness_report,
+    )
+
+    storage = PostgresStorage(settings.db_dsn)
+    report = build_common_feature_readiness_report(
+        storage=storage,
+        start=args.start,
+        end=args.end,
+        feature_codes=feature_codes,
+        active_only=not include_inactive,
+        required_coverage_ratio=args.required_coverage_ratio,
+    )
+
+    print(f"✅ Common feature readiness report generated. Target dates: {report.target_count}")
+    print("   feature_code | ready | coverage | nulls | missing | pit_violations | blockers")
+    for row in report.rows[:50]:
+        blockers = ", ".join(row.blockers) if row.blockers else "-"
+        print(
+            f"   {row.feature_code}: ready={row.ready} "
+            f"coverage={row.coverage_ratio}/{row.required_coverage_ratio} "
+            f"nulls={row.null_count} missing={row.missing_count} "
+            f"pit_violations={row.pit_violation_count} blockers={blockers}"
         )
 
 
@@ -773,6 +1028,21 @@ def _parse_date(value: str) -> date:
         raise argparse.ArgumentTypeError(f"Invalid date format: {value!r} (expected YYYY-MM-DD)")
 
 
+def _parse_coverage_ratio(value: str) -> Decimal:
+    """Parse a coverage ratio in the inclusive 0..1 range."""
+    try:
+        ratio = Decimal(value)
+    except InvalidOperation as exc:
+        raise argparse.ArgumentTypeError(
+            f"Invalid coverage ratio: {value!r} (expected decimal between 0 and 1)"
+        ) from exc
+    if not ratio.is_finite() or ratio < Decimal("0") or ratio > Decimal("1"):
+        raise argparse.ArgumentTypeError(
+            f"Invalid coverage ratio: {value!r} (expected decimal between 0 and 1)"
+        )
+    return ratio.quantize(Decimal("0.0001"))
+
+
 def _parse_positive_seconds(value: str) -> float:
     """Parse a positive second value, accepting an optional ``s`` suffix."""
     normalized = value.strip().lower()
@@ -1024,6 +1294,177 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional comma-separated ticker allowlist.",
     )
     metrics_coverage.set_defaults(handler=_handle_metrics_coverage_report)
+
+    # -- common ---------------------------------------------------------------
+    common_parser = subparsers.add_parser(
+        "common",
+        help="Common market and macro feature commands.",
+    )
+    common_sub = common_parser.add_subparsers(dest="common_command", required=True)
+
+    common_seed = common_sub.add_parser(
+        "seed-catalog",
+        help="Seed Phase 1 common feature source series and feature catalog rows.",
+    )
+    common_seed.add_argument(
+        "--init-schema",
+        action="store_true",
+        default=False,
+        help="Initialise/update the database schema before seeding.",
+    )
+    common_seed.set_defaults(handler=_handle_common_seed_catalog)
+
+    common_sync = common_sub.add_parser(
+        "sync",
+        help="Sync common feature raw observations from configured providers.",
+    )
+    common_sync.add_argument(
+        "--sources",
+        type=_parse_common_sources,
+        default=_parse_common_sources("pykrx,fdr"),
+        help="Comma-separated source allowlist: pykrx,fdr,ecos (default: pykrx,fdr).",
+    )
+    common_sync.add_argument(
+        "--series",
+        default=None,
+        help="Optional comma-separated common feature series_id allowlist.",
+    )
+    common_sync.add_argument(
+        "--start",
+        type=_parse_date,
+        required=True,
+        help="Start date (YYYY-MM-DD).",
+    )
+    common_sync.add_argument(
+        "--end",
+        type=_parse_date,
+        required=True,
+        help="End date (YYYY-MM-DD).",
+    )
+    common_sync.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Re-fetch even when existing raw observations are present.",
+    )
+    common_sync.add_argument(
+        "--rate-limit-seconds",
+        type=float,
+        default=0.0,
+        help="Seconds between provider series requests (default: 0.0).",
+    )
+    common_sync.add_argument(
+        "--include-inactive",
+        action="store_true",
+        default=False,
+        help="Allow explicitly selected inactive source series for smoke verification.",
+    )
+    common_sync.add_argument(
+        "--init-schema",
+        action="store_true",
+        default=False,
+        help="Initialise/update the database schema before syncing.",
+    )
+    common_sync.set_defaults(handler=_handle_common_sync)
+
+    common_build_daily = common_sub.add_parser(
+        "build-daily",
+        help="Build KRX-date-aligned common feature daily facts.",
+    )
+    common_build_daily.add_argument(
+        "--feature-codes",
+        default=None,
+        help="Optional comma-separated common feature_code allowlist.",
+    )
+    common_build_daily.add_argument(
+        "--start",
+        type=_parse_date,
+        required=True,
+        help="Start date (YYYY-MM-DD).",
+    )
+    common_build_daily.add_argument(
+        "--end",
+        type=_parse_date,
+        required=True,
+        help="End date (YYYY-MM-DD).",
+    )
+    common_build_daily.add_argument(
+        "--init-schema",
+        action="store_true",
+        default=False,
+        help="Initialise/update the database schema before building daily facts.",
+    )
+    common_build_daily.add_argument(
+        "--include-inactive",
+        action="store_true",
+        default=False,
+        help="Allow explicitly selected inactive feature codes for verification.",
+    )
+    common_build_daily.set_defaults(handler=_handle_common_build_daily)
+
+    common_coverage = common_sub.add_parser(
+        "coverage-report",
+        help="Report common feature daily fact coverage and PIT violations.",
+    )
+    common_coverage.add_argument(
+        "--feature-codes",
+        default=None,
+        help="Optional comma-separated common feature_code allowlist.",
+    )
+    common_coverage.add_argument(
+        "--start",
+        type=_parse_date,
+        required=True,
+        help="Start date (YYYY-MM-DD).",
+    )
+    common_coverage.add_argument(
+        "--end",
+        type=_parse_date,
+        required=True,
+        help="End date (YYYY-MM-DD).",
+    )
+    common_coverage.add_argument(
+        "--include-inactive",
+        action="store_true",
+        default=False,
+        help="Allow explicitly selected inactive feature codes in the report.",
+    )
+    common_coverage.set_defaults(handler=_handle_common_coverage_report)
+
+    common_readiness = common_sub.add_parser(
+        "readiness-report",
+        help="Report common feature active-transition readiness.",
+    )
+    common_readiness.add_argument(
+        "--feature-codes",
+        default=None,
+        help="Optional comma-separated common feature_code allowlist.",
+    )
+    common_readiness.add_argument(
+        "--start",
+        type=_parse_date,
+        required=True,
+        help="Start date (YYYY-MM-DD).",
+    )
+    common_readiness.add_argument(
+        "--end",
+        type=_parse_date,
+        required=True,
+        help="End date (YYYY-MM-DD).",
+    )
+    common_readiness.add_argument(
+        "--required-coverage-ratio",
+        type=_parse_coverage_ratio,
+        default=Decimal("1.0000"),
+        help="Required non-null coverage ratio for readiness (default: 1.0000).",
+    )
+    common_readiness.add_argument(
+        "--include-inactive",
+        action="store_true",
+        default=False,
+        help="Allow explicitly selected inactive feature codes in the report.",
+    )
+    common_readiness.set_defaults(handler=_handle_common_readiness_report)
 
     # -- flows ----------------------------------------------------------------
     flows_parser = subparsers.add_parser("flows", help="Security flow ingestion commands.")

@@ -14,6 +14,10 @@ from typing import Protocol, runtime_checkable
 
 from krx_collector.domain.enums import Market, RunType, Source
 from krx_collector.domain.models import (
+    CommonFeatureCatalogEntry,
+    CommonFeatureDailyFact,
+    CommonFeatureObservation,
+    CommonFeatureSeries,
     DailyBar,
     DartCorp,
     DartFinancialStatementLine,
@@ -334,6 +338,92 @@ class Storage(Protocol):
         sector_keys: list[str] | None = None,
     ) -> list[OperatingMetricFact]:
         """Return extracted operating KPI facts."""
+        ...
+
+    # -- Common market / macro features --------------------------------------
+
+    def upsert_common_feature_series(
+        self,
+        records: list[CommonFeatureSeries],
+    ) -> UpsertResult:
+        """Upsert source-series catalog rows for common features."""
+        ...
+
+    def get_common_feature_series(
+        self,
+        sources: list[Source] | None = None,
+        series_ids: list[str] | None = None,
+        active_only: bool = True,
+    ) -> list[CommonFeatureSeries]:
+        """Return common feature source-series catalog rows."""
+        ...
+
+    def upsert_common_feature_observations(
+        self,
+        records: list[CommonFeatureObservation],
+    ) -> UpsertResult:
+        """Upsert raw common feature observations."""
+        ...
+
+    def count_common_feature_observations(
+        self,
+        series_ids: list[str] | None = None,
+        start: date | None = None,
+        end: date | None = None,
+        source: Source | None = None,
+    ) -> dict[str, int]:
+        """Return raw observation counts grouped by ``series_id``."""
+        ...
+
+    def get_common_feature_observations(
+        self,
+        series_ids: list[str] | None = None,
+        start: date | None = None,
+        end: date | None = None,
+        source: Source | None = None,
+        available_from_end: date | None = None,
+    ) -> list[CommonFeatureObservation]:
+        """Return raw common feature observations for sync/build services."""
+        ...
+
+    def upsert_common_feature_catalog(
+        self,
+        records: list[CommonFeatureCatalogEntry],
+    ) -> UpsertResult:
+        """Upsert model-facing common feature catalog rows and input links."""
+        ...
+
+    def get_common_feature_catalog(
+        self,
+        feature_codes: list[str] | None = None,
+        active_only: bool = True,
+    ) -> list[CommonFeatureCatalogEntry]:
+        """Return model-facing common feature catalog rows."""
+        ...
+
+    def upsert_common_feature_daily_facts(
+        self,
+        records: list[CommonFeatureDailyFact],
+    ) -> UpsertResult:
+        """Upsert KRX-date-aligned common feature facts."""
+        ...
+
+    def get_common_feature_daily_facts(
+        self,
+        start: date,
+        end: date,
+        feature_codes: list[str] | None = None,
+    ) -> list[CommonFeatureDailyFact]:
+        """Return KRX-date-aligned common feature facts."""
+        ...
+
+    def count_common_feature_daily_facts(
+        self,
+        start: date,
+        end: date,
+        feature_codes: list[str] | None = None,
+    ) -> dict[str, int]:
+        """Return daily fact counts grouped by ``feature_code``."""
         ...
 
     def get_active_stocks(self, market: Market | None = None) -> list[Stock]:

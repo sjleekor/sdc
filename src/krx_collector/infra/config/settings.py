@@ -88,6 +88,8 @@ class Settings(BaseSettings):
         krx_auth_cooldown_seconds: Delay after a successful KRX login.
         krx_error_backoff_min_seconds: Minimum delay after a KRX error.
         krx_error_backoff_max_seconds: Maximum delay after a KRX error.
+        ecos_api_key: Optional Bank of Korea ECOS API key.
+        ecos_timeout_seconds: HTTP timeout for ECOS requests.
     """
 
     model_config = SettingsConfigDict(
@@ -134,6 +136,10 @@ class Settings(BaseSettings):
     opendart_api_key: str = ""
     opendart_api_keys_raw: str = Field(default="", validation_alias="OPENDART_API_KEYS")
     _opendart_api_keys: tuple[str, ...] = PrivateAttr(default=())
+
+    # ECOS
+    ecos_api_key: str = ""
+    ecos_timeout_seconds: float = 20.0
 
     # Rate limiting
     rate_limit_seconds: float = 0.2
