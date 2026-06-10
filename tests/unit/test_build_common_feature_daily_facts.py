@@ -384,8 +384,8 @@ def test_build_daily_facts_records_partial_for_unsupported_transform() -> None:
         series=[_series("market_kospi")],
         catalog=[
             _feature(
-                "market_kospi_vol_20d",
-                transform_code="vol_20d",
+                "market_kospi_zscore",
+                transform_code="zscore_20d",
                 series_id="market_kospi",
             )
         ],
@@ -400,5 +400,231 @@ def test_build_daily_facts_records_partial_for_unsupported_transform() -> None:
     )
 
     assert result.facts_built == 0
-    assert "market_kospi_vol_20d" in result.errors
+    assert "market_kospi_zscore" in result.errors
     assert storage.runs[-1].status == RunStatus.PARTIAL
+
+
+def test_build_daily_facts_computes_change_as_absolute_difference() -> None:
+    storage = MockCommonFeatureBuildStorage(
+        series=[_series("rate_kr_gov3y", source=Source.ECOS)],
+        catalog=[
+            _feature(
+                "rate_kr_gov3y_change_1d",
+                transform_code="change_1d",
+                series_id="rate_kr_gov3y",
+            )
+        ],
+        observations=[
+            _obs(
+                1, "rate_kr_gov3y", date(2026, 6, 8), date(2026, 6, 9), "3.25", source=Source.ECOS
+            ),
+            _obs(
+                2, "rate_kr_gov3y", date(2026, 6, 9), date(2026, 6, 10), "3.31", source=Source.ECOS
+            ),
+        ],
+    )
+
+    build_common_feature_daily_facts(
+        storage=storage,  # type: ignore[arg-type]
+        start=date(2026, 6, 10),
+        end=date(2026, 6, 10),
+        krx_trading_days=_krx_days,
+    )
+
+    assert len(storage.facts) == 1
+    assert storage.facts[0].value_numeric == Decimal("0.06")
+    assert storage.facts[0].source_observation_ids == [2, 1]
+
+
+def test_build_daily_facts_computes_rolling_return_volatility() -> None:
+    # 1-step returns over 3 windows: +0.10, -0.10/1.10, ... use simple values.
+    # values 100, 110, 99 -> returns 0.1 and -0.1 ; sample std (ddof=1) of {0.1, -0.1}
+    storage = MockCommonFeatureBuildStorage(
+        series=[_series("market_kospi")],
+        catalog=[
+            _feature(
+                "market_kospi_vol_2d",
+                transform_code="vol_2d",
+                series_id="market_kospi",
+            )
+        ],
+        observations=[
+            _obs(1, "market_kospi", date(2026, 6, 8), date(2026, 6, 9), "100"),
+            _obs(2, "market_kospi", date(2026, 6, 9), date(2026, 6, 10), "110"),
+            _obs(3, "market_kospi", date(2026, 6, 10), date(2026, 6, 11), "99"),
+        ],
+    )
+
+    build_common_feature_daily_facts(
+        storage=storage,  # type: ignore[arg-type]
+        start=date(2026, 6, 11),
+        end=date(2026, 6, 11),
+        krx_trading_days=_krx_days,
+    )
+
+    assert len(storage.facts) == 1
+    # returns: 110/100-1 = 0.1 ; 99/110-1 = -0.1 ; mean 0 ; var = (0.1^2 + 0.1^2)/1 = 0.02
+    # std = sqrt(0.02)
+    expected = Decimal("0.02").sqrt()
+    assert storage.facts[0].value_numeric == expected
+    # current obs (3) is traced first, then the window's base observations (1, 2).
+    assert storage.facts[0].source_observation_ids == [3, 1, 2]
+
+
+def test_build_daily_facts_volatility_is_null_when_window_too_short() -> None:
+    storage = MockCommonFeatureBuildStorage(
+        series=[_series("market_kospi")],
+        catalog=[
+            _feature(
+                "market_kospi_vol_20d",
+                transform_code="vol_20d",
+                series_id="market_kospi",
+            )
+        ],
+        observations=[
+            _obs(1, "market_kospi", date(2026, 6, 8), date(2026, 6, 9), "100"),
+            _obs(2, "market_kospi", date(2026, 6, 9), date(2026, 6, 10), "110"),
+        ],
+    )
+
+    build_common_feature_daily_facts(
+        storage=storage,  # type: ignore[arg-type]
+        start=date(2026, 6, 10),
+        end=date(2026, 6, 10),
+        krx_trading_days=_krx_days,
+    )
+
+    assert len(storage.facts) == 1
+    assert storage.facts[0].value_numeric is None
+
+
+def test_build_daily_facts_computes_yoy_from_calendar_month_match() -> None:
+    storage = MockCommonFeatureBuildStorage(
+        series=[_series("macro_cpi", source=Source.ECOS)],
+        catalog=[
+            _feature(
+                "macro_cpi_yoy",
+                transform_code="yoy",
+                series_id="macro_cpi",
+            )
+        ],
+        observations=[
+            _obs(
+                1,
+                "macro_cpi",
+                observation_date=date(2024, 1, 31),
+                period_end_date=date(2024, 1, 31),
+                available_from_date=date(2024, 2, 20),
+                value="100",
+                source=Source.ECOS,
+            ),
+            _obs(
+                2,
+                "macro_cpi",
+                observation_date=date(2025, 1, 31),
+                period_end_date=date(2025, 1, 31),
+                available_from_date=date(2025, 2, 20),
+                value="103",
+                source=Source.ECOS,
+            ),
+        ],
+    )
+
+    build_common_feature_daily_facts(
+        storage=storage,  # type: ignore[arg-type]
+        start=date(2025, 2, 20),
+        end=date(2025, 2, 20),
+        krx_trading_days=_krx_days,
+    )
+
+    assert len(storage.facts) == 1
+    assert storage.facts[0].value_numeric == Decimal("0.03")
+    assert storage.facts[0].source_observation_ids == [2, 1]
+
+
+def test_build_daily_facts_yoy_is_null_when_prior_year_period_missing() -> None:
+    storage = MockCommonFeatureBuildStorage(
+        series=[_series("macro_cpi", source=Source.ECOS, max_stale_business_days=400)],
+        catalog=[
+            _feature(
+                "macro_cpi_yoy",
+                transform_code="yoy",
+                series_id="macro_cpi",
+            )
+        ],
+        observations=[
+            # prior period is 2024-02, not 2024-01: no exact 12-month match for 2025-01.
+            _obs(
+                1,
+                "macro_cpi",
+                observation_date=date(2024, 2, 29),
+                period_end_date=date(2024, 2, 29),
+                available_from_date=date(2024, 3, 20),
+                value="100",
+                source=Source.ECOS,
+            ),
+            _obs(
+                2,
+                "macro_cpi",
+                observation_date=date(2025, 1, 31),
+                period_end_date=date(2025, 1, 31),
+                available_from_date=date(2025, 2, 20),
+                value="103",
+                source=Source.ECOS,
+            ),
+        ],
+    )
+
+    build_common_feature_daily_facts(
+        storage=storage,  # type: ignore[arg-type]
+        start=date(2025, 2, 20),
+        end=date(2025, 2, 20),
+        krx_trading_days=_krx_days,
+    )
+
+    assert len(storage.facts) == 1
+    assert storage.facts[0].value_numeric is None
+
+
+def test_build_daily_facts_computes_mom_from_prior_month() -> None:
+    storage = MockCommonFeatureBuildStorage(
+        series=[_series("macro_cpi", source=Source.ECOS, max_stale_business_days=400)],
+        catalog=[
+            _feature(
+                "macro_cpi_mom",
+                transform_code="mom",
+                series_id="macro_cpi",
+            )
+        ],
+        observations=[
+            _obs(
+                1,
+                "macro_cpi",
+                observation_date=date(2024, 12, 31),
+                period_end_date=date(2024, 12, 31),
+                available_from_date=date(2025, 1, 20),
+                value="100",
+                source=Source.ECOS,
+            ),
+            _obs(
+                2,
+                "macro_cpi",
+                observation_date=date(2025, 1, 31),
+                period_end_date=date(2025, 1, 31),
+                available_from_date=date(2025, 2, 20),
+                value="102",
+                source=Source.ECOS,
+            ),
+        ],
+    )
+
+    build_common_feature_daily_facts(
+        storage=storage,  # type: ignore[arg-type]
+        start=date(2025, 2, 20),
+        end=date(2025, 2, 20),
+        krx_trading_days=_krx_days,
+    )
+
+    assert len(storage.facts) == 1
+    assert storage.facts[0].value_numeric == Decimal("0.02")
+    assert storage.facts[0].source_observation_ids == [2, 1]

@@ -828,7 +828,7 @@ GROUP BY feature_date;
 
 ## 12. 현재 구현 현황
 
-기준: 2026-06-10, PR 4-J `rate_kr_gov3y`/`rate_kr_gov3y_level` active 전환까지 완료.
+기준: 2026-06-10, PR 4-J active 전환 + daily fact transform 확장(change/vol/yoy/mom)까지 완료.
 
 ### 12.1 완료된 작업
 
@@ -859,6 +859,7 @@ GROUP BY feature_date;
 | PR 4-H - active readiness 기준/리포트 | 완료 | `service/report_common_feature_readiness.py`, `krx-collector common readiness-report` 추가. 기본 기준은 coverage `1.0000`, null/missing/PIT 0 |
 | PR 4-I - `rate_kr_gov3y` 운영 범위 확대 검증 | 완료 | 3개월(2026-03-10..2026-06-09)·12개월(2025-06-10..2026-06-09) 범위에서 raw sync -> build -> coverage -> readiness 검증. 두 범위 모두 coverage `1.0000`, null/missing/PIT 위반 0, readiness `true`. catalog active 전환은 별도 PR로 분리(이 PR에서는 미전환) |
 | PR 4-J - `rate_kr_gov3y` active 전환 | 완료 | seed에서 `rate_kr_gov3y` series와 `rate_kr_gov3y_level` feature를 `active=true`로 전환. seed 테스트를 active 기대/`macro_cpi` inactive 유지로 분리(unit 226 passed). seed 재적용 후 `--include-inactive` 없이 build/coverage/readiness 동작 확인(12개월 254일, coverage `1.0000`, null/missing/PIT 0, ready). `macro_cpi`는 inactive 유지 |
+| transform 확장 - single-input | 완료 | builder에 `change_<N>d`(절대 차분), `vol_<N>d`(N개 1-step 수익률 표본표준편차, ddof=1), `yoy`, `mom` 추가. transform code 파라메트릭 파싱(`ret/change/vol_<N>d`)으로 일반화. `yoy`/`mom`은 캘린더 year-month 정확 매칭(직전 기간 결측 시 NULL). fixture 단위 테스트 6종 추가(unit 232 passed). multi-input spread/ratio는 별도 |
 
 ### 12.2 현재 seed 범위
 
@@ -1022,7 +1023,7 @@ compileall: passed
 1. pykrx provider는 mock/unit 기준으로는 동작하지만, 현재 네트워크의 실제 smoke에서 KRX auth/JSON parse 실패가 발생했다. 국내 지수 운영 경로는 PR 6 KRX direct provider로 안정화하고, pykrx는 fallback로 둔다.
 2. FDR provider는 MVP/연구용 fallback이다. `US500`, `VIX`, `USD/KRW`, `CL=F`는 제한 smoke에서 동작을 확인했지만, 운영 핵심 데이터는 ECOS/FRED/KRX direct로 교체한다.
 3. FDR `DataReader`가 end date를 exclusive처럼 처리하는 사례가 있어 upstream query는 `end + 1 day`로 넓히고, 저장은 원래 `start..end`로 필터링한다.
-4. 현재 daily fact builder는 단일 input feature와 `level`, `ret_1d`, `ret_5d`, `ret_20d`만 지원한다. spread/rolling volatility/yoy/mom은 후속 PR에서 추가한다.
+4. daily fact builder는 단일 input feature에 대해 `level`, `ret_<N>d`, `change_<N>d`(절대 차분), `vol_<N>d`(최근 N개 1-step 수익률 표본표준편차, ddof=1), `yoy`, `mom`을 지원한다. transform code는 파라메트릭 파싱(`ret_5d`, `change_20d`, `vol_60d` 등)이라 임의 window를 받는다. `yoy`/`mom`은 positional lag이 아니라 캘린더 year-month 정확 매칭으로 계산하며, 직전 기간이 없으면 잘못된 비교 대신 NULL을 낸다. spread/ratio 같은 **multi-input** transform은 단일-input 제약 해제와 `common_feature_catalog_input` role 배선이 필요해 별도 단계로 남겨둔다.
 5. 기존 smoke 과정에서 provider date-range 필터 도입 전 저장된 `fx_usdkrw`의 `2024-01-01` raw row가 로컬 DB에 남아 있다. 삭제는 DB mutation이므로 별도 승인 후 처리한다.
 6. `rate_kr_gov3y`/`rate_kr_gov3y_level`은 PR 4-J에서 `active=true`로 전환했다(PR 4-I의 3개월/12개월 검증 통과 근거). `macro_cpi`/`macro_cpi_level`은 월간 공식 release calendar 정책 확정 전까지 계속 `active=false`를 유지한다. inactive 후보 수집/빌드/리포트는 `--include-inactive`와 explicit allowlist를 요구한다.
 
@@ -1039,7 +1040,7 @@ compileall: passed
 | 범위 | 남은 작업 |
 |---|---|
 | PR 0 source catalog | 공식 source code/API parameter/license/API key 필요 여부 문서화. 현재 Phase 1 seed는 코드에 먼저 반영된 상태라 후속 검증 문서가 필요하다 |
-| daily fact transform 확장 | `change_1d`, `change_20d`, `vol_20d`, `vol_60d`, `yoy`, `mom`, spread/ratio multi-input transform |
+| daily fact transform 확장 | (완료) `change_<N>d`, `vol_<N>d`, `yoy`, `mom` single-input transform. (남음) spread/ratio **multi-input** transform — 단일-input 제약 해제 + catalog_input role 배선 필요 |
 | coverage report 확장 | raw stale 상세, source trace 상세, outlier/z-score, Markdown/CSV 출력 |
 | ECOS provider | (완료) live smoke, `rate_kr_gov3y` active 전환. (남음) USD/KRW 공식 환율, 추가 만기 금리, 물가/통화/심리 series 확장 |
 | FRED provider | API client/parser, `FRED_API_KEY` 설정, 미국 금리/원자재 series seed, revision/vintage 정책 결정 |
