@@ -1034,9 +1034,23 @@ compileall: passed
 
 ### 13.1 바로 이어서 할 작업
 
-1. PR 4-I/4-J 완료. `rate_kr_gov3y`/`rate_kr_gov3y_level`이 운영 범위 검증(3개월/12개월)을 통과하고 catalog에서 `active=true`로 전환되었다. seed 재적용 후 `--include-inactive` 없이 build/coverage/readiness가 동작한다.
-2. `macro_cpi`/`macro_cpi_level`은 release calendar 확인 또는 공식 발표일 source 확보 전까지 inactive 유지한다.
-3. 다음 후보 액션(택1): (a) FRED provider(PR 5)로 미국 금리/원자재 series 추가, (b) ECOS series 확장(USD/KRW 공식 환율, 추가 만기 금리), (c) daily fact transform 확장(`change`, `vol`, `yoy/mom`, spread). 원천 추가 시 raw sync 후 `active=false`로 두고 PIT 검증을 거쳐 별도 PR로 active 전환하는 PR 4-I/4-J 패턴을 따른다.
+직전까지 완료된 것(아래 §13.3 커밋 참조):
+
+- PR 4-I/4-J: `rate_kr_gov3y`/`rate_kr_gov3y_level` 운영 범위 검증(3개월/12개월) 통과 후 `active=true` 전환.
+- transform 확장(single-input): `change_<N>d`/`vol_<N>d`/`yoy`/`mom`.
+- transform 확장(multi-input): `spread`/`ratio` + `input_roles`. **단, 실제 spread feature는 아직 seed에 없다**(데이터 선행 필요).
+
+다음 후보 액션(택1, 권장순):
+
+1. **(권장) ECOS gov10y 확장 → 실제 spread feature 등록.** multi-input 인프라는 닫혔으나 이를 채울 데이터가 없다. 가장 짧은 경로:
+   - seed에 `rate_kr_gov10y` source series 추가(ECOS, `next_krx_session`, `active=false`) — provider 재사용이라 저비용.
+   - `rate_kr_term_spread_10y_3y` feature를 `transform_code="spread"`, `input_series_ids=("rate_kr_gov10y","rate_kr_gov3y")`, `input_roles=("spread_long","spread_short")`로 등록(`active=false`).
+   - `common sync`(gov10y, gov3y) → `build-daily`(spread) → `coverage`/`readiness`로 PIT 검증.
+   - 통과 시 PR 4-I/4-J 패턴대로 별도 PR에서 `active=true` 전환.
+2. **FRED provider(PR 5):** `FRED_API_KEY` 설정 + client/parser + US2Y/US10Y/WTI seed. `us_term_spread_10y_2y`까지 가려면 선행 필요. adapter 신규라 중간 비용.
+3. **ECOS series 확장:** USD/KRW 공식 환율(현재 FDR fallback 대체), 물가/통화/심리 월간 series.
+
+원천 추가 시 항상 raw sync 후 `active=false`로 두고 PIT 검증을 거쳐 별도 PR로 active 전환하는 PR 4-I/4-J 패턴을 따른다.
 
 ### 13.2 아직 남은 구현 범위
 
@@ -1058,14 +1072,25 @@ compileall: passed
 
 다른 세션에서 이어받을 때는 이 문서를 기준 문서로 사용한다. ECOS source code와 후보 판단 세부사항은 `docs/dev/20260608_common_features/source_catalog_00.md`를 함께 확인한다.
 
+git 상태(이 작업들은 main에 커밋되어 있다. 무관 변경 — `remote_sync.py`의 `krx_security_flow_raw` 동기화, deploy 스크립트, README, `temp_prompt.txt` 등 — 은 의도적으로 커밋하지 않고 작업 트리에 남겨뒀다):
+
+```text
+87b4451 feat(common-features): support multi-input spread/ratio transforms
+816ebe8 feat(common-features): add change/vol/yoy/mom daily fact transforms
+4427e07 feat(common-features): add market/macro common feature collection (PR 1~4-J)
+```
+
+(주의: 공통 피쳐 기능 전체가 `4427e07` 한 커밋으로 처음 들어갔다. 그 이전에는 untracked 상태였다.)
+
 현재 마지막 완료 단위:
 
-- PR 4-J 완료.
-- `rate_kr_gov3y` series와 `rate_kr_gov3y_level` feature를 seed에서 `active=true`로 전환했다. seed 테스트는 active 기대/`macro_cpi` inactive 유지로 분리했다(unit 226 passed).
-- seed 재적용(`common seed-catalog`) 후 `--include-inactive` 없이 build/coverage/readiness가 동작한다: 12개월(`2025-06-10..2026-06-09`, 254일) coverage `1.0000`, null 0, missing 0, PIT 위반 0, readiness `true`.
-- `macro_cpi`/`macro_cpi_level`은 여전히 catalog `active=false`다.
+- multi-input transform(`spread`/`ratio`) 완료. `CommonFeatureCatalogEntry.input_roles` 추가(빈 값=전부 primary, single-input 무영향), storage write/read에 role 배선, builder에 spread(long-short)/ratio(num/denom) 구현. 각 input 독립 as-of join, 결측/stale/0분모 시 NULL, asof=max(available_from).
+- 그 직전 single-input transform 확장(`change_<N>d`/`vol_<N>d`/`yoy`/`mom`) 완료. `yoy`/`mom`은 캘린더 year-month 정확 매칭(직전 기간 결측 시 NULL).
+- 검증 상태: `uv run --extra dev pytest tests/unit` = **240 passed**, ruff/compileall 통과.
+- active 상태: `rate_kr_gov3y`/`rate_kr_gov3y_level`만 ECOS active. `macro_cpi`/`macro_cpi_level`은 inactive 유지.
+- **주의: spread/ratio 빌더는 구현됐지만 실제 spread feature는 seed에 아직 없다.** 등록하려면 `rate_kr_gov10y` 같은 추가 만기 금리 series 수집이 선행되어야 한다(§13.1 후보 1).
 
-active 경로 재현 명령(이제 `--include-inactive` 불필요):
+`rate_kr_gov3y` active 경로 재현 명령(`--include-inactive` 불필요):
 
 ```bash
 uv run krx-collector common sync --sources ecos --series rate_kr_gov3y \
@@ -1080,10 +1105,4 @@ uv run krx-collector common readiness-report --feature-codes rate_kr_gov3y_level
 
 (`rate_kr_gov3y`는 `next_krx_session` 정책이라 fact 시작일을 raw 첫 관측일 다음 KRX 영업일로 둔다. ECOS는 `--start`가 주말이면 반환 범위가 다음 영업일부터 시작한다.)
 
-다음 구현/검증 단위:
-
-- PR 4-J: `rate_kr_gov3y`/`rate_kr_gov3y_level` active 전환.
-  - `service/default_common_feature_catalog.py`에서 해당 series/feature `active=true`로 변경.
-  - seed 재적용(`common seed-catalog`) 후 `--include-inactive` 없이 sync/build/coverage/readiness가 동작하는지 확인.
-  - `tests/unit/test_default_common_feature_catalog.py` 등 active 개수 기대값 갱신.
-- `macro_cpi`/`macro_cpi_level`은 공식 release calendar 또는 발표일 source 확보 전까지 inactive 유지(이번에도 전환하지 않음).
+다음 구현/검증 단위(권장): §13.1 후보 1 — `rate_kr_gov10y` 수집 → `rate_kr_term_spread_10y_3y` spread feature 등록(`active=false`) → PIT 검증 → 별도 PR로 active 전환. multi-input 동작 예시와 PIT 규약은 `tests/unit/test_build_common_feature_daily_facts.py`의 `test_build_daily_facts_*spread*`/`*ratio*` 케이스를 참고한다.
