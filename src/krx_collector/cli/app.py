@@ -62,8 +62,10 @@ def _parse_common_sources(value: str) -> list[object]:
 
     source_by_name = {
         "pykrx": Source.PYKRX,
+        "krx": Source.KRX,
         "fdr": Source.FDR,
         "ecos": Source.ECOS,
+        "fred": Source.FRED,
     }
     sources: list[Source] = []
     for raw_source in value.split(","):
@@ -86,13 +88,17 @@ def _build_common_feature_providers(sources: list[object]) -> list[object]:
     """Instantiate common feature providers for a source allowlist."""
     from krx_collector.adapters.common_features_ecos import EcosCommonFeatureProvider
     from krx_collector.adapters.common_features_fdr import FdrCommonFeatureProvider
+    from krx_collector.adapters.common_features_fred import FredCommonFeatureProvider
+    from krx_collector.adapters.common_features_krx import KrxCommonFeatureProvider
     from krx_collector.adapters.common_features_pykrx import PykrxCommonFeatureProvider
     from krx_collector.domain.enums import Source
 
     provider_by_source = {
         Source.PYKRX: PykrxCommonFeatureProvider,
+        Source.KRX: KrxCommonFeatureProvider,
         Source.FDR: FdrCommonFeatureProvider,
         Source.ECOS: EcosCommonFeatureProvider,
+        Source.FRED: FredCommonFeatureProvider,
     }
     providers = []
     for source in sources:
@@ -626,6 +632,20 @@ def _handle_common_readiness_report(args: argparse.Namespace) -> None:
             f"nulls={row.null_count} missing={row.missing_count} "
             f"pit_violations={row.pit_violation_count} blockers={blockers}"
         )
+
+    not_ready = [row for row in report.rows if not row.ready]
+    if args.fail_on_not_ready and (report.errors or not_ready):
+        if report.errors:
+            print(
+                f"❌ Common feature readiness report has {len(report.errors)} errors.",
+                file=sys.stderr,
+            )
+        if not_ready:
+            print(
+                f"❌ Common feature readiness failed for {len(not_ready)} features.",
+                file=sys.stderr,
+            )
+        raise SystemExit(2)
 
 
 def _handle_flows_sync(args: argparse.Namespace) -> None:
@@ -1322,7 +1342,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--sources",
         type=_parse_common_sources,
         default=_parse_common_sources("pykrx,fdr"),
-        help="Comma-separated source allowlist: pykrx,fdr,ecos (default: pykrx,fdr).",
+        help="Comma-separated source allowlist: pykrx,krx,fdr,ecos,fred (default: pykrx,fdr).",
     )
     common_sync.add_argument(
         "--series",
@@ -1463,6 +1483,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Allow explicitly selected inactive feature codes in the report.",
+    )
+    common_readiness.add_argument(
+        "--fail-on-not-ready",
+        action="store_true",
+        default=False,
+        help="Exit non-zero when any selected feature is not ready or report errors exist.",
     )
     common_readiness.set_defaults(handler=_handle_common_readiness_report)
 

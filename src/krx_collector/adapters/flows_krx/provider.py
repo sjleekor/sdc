@@ -6,7 +6,6 @@ import logging
 from datetime import date
 
 from krx_collector.adapters.flows_common import UNSUPPORTED_FLOW_METRIC_CODES
-from krx_collector.adapters.flows_krx.client import KrxMdcClient, KrxMdcResponseError
 from krx_collector.adapters.flows_krx.codes import KrxStockCodeResolver
 from krx_collector.adapters.flows_krx.parsers import (
     FOREIGN_HOLDING_BLD,
@@ -17,6 +16,7 @@ from krx_collector.adapters.flows_krx.parsers import (
     parse_investor_net_volume_rows,
     parse_shorting_rows,
 )
+from krx_collector.adapters.krx_common.client import KrxMdcClient, KrxMdcResponseError
 from krx_collector.domain.enums import Market, Source
 from krx_collector.domain.models import SecurityFlowFetchResult
 from krx_collector.util.pipeline import HumanThrottle

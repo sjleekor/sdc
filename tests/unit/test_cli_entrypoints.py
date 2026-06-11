@@ -128,6 +128,28 @@ def test_common_sync_parser_supports_ecos_source() -> None:
     assert args.include_inactive is True
 
 
+def test_common_sync_parser_supports_fred_source() -> None:
+    args = app.build_parser().parse_args(
+        [
+            "common",
+            "sync",
+            "--sources",
+            "fred",
+            "--series",
+            "rate_us10y",
+            "--start",
+            "2026-06-01",
+            "--end",
+            "2026-06-08",
+            "--include-inactive",
+        ]
+    )
+
+    assert args.sources == [Source.FRED]
+    assert args.series == "rate_us10y"
+    assert args.include_inactive is True
+
+
 def test_common_sync_parser_rejects_unknown_source() -> None:
     with pytest.raises(SystemExit):
         app.build_parser().parse_args(
@@ -135,7 +157,7 @@ def test_common_sync_parser_rejects_unknown_source() -> None:
                 "common",
                 "sync",
                 "--sources",
-                "fred",
+                "kosis",
                 "--start",
                 "2026-06-01",
                 "--end",
@@ -218,6 +240,7 @@ def test_common_readiness_report_parser_supports_feature_codes_and_threshold() -
     assert args.end == date(2026, 6, 8)
     assert args.required_coverage_ratio == Decimal("0.9950")
     assert args.include_inactive is True
+    assert args.fail_on_not_ready is False
     assert args.handler == app._handle_common_readiness_report
 
 
@@ -235,6 +258,23 @@ def test_common_readiness_report_parser_defaults_to_strict_coverage() -> None:
 
     assert args.required_coverage_ratio == Decimal("1.0000")
     assert args.include_inactive is False
+    assert args.fail_on_not_ready is False
+
+
+def test_common_readiness_report_parser_supports_fail_on_not_ready() -> None:
+    args = app.build_parser().parse_args(
+        [
+            "common",
+            "readiness-report",
+            "--start",
+            "2026-06-01",
+            "--end",
+            "2026-06-08",
+            "--fail-on-not-ready",
+        ]
+    )
+
+    assert args.fail_on_not_ready is True
 
 
 @pytest.mark.parametrize("value", ["-0.1", "1.1", "nan", "Infinity", "abc"])
@@ -389,6 +429,49 @@ def test_build_common_feature_providers_supports_ecos() -> None:
 
     assert len(providers) == 1
     assert providers[0].source() == Source.ECOS
+
+
+def test_build_common_feature_providers_supports_fred() -> None:
+    providers = app._build_common_feature_providers([Source.FRED])
+
+    assert len(providers) == 1
+    assert providers[0].source() == Source.FRED
+
+
+def test_build_common_feature_providers_supports_krx(monkeypatch) -> None:
+    class FakeKrxProvider:
+        def source(self) -> Source:
+            return Source.KRX
+
+    monkeypatch.setattr(
+        "krx_collector.adapters.common_features_krx.KrxCommonFeatureProvider",
+        FakeKrxProvider,
+    )
+
+    providers = app._build_common_feature_providers([Source.KRX])
+
+    assert len(providers) == 1
+    assert providers[0].source() == Source.KRX
+
+
+def test_common_sync_parser_supports_krx_source() -> None:
+    args = app.build_parser().parse_args(
+        [
+            "common",
+            "sync",
+            "--sources",
+            "krx",
+            "--series",
+            "market_kospi_krx",
+            "--start",
+            "2026-06-01",
+            "--end",
+            "2026-06-08",
+            "--include-inactive",
+        ]
+    )
+
+    assert args.sources == [Source.KRX]
 
 
 def test_handle_common_build_daily_calls_service(monkeypatch) -> None:
@@ -640,3 +723,60 @@ def test_handle_common_readiness_report_rejects_include_inactive_without_feature
 
     with pytest.raises(SystemExit, match="--include-inactive requires"):
         app._handle_common_readiness_report(args)
+
+
+def test_handle_common_readiness_report_can_fail_on_not_ready(monkeypatch) -> None:
+    class FakeStorage:
+        def __init__(self, dsn: str) -> None:
+            self.dsn = dsn
+
+    def fake_build_common_feature_readiness_report(**kwargs):
+        return CommonFeatureReadinessReport(
+            target_count=4,
+            rows=[
+                CommonFeatureReadinessRow(
+                    feature_code="global_vix_level",
+                    feature_name_kr="VIX",
+                    target_count=4,
+                    fact_count=4,
+                    non_null_count=3,
+                    null_count=1,
+                    missing_count=0,
+                    coverage_ratio=Decimal("0.7500"),
+                    pit_violation_count=0,
+                    required_coverage_ratio=Decimal("1.0000"),
+                    ready=False,
+                    blockers=("coverage 0.7500 below required 1.0000",),
+                )
+            ],
+        )
+
+    monkeypatch.setattr(app, "get_settings", lambda: SimpleNamespace(db_dsn="postgresql://test"))
+    monkeypatch.setattr(
+        "krx_collector.infra.db_postgres.repositories.PostgresStorage",
+        FakeStorage,
+    )
+    monkeypatch.setattr(
+        (
+            "krx_collector.service.report_common_feature_readiness."
+            "build_common_feature_readiness_report"
+        ),
+        fake_build_common_feature_readiness_report,
+    )
+
+    args = app.build_parser().parse_args(
+        [
+            "common",
+            "readiness-report",
+            "--start",
+            "2026-06-01",
+            "--end",
+            "2026-06-08",
+            "--fail-on-not-ready",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        app._handle_common_readiness_report(args)
+
+    assert exc_info.value.code == 2

@@ -90,6 +90,8 @@ class Settings(BaseSettings):
         krx_error_backoff_max_seconds: Maximum delay after a KRX error.
         ecos_api_key: Optional Bank of Korea ECOS API key.
         ecos_timeout_seconds: HTTP timeout for ECOS requests.
+        fred_api_key: Optional FRED API key.
+        fred_timeout_seconds: HTTP timeout for FRED requests.
     """
 
     model_config = SettingsConfigDict(
@@ -140,6 +142,10 @@ class Settings(BaseSettings):
     # ECOS
     ecos_api_key: str = ""
     ecos_timeout_seconds: float = 20.0
+
+    # FRED
+    fred_api_key: str = ""
+    fred_timeout_seconds: float = 20.0
 
     # Rate limiting
     rate_limit_seconds: float = 0.2

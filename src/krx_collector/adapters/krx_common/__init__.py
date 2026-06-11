@@ -1,4 +1,4 @@
-"""Backward-compatible imports for the shared KRX MDC client."""
+"""Shared KRX MDC adapter utilities."""
 
 from krx_collector.adapters.krx_common.client import (
     KRX_LOGIN_URL,

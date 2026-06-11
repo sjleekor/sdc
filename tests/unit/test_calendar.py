@@ -58,6 +58,26 @@ class TestGetTradingDays:
         result = get_trading_days(date(2024, 1, 2), date(2024, 1, 3), holidays=None)
         assert isinstance(result, list)
 
+    def test_2026_observed_krx_holidays_are_excluded(self) -> None:
+        """Observed 2026 KRX holidays must be excluded from trading days."""
+        holidays = load_holidays(Path("docs/holidays_krx.csv"))
+        result = get_trading_days(date(2026, 1, 1), date(2026, 6, 10), holidays=holidays)
+
+        for holiday in (
+            date(2026, 1, 1),
+            date(2026, 2, 16),
+            date(2026, 2, 17),
+            date(2026, 2, 18),
+            date(2026, 3, 2),
+            date(2026, 5, 1),
+            date(2026, 5, 5),
+            date(2026, 5, 25),
+            date(2026, 6, 3),
+        ):
+            assert holiday not in result
+
+        assert len(result) == 106
+
     def test_empty_range(self) -> None:
         """When start > end, return an empty list."""
         holidays: set[date] = set()

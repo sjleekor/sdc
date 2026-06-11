@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from krx_collector.adapters.flows_krx.client import KrxMdcClient
+from krx_collector.adapters.krx_common.client import KrxMdcClient
 from krx_collector.domain.enums import Market
 
 FINDER_BLD = "dbms/comm/finder/finder_stkisu"

@@ -86,14 +86,19 @@ class MockCommonFeatureStorage:
         self,
         series: list[CommonFeatureSeries],
         observation_counts: dict[str, int] | None = None,
+        observation_rows: dict[str, list[CommonFeatureObservation]] | None = None,
     ) -> None:
         self.series = series
         self.observation_counts = observation_counts or {}
+        self.observation_rows = observation_rows or {}
         self.observations: list[CommonFeatureObservation] = []
         self.runs: list[IngestionRun] = []
         self.series_query: tuple[list[Source] | None, list[str] | None, bool] | None = None
         self.count_queries: list[
             tuple[list[str] | None, date | None, date | None, Source | None]
+        ] = []
+        self.observation_queries: list[
+            tuple[list[str] | None, date | None, date | None, Source | None, date | None]
         ] = []
 
     def record_run(self, run: IngestionRun) -> None:
@@ -129,6 +134,36 @@ class MockCommonFeatureStorage:
                 for series_id in series_ids
             }
         return dict(self.observation_counts)
+
+    def get_common_feature_observations(
+        self,
+        series_ids: list[str] | None = None,
+        start: date | None = None,
+        end: date | None = None,
+        source: Source | None = None,
+        available_from_end: date | None = None,
+    ) -> list[CommonFeatureObservation]:
+        self.observation_queries.append((series_ids, start, end, source, available_from_end))
+        selected_series_ids = series_ids or list(self.observation_rows)
+        rows = [
+            row
+            for series_id in selected_series_ids
+            for row in self.observation_rows.get(series_id, [])
+        ]
+        if start:
+            rows = [row for row in rows if row.observation_date >= start]
+        if end:
+            rows = [row for row in rows if row.observation_date <= end]
+        if source:
+            rows = [row for row in rows if row.source == source]
+        if available_from_end:
+            rows = [
+                row
+                for row in rows
+                if row.available_from_date is not None
+                and row.available_from_date <= available_from_end
+            ]
+        return rows
 
 
 def test_sync_common_features_writes_observations_with_service_availability() -> None:
@@ -316,6 +351,59 @@ def test_sync_common_features_skips_series_with_existing_coverage() -> None:
     assert provider.calls == []
     assert storage.count_queries == [
         (["market_kospi"], date(2026, 6, 8), date(2026, 6, 8), Source.PYKRX)
+    ]
+    assert storage.runs[-1].status == RunStatus.SUCCESS
+
+
+def test_sync_common_features_skips_ecos_daily_series_with_calendar_aware_coverage() -> None:
+    start = date(2025, 6, 9)
+    end = date(2026, 6, 10)
+    storage = MockCommonFeatureStorage(
+        [
+            _series("rate_kr_gov3y", source=Source.ECOS),
+            _series("rate_kr_gov10y", source=Source.ECOS),
+        ],
+        observation_counts={
+            "rate_kr_gov3y": 247,
+            "rate_kr_gov10y": 247,
+        },
+        observation_rows={
+            "rate_kr_gov3y": [
+                _observation("rate_kr_gov3y", source=Source.ECOS, observation_date=start),
+                _observation("rate_kr_gov3y", source=Source.ECOS, observation_date=end),
+            ],
+            "rate_kr_gov10y": [
+                _observation("rate_kr_gov10y", source=Source.ECOS, observation_date=start),
+                _observation("rate_kr_gov10y", source=Source.ECOS, observation_date=end),
+            ],
+        },
+    )
+    provider = MockCommonFeatureProvider(Source.ECOS, {})
+
+    result = sync_common_features(
+        providers=[provider],
+        storage=storage,  # type: ignore[arg-type]
+        start=start,
+        end=end,
+        sources=[Source.ECOS],
+        series_ids=["rate_kr_gov3y", "rate_kr_gov10y"],
+        rate_limit_seconds=0.0,
+        krx_trading_days=_krx_days,
+    )
+
+    assert result.errors == {}
+    assert result.series_processed == 2
+    assert result.requests_attempted == 0
+    assert result.requests_skipped == 2
+    assert result.rows_upserted == 0
+    assert provider.calls == []
+    assert storage.count_queries == [
+        (["rate_kr_gov3y"], start, end, Source.ECOS),
+        (["rate_kr_gov10y"], start, end, Source.ECOS),
+    ]
+    assert storage.observation_queries == [
+        (["rate_kr_gov3y"], start, end, Source.ECOS, None),
+        (["rate_kr_gov10y"], start, end, Source.ECOS, None),
     ]
     assert storage.runs[-1].status == RunStatus.SUCCESS
 

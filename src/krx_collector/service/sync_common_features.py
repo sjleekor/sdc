@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 
 KrxTradingDayProvider = Callable[[date, date], Sequence[date]]
 
+_STRICT_DAILY_COVERAGE_SOURCES = {Source.KRX, Source.PYKRX}
+_RELAXED_DAILY_COVERAGE_MIN_NUMERATOR = 9
+_RELAXED_DAILY_COVERAGE_MIN_DENOMINATOR = 10
+
 
 def sync_common_features(
     providers: Sequence[CommonFeatureProvider],
@@ -227,7 +231,67 @@ def _has_existing_coverage(
         end=end,
         source=series.source,
     )
-    return counts.get(series.series_id, 0) >= expected_count
+    observed_count = counts.get(series.series_id, 0)
+    if observed_count >= expected_count:
+        return True
+
+    return _has_relaxed_daily_coverage(
+        storage=storage,
+        series=series,
+        start=start,
+        end=end,
+        observed_count=observed_count,
+        expected_count=expected_count,
+        krx_trading_days=krx_trading_days,
+    )
+
+
+def _has_relaxed_daily_coverage(
+    *,
+    storage: Storage,
+    series: CommonFeatureSeries,
+    start: date,
+    end: date,
+    observed_count: int,
+    expected_count: int,
+    krx_trading_days: KrxTradingDayProvider,
+) -> bool:
+    if series.frequency != "D" or series.source in _STRICT_DAILY_COVERAGE_SOURCES:
+        return False
+    if observed_count <= 0:
+        return False
+    if (
+        observed_count * _RELAXED_DAILY_COVERAGE_MIN_DENOMINATOR
+        < expected_count * _RELAXED_DAILY_COVERAGE_MIN_NUMERATOR
+    ):
+        return False
+
+    observations = storage.get_common_feature_observations(
+        series_ids=[series.series_id],
+        start=start,
+        end=end,
+        source=series.source,
+    )
+    if not observations:
+        return False
+
+    first_observation_date = min(observation.observation_date for observation in observations)
+    last_observation_date = max(observation.observation_date for observation in observations)
+    max_gap = max(series.max_stale_business_days, 0)
+    return (
+        _krx_business_day_gap(start, first_observation_date, krx_trading_days) <= max_gap
+        and _krx_business_day_gap(last_observation_date, end, krx_trading_days) <= max_gap
+    )
+
+
+def _krx_business_day_gap(
+    earlier: date,
+    later: date,
+    krx_trading_days: KrxTradingDayProvider,
+) -> int:
+    if earlier >= later:
+        return 0
+    return sum(1 for day in krx_trading_days(earlier, later) if earlier < day <= later)
 
 
 def _expected_daily_observation_count(

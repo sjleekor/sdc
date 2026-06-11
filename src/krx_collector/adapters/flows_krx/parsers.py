@@ -15,7 +15,7 @@ from krx_collector.adapters.flows_common import (
     SHORT_SELLING_VOLUME,
     FlowMetricSpec,
 )
-from krx_collector.adapters.flows_krx.client import KrxMdcRow
+from krx_collector.adapters.krx_common.client import KrxMdcRow
 from krx_collector.domain.enums import Market, Source
 from krx_collector.domain.models import SecurityFlowLine
 from krx_collector.util.time import now_kst

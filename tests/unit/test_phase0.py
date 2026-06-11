@@ -49,6 +49,15 @@ def test_settings_accept_ecos_api_key_from_env(monkeypatch) -> None:
     assert settings.ecos_timeout_seconds == 20.0
 
 
+def test_settings_accept_fred_api_key_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("FRED_API_KEY", "fred-key")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.fred_api_key == "fred-key"
+    assert settings.fred_timeout_seconds == 20.0
+
+
 def test_settings_accept_krx_mdc_timeout_with_seconds_suffix(monkeypatch) -> None:
     monkeypatch.setenv("KRX_MDC_TIMEOUT_SECONDS", "150s")
 

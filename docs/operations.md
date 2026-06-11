@@ -163,6 +163,42 @@ SDC_DART_BACKFILL_FS_DIVS=CFS,OFS
 
 모든 OpenDART API key가 일일 한도에 도달하면 각 OpenDART CLI는 exit code `75`로 종료됩니다. 스크립트는 `set -euo pipefail`이므로 그 지점에서 멈추고, 다음 실행 때 이미 저장된 raw/XBRL은 skip되어 같은 범위를 이어받습니다.
 
+### 공통 시장/거시 feature 갱신
+
+공통 feature layer는 별도 Cronicle 이벤트(예: `sdc_daily_common_features`)로 운영합니다. 기존 가격/수급/계정 파이프라인과 독립적으로 실행해도 되며, 실패 여부는 마지막 `readiness-report --fail-on-not-ready` exit code로 판단합니다.
+
+권장 Cronicle command:
+
+```bash
+/home/whi/apps/sdc/bin/common-features-refresh.sh
+```
+
+스크립트 기본 흐름:
+
+1. `common seed-catalog --init-schema`
+2. 일간 source sync: `fdr,fred,ecos,krx`, 최근 45일
+3. monthly macro sync: CPI/PPI/M2/CSI, 최근 540일, `--force`
+4. active feature 전체 `build-daily`, 최근 120일
+5. 최근 60일 `coverage-report`
+6. 최근 60일 `readiness-report --required-coverage-ratio 1.0 --fail-on-not-ready`
+
+필요하면 Cronicle 이벤트 환경 변수로 범위를 조정합니다.
+
+```bash
+SDC_COMMON_DAILY_LOOKBACK_DAYS=45
+SDC_COMMON_MACRO_LOOKBACK_DAYS=540
+SDC_COMMON_BUILD_LOOKBACK_DAYS=120
+SDC_COMMON_READINESS_LOOKBACK_DAYS=60
+SDC_COMMON_RATE_LIMIT_SECONDS=0.2
+SDC_COMMON_REQUIRED_COVERAGE_RATIO=1.0
+```
+
+운영 전제:
+
+- `.env`에 `ECOS_API_KEY`, `FRED_API_KEY`가 설정되어 있어야 합니다.
+- KRX direct source는 필요 시 `.env`의 `KRX_ID`/`KRX_PW`로 로그인 retry를 수행합니다.
+- monthly macro는 revision 가능성이 있어 최근 540일을 `--force`로 재조회합니다. 이 범위는 YoY 계산에 필요한 전년동월 raw도 함께 보강합니다.
+
 ### 데이터 수집 이력 조회
 
 ```sql
