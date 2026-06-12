@@ -1151,7 +1151,8 @@ compileall: passed
    - 완료: `deploy/prod/bin/common-features-refresh.sh` wrapper 추가. seed -> daily sync -> monthly macro force sync -> build -> coverage -> readiness 순서로 실행한다.
    - 완료: `common readiness-report --fail-on-not-ready` 옵션 추가. not-ready feature 또는 report error가 있으면 exit code `2`로 종료해 Cronicle 실패 알림과 연결할 수 있다.
    - 완료: `docs/operations.md`, `docs/deploy.md`, `.env.example`에 common feature 운영 env와 Cronicle command를 문서화했다.
-   - 남음: Cronicle 실제 이벤트 등록/활성화, 운영 서버 배포 후 첫 run 확인, ML ETL pivot/gold panel 연계.
+   - 완료: v0.8.8 릴리스/배포 후 sj2-server에 `common-features-refresh.sh`를 배포하고 Cronicle `sdc_daily_common_features` 이벤트를 등록/활성화했다. 첫 Cronicle run(`jmq9lrbzp03`)은 운영 `.env`의 `FRED_API_KEY`/`ECOS_API_KEY` 누락과 cold-start lookback 부족으로 readiness exit code 2가 발생했다. 운영 `.env`에 두 key를 추가하고 1회성 backfill(`daily=180d`, `macro=620d`, `build=220d`, `readiness=60d`)을 수행해 active 37개 feature readiness 1.0000/PIT 0/ready true를 확인했다. 이후 Cronicle 기본 설정 재실행(`jmqa0c8mn04`)은 exit code 0으로 성공했다.
+   - 남음: ML ETL pivot/gold panel 연계.
 
 2. **Next-G: monthly macro release calendar 보강(중간)**
    - CPI/PPI/M2/CSI는 현재 conservative `period_end + 20 calendar days` 정책으로 active다.
@@ -1170,7 +1171,7 @@ compileall: passed
 | KRX direct provider | 완료: 공통 `krx_common` client, 지수 provider, CLI `--sources krx`, KRX direct 지수 seed/provider-level smoke/DB readiness/active 전환. 완료: `MDCSTAT01501` 기반 KOSPI/KOSDAQ breadth/liquidity active 전환. 완료: `MDCSTAT00301` 기반 업종지수 4개 후보 inactive smoke. 보류: VKOSPI 현물 endpoint 확인 |
 | coverage/reporting | raw stale 상세, source trace 상세, outlier/z-score, Markdown/CSV 출력. 운영 알림과 연결 |
 | KOFIA/무역/업종 | 고객예탁금/신용융자잔고, 수출입 10일/월간 지표, `stock_industry_classification`, `hs_sector_mapping` |
-| 운영화 | 완료: Cronicle용 wrapper, recent-days/months 증분 실행, readiness 실패 exit code, README/operations/deploy 문서. 남음: sj2-server Cronicle 이벤트 실제 등록/활성화와 첫 운영 run 확인 |
+| 운영화 | 완료: Cronicle용 wrapper, recent-days/months 증분 실행, readiness 실패 exit code, README/operations/deploy 문서, sj2-server 배포, Cronicle `sdc_daily_common_features` 등록/활성화, cold-start backfill, 기본 설정 첫 성공 run 확인 |
 | ML ETL 연계 | `common_feature_daily_fact` pivot, gold panel broadcast join, 종목별 interaction 생성 |
 
 이 순서가 중요한 이유는 원천 수집보다 daily alignment가 더 큰 리스크이기 때문이다. PR 3에서 PIT builder와 coverage report가 닫혔으므로, 이제부터 추가 원천은 raw 수집 후 `common build-daily`와 `common coverage-report`로 실제 노출 품질을 확인한다. 발표일이 불명확한 macro series는 conservative policy가 명시되기 전까지 active feature로 모델에 노출하지 않는다.
@@ -1201,6 +1202,7 @@ git 상태(이 작업들은 main에 커밋되어 있다. 무관 변경 — `remo
 - Next-E-4 PPI/M2/CSI monthly macro active 전환 완료. 7개 feature는 `active=true`로 seed했고, active-only sync/build/coverage/readiness를 통과했다.
 - 검증 상태: Next-E-4 active 전환 후 DB smoke는 raw 48 rows, facts 525, null 0, coverage 1.0000, PIT 0, ready true. `env LOG_LEVEL=WARNING uv run pytest tests/unit` = **279 passed**, `env LOG_LEVEL=WARNING uv run ruff check src tests` 통과, `python3 -m compileall src/krx_collector` 통과.
 - Next-F 운영화 1차 완료. `common-features-refresh.sh` wrapper와 `readiness-report --fail-on-not-ready`를 추가했고, 운영/env/deploy 문서에 Cronicle command와 lookback env를 반영했다. `bash -n deploy/prod/bin/common-features-refresh.sh`, `env LOG_LEVEL=WARNING uv run pytest tests/unit` = **281 passed**, `env LOG_LEVEL=WARNING uv run ruff check src tests` 통과, `python3 -m compileall src/krx_collector` 통과.
+- Next-F 운영 배포/등록 완료. v0.8.8 이미지 build/push 성공 후 sj2-server compose image를 v0.8.8로 갱신하고 `docker compose pull collector`를 완료했다. `common readiness-report --help`에서 `--fail-on-not-ready` 옵션을 운영 이미지에서 확인했다. Cronicle `sdc_daily_common_features` 이벤트는 `enabled=1`, `target=maingrp`, `plugin=shellplug`, `timezone=Asia/Seoul`, `max_children=1`, `timing=false`로 등록했다. 운영 `.env`에 `FRED_API_KEY`/`ECOS_API_KEY`를 추가한 뒤 cold-start backfill을 수행했고, Cronicle 기본 설정 재실행 job `jmqa0c8mn04`는 2026-06-12 06:38:22 KST에 exit code 0으로 완료했다. 최종 readiness는 active 37개 feature 모두 coverage 1.0000, null 0, missing 0, PIT violation 0, ready true다.
 - active 상태: KRX direct 국내 지수 feature, KRX breadth/liquidity 8개 feature, ECOS `rate_kr_gov3y`/`rate_kr_gov10y`/10Y-3Y spread, ECOS `fx_usdkrw_ecos` 기반 FX feature, ECOS CPI/PPI/M2/CSI monthly macro feature, FRED `rate_us2y`/`rate_us10y`/10Y-2Y spread, FRED `commodity_wti_spot_ret_20d`가 active. pykrx 국내 지수 source는 fallback inactive. KRX 업종지수 4개 source/8개 feature, `fx_usdkrw_ecos_*` validation alias, `commodity_wti_fred_ret_20d`, KRX direct 지수 validation feature는 inactive 유지.
 
 `rate_kr_gov3y` active 경로 재현 명령(`--include-inactive` 불필요):
@@ -1218,4 +1220,4 @@ uv run krx-collector common readiness-report --feature-codes rate_kr_gov3y_level
 
 (`rate_kr_gov3y`는 `next_krx_session` 정책이라 fact 시작일을 raw 첫 관측일 다음 KRX 영업일로 둔다. ECOS는 `--start`가 주말이면 반환 범위가 다음 영업일부터 시작한다.)
 
-다음 구현/검증 단위(권장): sj2-server에 `common-features-refresh.sh`를 배포하고 Cronicle `sdc_daily_common_features` 이벤트를 등록/활성화한 뒤 첫 운영 run을 확인한다. 코드 쪽 다음 단계는 `common_feature_daily_fact` pivot/gold panel 연계다. 공식 monthly release calendar 보강은 Next-G로 분리한다.
+다음 구현/검증 단위(권장): `common_feature_daily_fact` pivot/gold panel 연계다. 공식 monthly release calendar 보강은 Next-G로 분리한다.

@@ -655,6 +655,20 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
     default_flow_date = date.today() - timedelta(days=1)
     start = args.start or default_flow_date
     end = args.end or default_flow_date
+
+    if args.incremental and (args.start is not None or args.end is not None):
+        print(
+            "❌ Flow sync failed: --incremental cannot be combined with --start/--end in v1.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if args.incremental and args.use_price_range:
+        print(
+            "❌ Flow sync failed: --incremental cannot be combined with --use-price-range.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     timeout_seconds = (
         args.timeout_seconds
         if args.timeout_seconds is not None
@@ -715,13 +729,116 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
         f"randomize_requests={not args.ordered_requests}, "
         f"timeout={timeout_seconds}, "
         f"progress_interval={args.progress_log_interval_seconds}, "
-        f"progress_every={args.progress_log_every_items}"
+        f"progress_every={args.progress_log_every_items}, "
+        f"incremental={args.incremental}, "
+        f"lookback_days={args.lookback_days}, "
+        f"max_auto_range_days={args.max_auto_range_days}, "
+        f"exclude_groups={args.exclude_groups}"
     )
 
     from krx_collector.adapters.flows_krx.provider import KrxDirectFlowProvider
+    from krx_collector.domain.enums import Source
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
-    from krx_collector.service.sync_krx_flows import sync_krx_security_flows
+    from krx_collector.service.sync_krx_flows import (
+        FLOW_METRIC_GROUPS,
+        resolve_incremental_flow_range,
+        sync_krx_security_flows,
+    )
     from krx_collector.util.pipeline import HumanThrottle, HumanThrottlePolicy
+
+    storage = PostgresStorage(settings.db_dsn)
+    run_params_extra: dict[str, object] | None = None
+
+    if args.incremental:
+        metric_codes = sorted(
+            {metric for metrics in FLOW_METRIC_GROUPS.values() for metric in metrics}
+        )
+        exclude_groups = _split_csv(args.exclude_groups) or []
+        try:
+            incremental_range = resolve_incremental_flow_range(
+                latest_price_date=storage.get_latest_daily_price_date(tickers=tickers),
+                metric_latest_dates=storage.get_krx_security_flow_metric_max_dates(
+                    metric_codes=metric_codes,
+                    source=Source.KRX,
+                ),
+                lookback_days=args.lookback_days,
+                exclude_groups=exclude_groups,
+            )
+        except ValueError as exc:
+            print(f"❌ Flow sync failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+        if (
+            incremental_range.auto_range_days > args.max_auto_range_days
+            and not args.allow_large_range
+        ):
+            print(
+                "❌ Flow sync failed: resolved incremental range is too large "
+                f"({incremental_range.auto_range_days} days > "
+                f"{args.max_auto_range_days}). Use --allow-large-range to override.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        start = incremental_range.start
+        end = incremental_range.end
+        print("   - Flows incremental range resolved:")
+        print(f"     latest_price_date={incremental_range.latest_price_date}")
+        for group, latest in sorted(incremental_range.group_latest_dates.items()):
+            lag = incremental_range.group_lag_days[group]
+            print(f"     latest_{group}_date={latest} lag_days={lag}")
+        print(f"     excluded_groups={incremental_range.excluded_groups}")
+        print(f"     start={start}")
+        print(f"     end={end}")
+        print(f"     lookback_days={incremental_range.lookback_days}")
+        print(f"     auto_range_days={incremental_range.auto_range_days}")
+        run_params_extra = incremental_range.as_run_params()
+        run_params_extra["max_auto_range_days"] = args.max_auto_range_days
+        run_params_extra["allow_large_range"] = args.allow_large_range
+
+        if incremental_range.no_work:
+            print("✅ KRX flow sync skipped: no incremental work.")
+            return
+
+    if args.use_price_range:
+        price_range = storage.get_daily_price_date_range(tickers=tickers)
+        if price_range is None:
+            print(
+                "❌ Flow sync failed: no daily OHLCV rows found for price range.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        price_start, price_end = price_range
+        start = max(start, price_start) if args.start else price_start
+        end = min(end, price_end) if args.end else price_end
+        if start > end:
+            print(
+                f"❌ Flow sync failed: resolved price range is empty "
+                f"(start={start}, end={end}).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        price_range_days = (end - start).days + 1
+        if price_range_days > args.max_price_range_days and not args.allow_large_range:
+            print(
+                "❌ Flow sync failed: resolved price range is too large "
+                f"({price_range_days} days > {args.max_price_range_days}). "
+                "Use --allow-large-range to override.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"   - Price range resolved: start={start}, end={end}")
+
+    if not args.incremental:
+        resolved_range_days = (end - start).days + 1
+        if resolved_range_days > args.max_price_range_days and not args.allow_large_range:
+            print(
+                "❌ Flow sync failed: resolved range is too large "
+                f"({resolved_range_days} days > {args.max_price_range_days}). "
+                "Use --allow-large-range to override.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     human_throttle = HumanThrottle(
         HumanThrottlePolicy(
@@ -743,26 +860,6 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
         login_pw=settings.krx_pw,
         human_throttle=human_throttle,
     )
-    storage = PostgresStorage(settings.db_dsn)
-    if args.use_price_range:
-        price_range = storage.get_daily_price_date_range(tickers=tickers)
-        if price_range is None:
-            print(
-                "❌ Flow sync failed: no daily OHLCV rows found for price range.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        price_start, price_end = price_range
-        start = max(start, price_start) if args.start else price_start
-        end = min(end, price_end) if args.end else price_end
-        if start > end:
-            print(
-                f"❌ Flow sync failed: resolved price range is empty "
-                f"(start={start}, end={end}).",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        print(f"   - Price range resolved: start={start}, end={end}")
 
     result = sync_krx_security_flows(
         provider=provider,
@@ -774,6 +871,7 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
         progress_log_interval_seconds=args.progress_log_interval_seconds,
         progress_log_every_items=args.progress_log_every_items,
         randomize_request_order=not args.ordered_requests,
+        run_params_extra=run_params_extra,
     )
 
     if result.errors:
@@ -1541,6 +1639,50 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Use the stored daily OHLCV min/max trade_date as the flow sync range. "
             "Optional --start/--end further clamp that range."
+        ),
+    )
+    flows_sync.add_argument(
+        "--incremental",
+        action="store_true",
+        default=False,
+        help=(
+            "Resolve the flow sync range from stored daily OHLCV and KRX flow "
+            "latest dates. Intended for daily catch-up runs."
+        ),
+    )
+    flows_sync.add_argument(
+        "--lookback-days",
+        type=int,
+        default=14,
+        help=(
+            "Recent calendar-day window to always rescan in --incremental mode "
+            "(default: 14)."
+        ),
+    )
+    flows_sync.add_argument(
+        "--max-auto-range-days",
+        type=int,
+        default=30,
+        help="Maximum inclusive day range allowed for --incremental without override.",
+    )
+    flows_sync.add_argument(
+        "--max-price-range-days",
+        type=int,
+        default=90,
+        help="Maximum inclusive day range allowed for --use-price-range without override.",
+    )
+    flows_sync.add_argument(
+        "--allow-large-range",
+        action="store_true",
+        default=False,
+        help="Allow resolved flow ranges larger than the configured safety guard.",
+    )
+    flows_sync.add_argument(
+        "--exclude-groups",
+        default=None,
+        help=(
+            "Comma-separated flow metric groups to exclude from --incremental range "
+            "resolution (foreign_holding,investor,shorting)."
         ),
     )
     flows_sync.add_argument(

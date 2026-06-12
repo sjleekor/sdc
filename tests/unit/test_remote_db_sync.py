@@ -6,7 +6,9 @@ import pytest
 from krx_collector.infra.db_postgres import remote_sync
 from krx_collector.infra.db_postgres.remote_sync import (
     PIPELINE_FULL_REFRESH_TABLES,
+    SYNC_TABLE_SPECS,
     DatabaseTable,
+    _adapt_insert_row,
     _copy_status_row_count,
     _daily_ohlcv_checkpoint_payload,
     _effective_daily_ohlcv_batch_size,
@@ -75,6 +77,39 @@ def test_all_tables_sync_requires_full_refresh() -> None:
             full_refresh=False,
             all_tables=True,
         )
+
+
+def test_security_flow_raw_is_in_incremental_and_all_tables_sync() -> None:
+    pipeline_names = [table.name for table in PIPELINE_FULL_REFRESH_TABLES]
+    assert "krx_security_flow_raw" in pipeline_names
+
+    spec = next(spec for spec in SYNC_TABLE_SPECS if spec.name == "krx_security_flow_raw")
+    assert spec.order_columns == ("raw_id",)
+    assert spec.cursor_indexes == (0,)
+    assert spec.conflict_columns == ("trade_date", "ticker", "market", "metric_code", "source")
+    assert spec.json_columns == ("raw_payload",)
+
+
+def test_security_flow_raw_json_payload_is_adapted_for_execute_values() -> None:
+    spec = next(spec for spec in SYNC_TABLE_SPECS if spec.name == "krx_security_flow_raw")
+    row = (
+        1,
+        date(2026, 4, 17),
+        "005930",
+        "KOSPI",
+        "foreign_net_buy_volume",
+        "외국인 순매수 수량",
+        123,
+        "shares",
+        "KRX",
+        datetime(2026, 4, 18, 0, 0, tzinfo=UTC),
+        {"raw": "payload"},
+    )
+
+    adapted = _adapt_insert_row(spec=spec, row=row)
+
+    assert adapted[:-1] == row[:-1]
+    assert adapted[-1].adapted == {"raw": "payload"}
 
 
 def test_validate_full_database_table_sets_reports_mismatches() -> None:

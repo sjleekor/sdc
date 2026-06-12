@@ -97,6 +97,9 @@ uv run krx-collector metrics coverage-report --tickers 005930 --bsns-years 2025 
 ```bash
 # 13. 종목/일자 기준 수급 raw 적재
 uv run krx-collector flows sync --tickers 005930 --start 2026-04-17 --end 2026-04-17
+
+# 일일 catch-up: 저장된 수급 최신일과 가격 최신일 기준으로 최근 window만 갱신
+uv run krx-collector flows sync --incremental --lookback-days 14
 ```
 
 `flows sync`는 KRX MDC JSON endpoint를 직접 호출합니다. 적재 row의 `source` 컬럼은 `KRX`로 기록됩니다. KRX MDC가 비로그인 응답을 거부하면 `.env`의 `KRX_ID` / `KRX_PW` 자격증명으로 자동 로그인 후 재시도합니다.
@@ -178,18 +181,19 @@ uv run krx-collector db sync-remote --ssh-host whi@sj2-server
 
 #### 1. 증분 동기화 (기본)
 
-핵심 4개 테이블만 대상으로 새 행만 upsert 합니다.
+핵심 가격/수급 테이블을 대상으로 새 행만 upsert 합니다.
 
 - `stock_master`
 - `stock_master_snapshot`
 - `stock_master_snapshot_items`
 - `daily_ohlcv`
+- `krx_security_flow_raw`
 
-각 테이블의 `updated_at` 또는 `fetched_at` 워터마크를 기준으로 동작하며, 동일 시각 행이 배치 경계에서 누락되지 않도록 `(timestamp, primary_key...)` 복합 커서를 사용합니다. `daily_ohlcv`는 `sync_checkpoints`에 재개 커서를 저장해 중단 지점에서 이어받습니다.
+각 테이블의 `updated_at`, `fetched_at` 또는 append-only identity cursor를 기준으로 동작하며, 동일 시각 행이 배치 경계에서 누락되지 않도록 `(timestamp, primary_key...)` 복합 커서를 사용합니다. `daily_ohlcv`는 `sync_checkpoints`에 재개 커서를 저장해 중단 지점에서 이어받습니다.
 
 #### 2. `--full-refresh`
 
-위 4개 테이블을 `TRUNCATE` 후 원격 데이터를 처음부터 다시 적재합니다. 로컬 복제본이 손상됐거나 첫 동기화일 때 사용합니다.
+위 대상 테이블을 `TRUNCATE` 후 원격 데이터를 처음부터 다시 적재합니다. 로컬 복제본이 손상됐거나 첫 동기화일 때 사용합니다.
 
 ```bash
 uv run krx-collector db sync-remote --ssh-host whi@sj2-server --full-refresh
@@ -197,7 +201,7 @@ uv run krx-collector db sync-remote --ssh-host whi@sj2-server --full-refresh
 
 #### 3. `--all-tables` (반드시 `--full-refresh`와 함께)
 
-유니버스 동기화, 일봉 백필, OpenDART 계정/재무/XBRL 및 canonical metric 정규화가 쓰는 관리 대상 테이블만 원격에서 로컬로 통째 복제합니다. 대상 로컬 테이블은 비워지고 다시 적재되므로 파괴적 작업입니다. `--full-refresh`를 함께 지정하지 않으면 즉시 에러로 중단됩니다.
+유니버스 동기화, 일봉 백필, KRX 수급, OpenDART 계정/재무/XBRL 및 canonical metric 정규화가 쓰는 관리 대상 테이블만 원격에서 로컬로 통째 복제합니다. 대상 로컬 테이블은 비워지고 다시 적재되므로 파괴적 작업입니다. `--full-refresh`를 함께 지정하지 않으면 즉시 에러로 중단됩니다.
 
 ```bash
 uv run krx-collector db sync-remote --ssh-host whi@sj2-server --full-refresh --all-tables
@@ -209,6 +213,7 @@ uv run krx-collector db sync-remote --ssh-host whi@sj2-server --full-refresh --a
 - `stock_master_snapshot`
 - `stock_master_snapshot_items`
 - `daily_ohlcv`
+- `krx_security_flow_raw`
 - `dart_corp_master`
 - `dart_financial_statement_raw`
 - `dart_share_count_raw`

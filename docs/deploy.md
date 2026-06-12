@@ -79,13 +79,13 @@ docker compose run --rm collector prices backfill --market all --incremental
 ### 3. `flows-sync.sh`
 
 ```bash
-docker compose run --rm collector flows sync --use-price-range
+docker compose run --rm collector flows sync --incremental --lookback-days "${FLOW_LOOKBACK_DAYS:-14}"
 ```
 
 | 항목 | 내용 |
 |---|---|
 | 외부 source | KRX MDC JSON endpoint 직접 호출 |
-| 주요 read table | `daily_ohlcv`, `stock_master`; `stock_master` 대상이 없으면 `dart_corp_master` fallback |
+| 주요 read table | `daily_ohlcv`, `krx_security_flow_raw`, `stock_master`; `stock_master` 대상이 없으면 `dart_corp_master` fallback |
 | write table | `krx_security_flow_raw`, `ingestion_runs` |
 | `ingestion_runs.run_type` | `krx_flow_sync` |
 
@@ -93,6 +93,14 @@ docker compose run --rm collector flows sync --use-price-range
 
 - `krx_security_flow_raw`: 거래일/종목/시장/metric 단위 수급 raw metric.
 - `ingestion_runs`: flow sync 실행 상태, 시도/skip request 수, upsert row 수, no-data/에러 수.
+
+일일 래퍼는 `--incremental` 모드를 사용한다. `FLOW_END`는 `daily_ohlcv`의 최신 거래일이고, `FLOW_START`는 KRX 수급 metric group별 최신일 중 가장 오래된 날짜와 최근 lookback window를 함께 고려해 계산한다. 기본 lookback은 14일이다. 계산된 범위와 group별 최신일은 로그와 `ingestion_runs.params`에 기록된다.
+
+`--use-price-range`는 일일 래퍼에서 사용하지 않는다. 히스토리 보수는 `flows-backfill-range.sh`로 명시 범위를 지정해 실행한다.
+
+```bash
+FLOW_START=2026-05-01 FLOW_END=2026-05-31 /home/whi/apps/sdc/bin/flows-backfill-range.sh
+```
 
 현재 저장 metric:
 
@@ -106,7 +114,7 @@ docker compose run --rm collector flows sync --use-price-range
 | `short_selling_value` | 공매도 거래대금 | `KRW` |
 | `short_selling_balance_quantity` | 공매도 잔고 수량 | `shares` |
 
-`--use-price-range` 때문에 수급 수집 범위는 `daily_ohlcv`에 저장된 최소/최대 거래일 범위로 잡힌다. 즉 가격 데이터가 먼저 적재되어 있어야 수급 수집이 진행된다.
+`--incremental` 모드의 종료일은 가격 최신일이므로 가격 데이터가 먼저 적재되어 있어야 수급 수집이 진행된다. Cronicle의 `sdc_daily_pipeline`은 `prices-backfill-incremental.sh` 뒤에 `flows-sync.sh`를 실행하므로 이 전제를 만족한다.
 
 ## `sdc_daily_accounts_flows`
 
@@ -278,7 +286,7 @@ docker compose run --rm collector common readiness-report --start <readiness_sta
 | downstream 단계 | 의존 데이터 | 이유 |
 |---|---|---|
 | `prices backfill` | `stock_master` | active ticker 목록을 읽어 가격 수집 대상을 만든다. |
-| `flows sync --use-price-range` | `daily_ohlcv` | 수급 수집 시작/종료일을 저장된 가격 데이터 범위로 계산한다. |
+| `flows sync --incremental` | `daily_ohlcv`, `krx_security_flow_raw` | 수급 수집 종료일은 가격 최신일, 시작일은 저장된 수급 metric group 최신일과 lookback window로 계산한다. |
 | `flows sync` | `stock_master`, fallback `dart_corp_master` | 수급 수집 대상 종목과 시장을 만든다. |
 | `dart sync-corp` | `stock_master` | OpenDART corp_code를 현재 active KRX ticker/market/name과 매핑한다. |
 | `dart sync-financials` | `dart_corp_master` | active OpenDART corp mapping이 있어야 기업별 재무 요청을 만든다. |

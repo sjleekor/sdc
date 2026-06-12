@@ -71,6 +71,7 @@ class TableSyncSpec:
     update_columns: tuple[str, ...]
     local_cursor_sql: str
     cursor_indexes: tuple[int, ...]
+    json_columns: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +96,8 @@ PIPELINE_FULL_REFRESH_TABLE_NAMES: tuple[str, ...] = (
     "stock_master_snapshot_items",
     # prices backfill
     "daily_ohlcv",
+    # KRX security-level flow metrics
+    "krx_security_flow_raw",
     # account / financial / XBRL pipeline
     "dart_corp_master",
     "dart_financial_statement_raw",
@@ -203,6 +206,38 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
             "LIMIT 1"
         ),
         cursor_indexes=(9, 0, 1, 2),
+    ),
+    TableSyncSpec(
+        name="krx_security_flow_raw",
+        select_list=(
+            "raw_id, trade_date, ticker, market, metric_code, metric_name, value, unit, "
+            "source, fetched_at, raw_payload"
+        ),
+        from_clause="krx_security_flow_raw",
+        order_columns=("raw_id",),
+        insert_columns=(
+            "raw_id",
+            "trade_date",
+            "ticker",
+            "market",
+            "metric_code",
+            "metric_name",
+            "value",
+            "unit",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        conflict_columns=("trade_date", "ticker", "market", "metric_code", "source"),
+        update_columns=("metric_name", "value", "unit", "fetched_at", "raw_payload"),
+        local_cursor_sql=(
+            "SELECT raw_id "
+            "FROM krx_security_flow_raw "
+            "ORDER BY raw_id DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(0,),
+        json_columns=("raw_payload",),
     ),
 )
 
@@ -378,6 +413,12 @@ def sync_remote_tables_to_local(
                         full_refresh=full_refresh,
                     )
                 results[spec.name] = copied
+            _sync_owned_sequences(
+                remote_conn=remote_conn,
+                local_conn=local_conn,
+                tables=(DatabaseTable(schema=PUBLIC_SCHEMA, name="krx_security_flow_raw"),),
+            )
+            local_conn.commit()
 
     return results
 
@@ -795,7 +836,9 @@ def _truncate_target_tables(local_conn: Any) -> None:
     with local_conn.cursor() as cur:
         cur.execute(
             "TRUNCATE TABLE "
-            "daily_ohlcv, stock_master_snapshot_items, stock_master_snapshot, stock_master"
+            "krx_security_flow_raw, daily_ohlcv, "
+            "stock_master_snapshot_items, stock_master_snapshot, stock_master "
+            "RESTART IDENTITY"
         )
         cur.execute(
             "DELETE FROM sync_checkpoints WHERE sync_name = %s",
@@ -1159,7 +1202,7 @@ def _upsert_rows(*, local_conn: Any, spec: TableSyncSpec, rows: list[tuple[Any, 
     assignments = ", ".join(f"{column} = EXCLUDED.{column}" for column in spec.update_columns)
     insert_columns = ", ".join(spec.insert_columns)
     conflict_columns = ", ".join(spec.conflict_columns)
-    values = [row[: len(spec.insert_columns)] for row in rows]
+    values = [_adapt_insert_row(spec=spec, row=row) for row in rows]
 
     statement = (
         f"INSERT INTO {spec.name} ({insert_columns}) "
@@ -1179,6 +1222,22 @@ def _upsert_rows(*, local_conn: Any, spec: TableSyncSpec, rows: list[tuple[Any, 
     except Exception:
         local_conn.rollback()
         raise
+
+
+def _adapt_insert_row(*, spec: TableSyncSpec, row: tuple[Any, ...]) -> tuple[Any, ...]:
+    """Adapt row values that need psycopg2 wrappers before ``execute_values``."""
+    values = row[: len(spec.insert_columns)]
+    if not spec.json_columns:
+        return values
+
+    json_columns = set(spec.json_columns)
+    adapted: list[Any] = []
+    for column, value in zip(spec.insert_columns, values, strict=True):
+        if column in json_columns and isinstance(value, (dict, list)):
+            adapted.append(psycopg2.extras.Json(value))
+        else:
+            adapted.append(value)
+    return tuple(adapted)
 
 
 @contextlib.contextmanager

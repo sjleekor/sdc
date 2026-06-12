@@ -1075,6 +1075,29 @@ class PostgresStorage:
                 )
                 return {row[0]: int(row[1]) for row in cur.fetchall()}
 
+    def get_krx_security_flow_metric_max_dates(
+        self,
+        metric_codes: list[str],
+        source: Source,
+    ) -> dict[str, date]:
+        """Return latest stored trade_date by KRX security-flow metric code."""
+        if not metric_codes:
+            return {}
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT metric_code, MAX(trade_date)
+                    FROM krx_security_flow_raw
+                    WHERE metric_code = ANY(%s)
+                      AND source = %s
+                    GROUP BY metric_code
+                    """,
+                    (metric_codes, source.value),
+                )
+                return {row[0]: row[1] for row in cur.fetchall() if row[1] is not None}
+
     def upsert_operating_source_documents(
         self,
         records: list[OperatingSourceDocument],
@@ -2918,3 +2941,23 @@ class PostgresStorage:
         if not row or row[0] is None or row[1] is None:
             return None
         return row[0], row[1]
+
+    def get_latest_daily_price_date(
+        self,
+        tickers: list[str] | None = None,
+    ) -> date | None:
+        """Return the latest stored daily OHLCV trade date for selected tickers."""
+        params: list[object] = []
+        where_clause = ""
+        if tickers:
+            where_clause = "WHERE ticker = ANY(%s)"
+            params.append(tickers)
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT MAX(trade_date) FROM daily_ohlcv {where_clause}", params)
+                row = cur.fetchone()
+
+        if not row or row[0] is None:
+            return None
+        return row[0]

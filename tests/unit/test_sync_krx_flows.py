@@ -13,7 +13,10 @@ from krx_collector.domain.models import (
     Stock,
     UpsertResult,
 )
-from krx_collector.service.sync_krx_flows import sync_krx_security_flows
+from krx_collector.service.sync_krx_flows import (
+    resolve_incremental_flow_range,
+    sync_krx_security_flows,
+)
 
 KST = timezone(timedelta(hours=9))
 
@@ -117,6 +120,16 @@ class MockFlowStorage:
         self.investor_counts: dict[str, int] = {}
         self.shorting_counts: dict[str, int] = {}
         self.count_sources: list[Source] = []
+        self.latest_price_date: date | None = date(2026, 4, 17)
+        self.metric_max_dates: dict[str, date] = {
+            "foreign_holding_shares": date(2026, 4, 17),
+            "institution_net_buy_volume": date(2026, 4, 17),
+            "individual_net_buy_volume": date(2026, 4, 17),
+            "foreign_net_buy_volume": date(2026, 4, 17),
+            "short_selling_volume": date(2026, 4, 17),
+            "short_selling_value": date(2026, 4, 17),
+            "short_selling_balance_quantity": date(2026, 4, 17),
+        }
 
     def record_run(self, run: IngestionRun) -> None:
         self.runs.append(run)
@@ -172,6 +185,97 @@ class MockFlowStorage:
     ) -> tuple[date, date] | None:
         del tickers
         return date(2026, 4, 16), date(2026, 4, 17)
+
+    def get_latest_daily_price_date(
+        self,
+        tickers: list[str] | None = None,
+    ) -> date | None:
+        del tickers
+        return self.latest_price_date
+
+    def get_krx_security_flow_metric_max_dates(
+        self,
+        metric_codes: list[str],
+        source: Source,
+    ) -> dict[str, date]:
+        del source
+        return {
+            metric_code: latest_date
+            for metric_code, latest_date in self.metric_max_dates.items()
+            if metric_code in metric_codes
+        }
+
+
+def test_resolve_incremental_flow_range_uses_lagging_metric_group() -> None:
+    resolved = resolve_incremental_flow_range(
+        latest_price_date=date(2026, 6, 10),
+        metric_latest_dates={
+            "foreign_holding_shares": date(2026, 6, 10),
+            "institution_net_buy_volume": date(2026, 5, 21),
+            "individual_net_buy_volume": date(2026, 5, 21),
+            "foreign_net_buy_volume": date(2026, 5, 21),
+            "short_selling_volume": date(2026, 5, 25),
+            "short_selling_value": date(2026, 5, 25),
+            "short_selling_balance_quantity": date(2026, 5, 25),
+        },
+        lookback_days=14,
+    )
+
+    assert resolved.start == date(2026, 5, 22)
+    assert resolved.end == date(2026, 6, 10)
+    assert resolved.latest_flow_date == date(2026, 5, 21)
+    assert resolved.group_latest_dates["investor"] == date(2026, 5, 21)
+    assert resolved.group_lag_days["investor"] == 20
+
+
+def test_resolve_incremental_flow_range_always_rescans_lookback_window() -> None:
+    resolved = resolve_incremental_flow_range(
+        latest_price_date=date(2026, 6, 10),
+        metric_latest_dates={
+            "foreign_holding_shares": date(2026, 6, 10),
+            "institution_net_buy_volume": date(2026, 6, 10),
+            "individual_net_buy_volume": date(2026, 6, 10),
+            "foreign_net_buy_volume": date(2026, 6, 10),
+            "short_selling_volume": date(2026, 6, 10),
+            "short_selling_value": date(2026, 6, 10),
+            "short_selling_balance_quantity": date(2026, 6, 10),
+        },
+        lookback_days=14,
+    )
+
+    assert resolved.start == date(2026, 5, 27)
+    assert resolved.end == date(2026, 6, 10)
+
+
+def test_resolve_incremental_flow_range_rejects_missing_baseline() -> None:
+    with pytest.raises(ValueError, match="missing baseline"):
+        resolve_incremental_flow_range(
+            latest_price_date=date(2026, 6, 10),
+            metric_latest_dates={"foreign_holding_shares": date(2026, 6, 10)},
+            lookback_days=14,
+        )
+
+
+def test_resolve_incremental_flow_range_excludes_groups() -> None:
+    resolved = resolve_incremental_flow_range(
+        latest_price_date=date(2026, 6, 10),
+        metric_latest_dates={
+            "foreign_holding_shares": date(2026, 6, 10),
+            "institution_net_buy_volume": date(2026, 5, 21),
+            "individual_net_buy_volume": date(2026, 5, 21),
+            "foreign_net_buy_volume": date(2026, 5, 21),
+            "short_selling_volume": date(2026, 6, 9),
+            "short_selling_value": date(2026, 6, 9),
+            "short_selling_balance_quantity": date(2026, 6, 9),
+        },
+        lookback_days=14,
+        exclude_groups=["investor"],
+    )
+
+    assert resolved.excluded_groups == ["investor"]
+    assert "investor" not in resolved.group_latest_dates
+    assert resolved.latest_flow_date == date(2026, 6, 9)
+    assert resolved.start == date(2026, 5, 27)
 
 
 def test_sync_krx_security_flows_writes_rows_and_pending_metrics() -> None:
@@ -272,10 +376,39 @@ def test_sync_krx_security_flows_uses_provider_source_for_existing_counts() -> N
     assert storage.runs[0].params["provider_source"] == Source.KRX.value
 
 
+def test_sync_krx_security_flows_records_incremental_params() -> None:
+    storage = MockFlowStorage()
+
+    result = sync_krx_security_flows(
+        provider=MockFlowProvider(),  # type: ignore[arg-type]
+        storage=storage,  # type: ignore[arg-type]
+        start=date(2026, 4, 10),
+        end=date(2026, 4, 17),
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+        run_params_extra={
+            "incremental": True,
+            "resolved_start": "2026-04-10",
+            "resolved_end": "2026-04-17",
+            "lookback_days": 14,
+            "group_latest_dates": {"investor": "2026-04-09"},
+        },
+    )
+
+    assert result.errors == {}
+    params = storage.runs[0].params
+    assert params["incremental"] is True
+    assert params["resolved_start"] == "2026-04-10"
+    assert params["resolved_end"] == "2026-04-17"
+    assert params["lookback_days"] == 14
+    assert params["group_latest_dates"] == {"investor": "2026-04-09"}
+
+
 def test_flows_sync_parser_supports_price_range_mode_without_provider_selection() -> None:
     args = build_parser().parse_args(["flows", "sync", "--use-price-range"])
 
     assert args.use_price_range is True
+    assert args.incremental is False
     assert args.start is None
     assert args.end is None
     assert args.progress_log_interval_seconds == 30.0
@@ -324,6 +457,29 @@ def test_flows_sync_parser_supports_timeout_seconds_suffix() -> None:
     args = build_parser().parse_args(["flows", "sync", "--timeout-seconds", "150s"])
 
     assert args.timeout_seconds == 150.0
+
+
+def test_flows_sync_parser_supports_incremental_options() -> None:
+    args = build_parser().parse_args(
+        [
+            "flows",
+            "sync",
+            "--incremental",
+            "--lookback-days",
+            "14",
+            "--max-auto-range-days",
+            "30",
+            "--allow-large-range",
+            "--exclude-groups",
+            "shorting",
+        ]
+    )
+
+    assert args.incremental is True
+    assert args.lookback_days == 14
+    assert args.max_auto_range_days == 30
+    assert args.allow_large_range is True
+    assert args.exclude_groups == "shorting"
 
 
 def test_flows_sync_parser_rejects_provider_selection() -> None:

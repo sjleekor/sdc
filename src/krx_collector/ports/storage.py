@@ -210,6 +210,14 @@ class Storage(Protocol):
         """Return existing distinct (trade_date, metric_code) counts by ticker."""
         ...
 
+    def get_krx_security_flow_metric_max_dates(
+        self,
+        metric_codes: list[str],
+        source: Source,
+    ) -> dict[str, date]:
+        """Return latest stored trade_date by KRX security-flow metric code."""
+        ...
+
     def upsert_operating_source_documents(
         self,
         records: list[OperatingSourceDocument],
@@ -548,4 +556,11 @@ class Storage(Protocol):
             ``(min_trade_date, max_trade_date)`` or ``None`` when no price
             rows exist for the selection.
         """
+        ...
+
+    def get_latest_daily_price_date(
+        self,
+        tickers: list[str] | None = None,
+    ) -> date | None:
+        """Return the latest stored daily OHLCV trade_date for selected tickers."""
         ...
