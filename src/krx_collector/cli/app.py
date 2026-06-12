@@ -748,12 +748,16 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
 
     storage = PostgresStorage(settings.db_dsn)
     run_params_extra: dict[str, object] | None = None
+    enabled_flow_groups: list[str] | None = None
 
     if args.incremental:
         metric_codes = sorted(
             {metric for metrics in FLOW_METRIC_GROUPS.values() for metric in metrics}
         )
         exclude_groups = _split_csv(args.exclude_groups) or []
+        enabled_flow_groups = [
+            group for group in sorted(FLOW_METRIC_GROUPS) if group not in set(exclude_groups)
+        ]
         try:
             incremental_range = resolve_incremental_flow_range(
                 latest_price_date=storage.get_latest_daily_price_date(tickers=tickers),
@@ -872,6 +876,7 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
         progress_log_every_items=args.progress_log_every_items,
         randomize_request_order=not args.ordered_requests,
         run_params_extra=run_params_extra,
+        enabled_flow_groups=enabled_flow_groups,
     )
 
     if result.errors:

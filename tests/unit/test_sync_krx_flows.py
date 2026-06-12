@@ -404,6 +404,29 @@ def test_sync_krx_security_flows_records_incremental_params() -> None:
     assert params["group_latest_dates"] == {"investor": "2026-04-09"}
 
 
+def test_sync_krx_security_flows_honors_enabled_flow_groups() -> None:
+    storage = MockFlowStorage()
+    provider = MockFlowProvider()
+
+    result = sync_krx_security_flows(
+        provider=provider,  # type: ignore[arg-type]
+        storage=storage,  # type: ignore[arg-type]
+        start=date(2026, 4, 17),
+        end=date(2026, 4, 17),
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+        enabled_flow_groups=["foreign_holding"],
+    )
+
+    assert result.errors == {}
+    assert result.requests_attempted == 1
+    assert provider.foreign_calls == 1
+    assert provider.investor_calls == 0
+    assert provider.shorting_calls == 0
+    assert storage.count_sources == [Source.KRX]
+    assert storage.runs[0].params["enabled_flow_groups"] == ["foreign_holding"]
+
+
 def test_flows_sync_parser_supports_price_range_mode_without_provider_selection() -> None:
     args = build_parser().parse_args(["flows", "sync", "--use-price-range"])
 

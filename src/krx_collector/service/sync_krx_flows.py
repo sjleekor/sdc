@@ -310,9 +310,18 @@ def sync_krx_security_flows(
     progress_log_every_items: int = DEFAULT_PROGRESS_LOG_EVERY_ITEMS,
     randomize_request_order: bool = True,
     run_params_extra: dict[str, object] | None = None,
+    enabled_flow_groups: list[str] | None = None,
 ) -> KrxFlowSyncResult:
     """Synchronise daily investor/shorting/ownership raw metrics."""
     provider_source = provider.source()
+    enabled_groups = sorted(set(enabled_flow_groups or FLOW_METRIC_GROUPS.keys()))
+    unknown_enabled_groups = sorted(set(enabled_groups) - set(FLOW_METRIC_GROUPS))
+    if unknown_enabled_groups:
+        supported = ", ".join(sorted(FLOW_METRIC_GROUPS))
+        raise ValueError(
+            f"Unknown enabled flow group(s): {', '.join(unknown_enabled_groups)} "
+            f"(supported: {supported})"
+        )
     run_params: dict[str, object] = {
         "start": start.isoformat(),
         "end": end.isoformat(),
@@ -322,6 +331,7 @@ def sync_krx_security_flows(
         "progress_log_every_items": progress_log_every_items,
         "randomize_request_order": randomize_request_order,
         "provider_source": provider_source.value,
+        "enabled_flow_groups": enabled_groups,
     }
     if run_params_extra:
         run_params.update(run_params_extra)
@@ -364,26 +374,38 @@ def sync_krx_security_flows(
         logger.info("Flow sync existing coverage check started.")
 
         target_tickers = [stock.ticker for stock in targets]
-        foreign_ticker_counts = storage.count_krx_security_flow_daily_market_tickers(
-            start=start,
-            end=end,
-            tickers=target_tickers,
-            metric_code=FOREIGN_HOLDING_METRIC,
-            source=provider_source,
+        foreign_ticker_counts = (
+            storage.count_krx_security_flow_daily_market_tickers(
+                start=start,
+                end=end,
+                tickers=target_tickers,
+                metric_code=FOREIGN_HOLDING_METRIC,
+                source=provider_source,
+            )
+            if "foreign_holding" in enabled_groups
+            else {}
         )
-        investor_metric_counts = storage.count_krx_security_flow_ticker_metric_dates(
-            start=start,
-            end=end,
-            tickers=target_tickers,
-            metric_codes=INVESTOR_METRICS,
-            source=provider_source,
+        investor_metric_counts = (
+            storage.count_krx_security_flow_ticker_metric_dates(
+                start=start,
+                end=end,
+                tickers=target_tickers,
+                metric_codes=INVESTOR_METRICS,
+                source=provider_source,
+            )
+            if "investor" in enabled_groups
+            else {}
         )
-        shorting_metric_counts = storage.count_krx_security_flow_ticker_metric_dates(
-            start=start,
-            end=end,
-            tickers=target_tickers,
-            metric_codes=SHORTING_METRICS,
-            source=provider_source,
+        shorting_metric_counts = (
+            storage.count_krx_security_flow_ticker_metric_dates(
+                start=start,
+                end=end,
+                tickers=target_tickers,
+                metric_codes=SHORTING_METRICS,
+                source=provider_source,
+            )
+            if "shorting" in enabled_groups
+            else {}
         )
         investor_expected_count = len(trading_days) * len(INVESTOR_METRICS)
         shorting_expected_count = len(trading_days) * len(SHORTING_METRICS)
@@ -397,7 +419,11 @@ def sync_krx_security_flows(
             for ticker, count in shorting_metric_counts.items()
             if count >= shorting_expected_count
         }
-        foreign_total_market_days = len(trading_days) * len(stocks_by_market)
+        foreign_total_market_days = (
+            len(trading_days) * len(stocks_by_market)
+            if "foreign_holding" in enabled_groups
+            else 0
+        )
         foreign_completed_market_days = sum(
             1
             for trade_date in trading_days
@@ -424,11 +450,15 @@ def sync_krx_security_flows(
         rng = random.SystemRandom()
 
         foreign_processed = 0
-        foreign_work = [
-            (trade_date, market_stocks)
-            for trade_date in trading_days
-            for market_stocks in stocks_by_market.values()
-        ]
+        foreign_work = (
+            [
+                (trade_date, market_stocks)
+                for trade_date in trading_days
+                for market_stocks in stocks_by_market.values()
+            ]
+            if "foreign_holding" in enabled_groups
+            else []
+        )
         if randomize_request_order and len(foreign_work) > 1:
             rng.shuffle(foreign_work)
         progress.start_phase(
@@ -503,15 +533,20 @@ def sync_krx_security_flows(
                 current=current,
             )
 
-        ticker_metric_total = len(targets) * 2
-        ticker_metric_processed = 0
-        ticker_metric_work = [
-            (stock, "investor", provider.fetch_investor_net_volume)
-            for stock in targets
-        ] + [
-            (stock, "shorting", provider.fetch_shorting_metrics)
-            for stock in targets
+        ticker_metric_groups = [
+            group for group in ("investor", "shorting") if group in enabled_groups
         ]
+        ticker_metric_total = len(targets) * len(ticker_metric_groups)
+        ticker_metric_processed = 0
+        ticker_metric_work = []
+        if "investor" in enabled_groups:
+            ticker_metric_work.extend(
+                (stock, "investor", provider.fetch_investor_net_volume) for stock in targets
+            )
+        if "shorting" in enabled_groups:
+            ticker_metric_work.extend(
+                (stock, "shorting", provider.fetch_shorting_metrics) for stock in targets
+            )
         if randomize_request_order and len(ticker_metric_work) > 1:
             rng.shuffle(ticker_metric_work)
         progress.start_phase(
