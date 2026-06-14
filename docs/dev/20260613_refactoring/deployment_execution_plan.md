@@ -1,6 +1,9 @@
 # Source wrapper throttling 배포 실행 계획
 
 - 작성일: 2026-06-14 KST
+- 상태: 완료
+- 완료일: 2026-06-14 KST
+- 최종 배포 버전: `v0.8.12`
 - 범위: 목표 1(DB 최신 지점 기반 증분 수집)과 목표 2(source별 wrapper/lock/throttle 분리) 구현분의 운영 배포
 - 관련 계획:
   - `docs/dev/20260613_refactoring/incremental_collection_plan.md`
@@ -315,3 +318,59 @@ Cronicle 전환 후 아래 항목을 확인한다.
 - KRX/PYKRX/OpenDART/FDR/FRED/ECOS wrapper가 source domain별 lock/throttle 로그를 남긴다.
 - `common-build-daily.sh`는 `ops assert-common-freshness` 통과 없이 build를 수행하지 않는다.
 - `pykrx` common source는 wrapper만 준비되고 기본 Cronicle 활성화/필수 source에서는 제외되어 있다.
+
+## 13. 실행 결과
+
+2026-06-14 KST에 배포와 Cronicle 전환을 완료했다.
+
+초기 계획의 목표 release는 `v0.8.11`이었으나, 운영 smoke 중 `ops assert-common-freshness`가 실제 원천 데이터 지연을 감지했다. 원인은 구현 누락이 아니라 per-series stale window가 실제 운영 지연보다 좁았던 것으로 확인했다. 이에 따라 `commodity_wti_fred`와 `macro_m2`의 `max_stale_business_days`를 조정한 hotfix를 포함해 최종 배포 버전은 `v0.8.12`가 되었다.
+
+Release/deploy 기록:
+
+- `v0.8.11`: 최초 source wrapper throttling 배포 release
+- `v0.8.12`: freshness guard per-series stale window hotfix release
+- `e8c097c`: `release: v0.8.12`
+- `fcb61e3`: `deploy: use sdc v0.8.12`
+- sj2-server `/home/whi/apps/sdc/compose.yaml` collector image: `ghcr.io/sjleekor/sdc:v0.8.12`
+- sj2-server에 `deploy/prod/bin/` wrapper tree와 `lib/sdc-wrapper.sh` 동기화 완료
+- GHCR `ghcr.io/sjleekor/sdc:v0.8.12` publish 및 sj2-server pull 완료
+
+운영 smoke 결과:
+
+- `common-seed-catalog.sh`: 완료
+- source별 common sync 수동 실행 완료: `FDR`, `FRED`, `ECOS daily`, `ECOS macro`, `KRX`
+- `ops assert-common-freshness --sources fdr,fred,ecos,krx`: 통과
+- `common-build-daily.sh`: 통과
+  - features processed: 37
+  - facts built: 2849
+  - facts upserted: 849
+- `common-coverage-report.sh`: 통과, active common feature coverage `1.0000`
+- `common-readiness-check.sh`: 통과, PIT violation 0
+
+Cronicle 전환 결과:
+
+- 신규 source별 event 17개 생성 완료
+- 기존 통합 event 3개 비활성화 완료
+  - `sdc_daily_pipeline`
+  - `sdc_daily_accounts_flows`
+  - `sdc_daily_common_features`
+- `sdc_daily_pykrx_common`은 계획대로 `enabled=0`, `timing=false` 유지
+- 신규 event smoke 완료
+  - `sdc_daily_fdr_common`: 수동 실행 성공
+  - `sdc_daily_common_build` -> `sdc_daily_common_coverage` -> `sdc_daily_common_readiness`: chain 실행 성공
+- root event timing 활성화 완료
+  - `sdc_daily_fdr_universe`: 평일 18:30 KST
+  - `sdc_daily_fdr_common`: 평일 20:30 KST
+  - `sdc_daily_fred_common`: 평일 20:30 KST
+  - `sdc_daily_ecos_common_daily`: 평일 20:30 KST
+  - `sdc_daily_krx_common`: 평일 21:30 KST
+  - `sdc_daily_common_build`: 평일 22:30 KST
+  - `sdc_daily_opendart_corp`: 매일 04:00 KST
+
+최종 확인:
+
+- 기존 통합 Cronicle event는 `enabled=0`
+- 신규 root event만 timing 활성화
+- chain child event는 `enabled=1`, `timing=false`
+- `sdc_daily_pykrx_common`은 optional 상태로 비활성
+- `git status --short`: clean

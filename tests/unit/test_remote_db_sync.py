@@ -12,14 +12,22 @@ from krx_collector.infra.db_postgres.remote_sync import (
     _copy_status_row_count,
     _daily_ohlcv_checkpoint_payload,
     _effective_daily_ohlcv_batch_size,
+    _prune_missing_rows,
+    _row_conflict_key,
     _select_required_public_tables,
     _select_resume_cursor,
+    _select_sync_specs,
     _sort_tables_by_fk_dependencies,
+    _upsert_rows,
     _validate_full_database_table_sets,
+    _validate_no_external_fk_children,
+    _validate_prune_external_fk_children,
     load_remote_db_info,
     reset_local_public_tables,
     sync_remote_tables_to_local,
+    validate_remote_sync_options,
 )
+from krx_collector.service import sync_local_db
 
 
 def test_load_remote_db_info_parses_expected_fields(tmp_path: Path) -> None:
@@ -79,15 +87,191 @@ def test_all_tables_sync_requires_full_refresh() -> None:
         )
 
 
-def test_security_flow_raw_is_in_incremental_and_all_tables_sync() -> None:
+def test_sync_options_reject_all_tables_with_explicit_tables() -> None:
+    with pytest.raises(ValueError, match="cannot be combined"):
+        validate_remote_sync_options(
+            batch_size=1000,
+            full_refresh=True,
+            all_tables=True,
+            tables=("daily_ohlcv",),
+        )
+
+
+def test_service_validates_before_full_refresh_reset(monkeypatch, tmp_path: Path) -> None:
+    def fail_if_reset(_local_dsn: str) -> int:
+        raise AssertionError("reset should not run before validation")
+
+    monkeypatch.setattr(sync_local_db, "reset_local_public_tables", fail_if_reset)
+
+    result = sync_local_db.sync_remote_db_to_local(
+        local_dsn="postgresql://local",
+        remote_db_info_path=tmp_path / "missing-db-info",
+        batch_size=1000,
+        full_refresh=True,
+        all_tables=True,
+        tables=("daily_ohlcv",),
+    )
+
+    assert result.error == "all_tables sync cannot be combined with explicit tables"
+
+
+def test_managed_mirror_tables_exclude_local_audit_tables() -> None:
+    pipeline_names = [table.name for table in PIPELINE_FULL_REFRESH_TABLES]
+    spec_names = [spec.name for spec in SYNC_TABLE_SPECS]
+
+    assert len(pipeline_names) == 19
+    assert pipeline_names == spec_names
+    assert "ingestion_runs" not in pipeline_names
+    assert "sync_checkpoints" not in pipeline_names
+    assert "krx_security_flow_raw" in pipeline_names
+    assert "common_feature_daily_fact" in pipeline_names
+
+
+def test_security_flow_raw_uses_update_aware_incremental_cursor() -> None:
     pipeline_names = [table.name for table in PIPELINE_FULL_REFRESH_TABLES]
     assert "krx_security_flow_raw" in pipeline_names
 
     spec = next(spec for spec in SYNC_TABLE_SPECS if spec.name == "krx_security_flow_raw")
-    assert spec.order_columns == ("raw_id",)
-    assert spec.cursor_indexes == (0,)
+    assert spec.order_columns == ("fetched_at", "raw_id")
+    assert spec.cursor_indexes == (9, 0)
     assert spec.conflict_columns == ("trade_date", "ticker", "market", "metric_code", "source")
     assert spec.json_columns == ("raw_payload",)
+
+
+def test_partial_sync_includes_fk_dependency_closure() -> None:
+    selected_names = [
+        spec.name for spec in _select_sync_specs(("stock_metric_fact", "common_feature_daily_fact"))
+    ]
+
+    assert selected_names == [
+        "metric_catalog",
+        "metric_mapping_rule",
+        "stock_metric_fact",
+        "common_feature_catalog",
+        "common_feature_daily_fact",
+    ]
+
+
+def test_partial_sync_rejects_unknown_table() -> None:
+    with pytest.raises(ValueError, match="Unsupported sync table"):
+        _select_sync_specs(("missing_table",))
+
+
+def test_special_common_feature_specs_cover_conflict_edge_cases() -> None:
+    observation_spec = next(
+        spec for spec in SYNC_TABLE_SPECS if spec.name == "common_feature_observation_raw"
+    )
+    input_spec = next(
+        spec for spec in SYNC_TABLE_SPECS if spec.name == "common_feature_catalog_input"
+    )
+
+    assert observation_spec.conflict_constraint == "uq_common_feature_observation_raw"
+    assert input_spec.update_columns == ()
+    assert input_spec.do_nothing_when_no_update_columns is True
+    assert input_spec.always_full_scan is True
+    assert input_spec.prune_missing_after_full_scan is True
+
+
+def test_small_catalog_specs_are_full_scan_pruned() -> None:
+    pruned_specs = {
+        spec.name
+        for spec in SYNC_TABLE_SPECS
+        if spec.prune_missing_after_full_scan
+    }
+
+    assert {
+        "stock_master",
+        "stock_master_snapshot",
+        "stock_master_snapshot_items",
+        "metric_catalog",
+        "metric_mapping_rule",
+        "common_feature_series",
+        "common_feature_catalog",
+        "common_feature_catalog_input",
+    }.issubset(pruned_specs)
+
+
+def test_raw_upsert_preserves_remote_surrogate_id(monkeypatch) -> None:
+    spec = next(spec for spec in SYNC_TABLE_SPECS if spec.name == "krx_security_flow_raw")
+    cursor = _FakeCursor([])
+    connection = _FakeConnection(cursor)
+    captured: dict[str, object] = {}
+
+    def fake_execute_values(cur, statement, values, page_size) -> None:
+        captured["cursor"] = cur
+        captured["statement"] = statement
+        captured["values"] = values
+        captured["page_size"] = page_size
+
+    monkeypatch.setattr(remote_sync.psycopg2.extras, "execute_values", fake_execute_values)
+
+    _upsert_rows(
+        local_conn=connection,
+        spec=spec,
+        rows=[
+            (
+                10,
+                date(2026, 4, 17),
+                "005930",
+                "KOSPI",
+                "foreign_net_buy_volume",
+                "외국인 순매수 수량",
+                123,
+                "shares",
+                "KRX",
+                datetime(2026, 4, 18, 0, 0, tzinfo=UTC),
+                {"raw": "payload"},
+            )
+        ],
+    )
+
+    assert spec.preserve_remote_surrogate_columns == ("raw_id",)
+    assert "raw_id = EXCLUDED.raw_id" in captured["statement"]
+    assert connection.commits == 1
+
+
+def test_prune_missing_rows_uses_temp_key_table_for_large_key_sets(monkeypatch) -> None:
+    spec = next(spec for spec in SYNC_TABLE_SPECS if spec.name == "common_feature_catalog_input")
+    keys = {(f"feature_{index:04d}", f"series_{index:04d}", "primary") for index in range(1001)}
+    cursor = _FakeCursor([])
+    connection = _FakeConnection(cursor)
+    captured: dict[str, object] = {"calls": []}
+
+    def fake_execute_values(cur, statement, values, page_size) -> None:
+        captured["calls"].append(
+            {
+                "cursor": cur,
+                "statement": statement,
+                "values": values,
+                "page_size": page_size,
+            }
+        )
+
+    monkeypatch.setattr(remote_sync.psycopg2.extras, "execute_values", fake_execute_values)
+
+    row = ("feature_a", "series_a", "primary")
+    assert _row_conflict_key(spec=spec, row=row) == row
+
+    _prune_missing_rows(local_conn=connection, spec=spec, keys=keys)
+
+    execute_values_calls = captured["calls"]
+    assert len(execute_values_calls) == 1
+    assert execute_values_calls[0]["statement"] == (
+        "INSERT INTO remote_sync_prune_keys (feature_code, series_id, role) VALUES %s"
+    )
+    assert set(execute_values_calls[0]["values"]) == keys
+    assert execute_values_calls[0]["page_size"] == 1000
+    statements = [statement for statement, _params in cursor.executed]
+    assert any(
+        "CREATE TEMP TABLE remote_sync_prune_keys ON COMMIT DROP" in statement
+        for statement in statements
+    )
+    assert any(
+        "DELETE FROM common_feature_catalog_input AS target" in statement
+        for statement in statements
+    )
+    assert not any("FROM (VALUES" in statement for statement in statements)
+    assert connection.commits == 1
 
 
 def test_security_flow_raw_json_payload_is_adapted_for_execute_values() -> None:
@@ -171,6 +355,34 @@ def test_sort_tables_by_fk_dependencies_copies_parents_first() -> None:
     assert set(ordered) == {parent, child, unrelated}
 
 
+def test_full_refresh_subset_rejects_external_fk_children() -> None:
+    parent = DatabaseTable(schema="public", name="metric_catalog")
+    child = DatabaseTable(schema="public", name="metric_mapping_rule")
+
+    with pytest.raises(ValueError, match="Unsafe full-refresh table subset"):
+        _validate_no_external_fk_children(tables=(parent,), dependencies=((child, parent),))
+
+    _validate_no_external_fk_children(tables=(parent, child), dependencies=((child, parent),))
+
+
+def test_pruning_subset_rejects_external_fk_children() -> None:
+    parent = DatabaseTable(schema="public", name="metric_catalog")
+    child = DatabaseTable(schema="public", name="metric_mapping_rule")
+    parent_spec = next(spec for spec in SYNC_TABLE_SPECS if spec.name == "metric_catalog")
+    child_spec = next(spec for spec in SYNC_TABLE_SPECS if spec.name == "metric_mapping_rule")
+
+    with pytest.raises(ValueError, match="Unsafe pruning table subset"):
+        _validate_prune_external_fk_children(
+            specs=(parent_spec,),
+            dependencies=((child, parent),),
+        )
+
+    _validate_prune_external_fk_children(
+        specs=(parent_spec, child_spec),
+        dependencies=((child, parent),),
+    )
+
+
 def test_copy_status_row_count_parses_copy_status() -> None:
     assert _copy_status_row_count("COPY 123") == 123
     assert _copy_status_row_count("") is None
@@ -236,9 +448,17 @@ class _FakeConnection:
         self._cursor = cursor
         self.autocommit = False
         self.closed = False
+        self.commits = 0
+        self.rollbacks = 0
 
     def cursor(self) -> _FakeCursor:
         return self._cursor
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
 
     def close(self) -> None:
         self.closed = True

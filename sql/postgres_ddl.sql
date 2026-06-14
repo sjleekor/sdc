@@ -115,6 +115,9 @@ CREATE TABLE IF NOT EXISTS dart_corp_master (
 CREATE INDEX IF NOT EXISTS ix_dart_corp_master_ticker
     ON dart_corp_master (ticker);
 
+CREATE INDEX IF NOT EXISTS ix_dart_corp_master_sync_cursor
+    ON dart_corp_master (updated_at, corp_code);
+
 -- 8) dart_financial_statement_raw ─ raw rows from fnlttSinglAcntAll / XBRL facts
 CREATE TABLE IF NOT EXISTS dart_financial_statement_raw (
     raw_id               BIGSERIAL   PRIMARY KEY,
@@ -150,6 +153,9 @@ CREATE TABLE IF NOT EXISTS dart_financial_statement_raw (
 
 CREATE INDEX IF NOT EXISTS ix_dart_financial_statement_raw_lookup
     ON dart_financial_statement_raw (ticker, bsns_year, reprt_code, fs_div, sj_div);
+
+CREATE INDEX IF NOT EXISTS ix_dart_financial_statement_raw_sync_cursor
+    ON dart_financial_statement_raw (fetched_at, raw_id);
 
 ALTER TABLE dart_financial_statement_raw
     ADD COLUMN IF NOT EXISTS sj_nm TEXT NOT NULL DEFAULT '';
@@ -232,6 +238,9 @@ CREATE TABLE IF NOT EXISTS dart_share_count_raw (
 
 CREATE INDEX IF NOT EXISTS ix_dart_share_count_raw_lookup
     ON dart_share_count_raw (ticker, bsns_year, reprt_code);
+
+CREATE INDEX IF NOT EXISTS ix_dart_share_count_raw_sync_cursor
+    ON dart_share_count_raw (fetched_at, raw_id);
 
 ALTER TABLE dart_share_count_raw
     ADD COLUMN IF NOT EXISTS corp_cls TEXT NOT NULL DEFAULT '';
@@ -327,6 +336,9 @@ CREATE TABLE IF NOT EXISTS dart_shareholder_return_raw (
 CREATE INDEX IF NOT EXISTS ix_dart_shareholder_return_raw_lookup
     ON dart_shareholder_return_raw (ticker, bsns_year, reprt_code, statement_type);
 
+CREATE INDEX IF NOT EXISTS ix_dart_shareholder_return_raw_sync_cursor
+    ON dart_shareholder_return_raw (fetched_at, raw_id);
+
 ALTER TABLE dart_shareholder_return_raw
     ADD COLUMN IF NOT EXISTS row_name TEXT NOT NULL DEFAULT '';
 ALTER TABLE dart_shareholder_return_raw
@@ -404,6 +416,9 @@ CREATE TABLE IF NOT EXISTS dart_xbrl_document (
 CREATE INDEX IF NOT EXISTS ix_dart_xbrl_document_lookup
     ON dart_xbrl_document (ticker, bsns_year, reprt_code);
 
+CREATE INDEX IF NOT EXISTS ix_dart_xbrl_document_sync_cursor
+    ON dart_xbrl_document (fetched_at, document_id);
+
 ALTER TABLE dart_xbrl_document
     ADD COLUMN IF NOT EXISTS zip_entry_count INT NOT NULL DEFAULT 0;
 ALTER TABLE dart_xbrl_document
@@ -446,6 +461,9 @@ CREATE TABLE IF NOT EXISTS dart_xbrl_fact_raw (
 
 CREATE INDEX IF NOT EXISTS ix_dart_xbrl_fact_raw_lookup
     ON dart_xbrl_fact_raw (ticker, bsns_year, reprt_code, concept_id);
+
+CREATE INDEX IF NOT EXISTS ix_dart_xbrl_fact_raw_sync_cursor
+    ON dart_xbrl_fact_raw (fetched_at, raw_id);
 
 ALTER TABLE dart_xbrl_fact_raw
     ADD COLUMN IF NOT EXISTS concept_name TEXT NOT NULL DEFAULT '';
@@ -491,6 +509,9 @@ CREATE TABLE IF NOT EXISTS metric_catalog (
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE INDEX IF NOT EXISTS ix_metric_catalog_sync_cursor
+    ON metric_catalog (updated_at, metric_code);
+
 -- 14) metric_mapping_rule ─ active raw-to-canonical mapping rules
 CREATE TABLE IF NOT EXISTS metric_mapping_rule (
     rule_code        TEXT        PRIMARY KEY,
@@ -515,6 +536,9 @@ CREATE TABLE IF NOT EXISTS metric_mapping_rule (
 
 CREATE INDEX IF NOT EXISTS ix_metric_mapping_rule_metric
     ON metric_mapping_rule (metric_code, source_table, priority);
+
+CREATE INDEX IF NOT EXISTS ix_metric_mapping_rule_sync_cursor
+    ON metric_mapping_rule (updated_at, rule_code);
 
 -- 15) stock_metric_fact ─ normalized canonical metric facts
 CREATE TABLE IF NOT EXISTS stock_metric_fact (
@@ -543,6 +567,9 @@ CREATE TABLE IF NOT EXISTS stock_metric_fact (
 CREATE INDEX IF NOT EXISTS ix_stock_metric_fact_lookup
     ON stock_metric_fact (ticker, metric_code, bsns_year DESC, reprt_code);
 
+CREATE INDEX IF NOT EXISTS ix_stock_metric_fact_sync_cursor
+    ON stock_metric_fact (updated_at, fact_id);
+
 -- 16) krx_security_flow_raw ─ daily investor/short-selling/borrow flow metrics
 CREATE TABLE IF NOT EXISTS krx_security_flow_raw (
     raw_id               BIGSERIAL   PRIMARY KEY,
@@ -561,6 +588,9 @@ CREATE TABLE IF NOT EXISTS krx_security_flow_raw (
 
 CREATE INDEX IF NOT EXISTS ix_krx_security_flow_raw_lookup
     ON krx_security_flow_raw (ticker, market, trade_date DESC);
+
+CREATE INDEX IF NOT EXISTS ix_krx_security_flow_raw_sync_cursor
+    ON krx_security_flow_raw (fetched_at, raw_id);
 
 -- 17) operating_source_document ─ provenance for sector-specific KPI extraction
 CREATE TABLE IF NOT EXISTS operating_source_document (
@@ -640,6 +670,9 @@ CREATE TABLE IF NOT EXISTS common_feature_series (
 CREATE INDEX IF NOT EXISTS ix_common_feature_series_source_active
     ON common_feature_series (source, active, series_id);
 
+CREATE INDEX IF NOT EXISTS ix_common_feature_series_sync_cursor
+    ON common_feature_series (updated_at, series_id);
+
 -- 20) common_feature_observation_raw ─ raw source observations with PIT availability
 CREATE TABLE IF NOT EXISTS common_feature_observation_raw (
     raw_id                BIGSERIAL   PRIMARY KEY,
@@ -678,6 +711,9 @@ CREATE INDEX IF NOT EXISTS ix_common_feature_observation_lookup
 CREATE INDEX IF NOT EXISTS ix_common_feature_observation_date
     ON common_feature_observation_raw (series_id, observation_date DESC);
 
+CREATE INDEX IF NOT EXISTS ix_common_feature_observation_sync_cursor
+    ON common_feature_observation_raw (fetched_at, raw_id);
+
 -- 21) common_feature_catalog ─ model-facing feature catalog
 CREATE TABLE IF NOT EXISTS common_feature_catalog (
     feature_code          TEXT        PRIMARY KEY,
@@ -690,6 +726,9 @@ CREATE TABLE IF NOT EXISTS common_feature_catalog (
     active                BOOLEAN     NOT NULL DEFAULT TRUE,
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS ix_common_feature_catalog_sync_cursor
+    ON common_feature_catalog (updated_at, feature_code);
 
 -- 22) common_feature_catalog_input ─ feature to raw-series link table
 CREATE TABLE IF NOT EXISTS common_feature_catalog_input (
@@ -721,6 +760,9 @@ CREATE TABLE IF NOT EXISTS common_feature_daily_fact (
 
 CREATE INDEX IF NOT EXISTS ix_common_feature_daily_fact_lookup
     ON common_feature_daily_fact (feature_code, feature_date DESC);
+
+CREATE INDEX IF NOT EXISTS ix_common_feature_daily_fact_sync_cursor
+    ON common_feature_daily_fact (generated_at, feature_date, feature_code);
 
 -- =============================================================================
 -- Future extension: intraday_ohlcv (OUT OF SCOPE)

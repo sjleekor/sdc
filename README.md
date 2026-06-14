@@ -6,9 +6,10 @@
 2. pykrx를 사용하여 상장일로부터 **종목별 일봉(OHLCV) 이력 데이터를 수집**합니다.
 3. [OpenDART](https://opendart.fss.or.kr)를 사용하여 **재무제표 / 주식수 / 배당 / 자사주 raw 값과 XBRL fact**를 수집합니다.
 4. KRX MDC 소스를 직접 호출하여 **일자별 수급 raw**(투자자별 순매수, 공매도 등)를 수집합니다.
-5. 공시 원문 기반 **섹터별 사업 KPI extractor 프레임워크**를 제공합니다 (파일럿: 조선/방산 수주).
-6. raw 테이블과 별도로 `metric_catalog` / `metric_mapping_rule` / `stock_metric_fact` 기반 **canonical metric 정규화 계층**을 운영합니다.
-7. 깔끔한 포트/어댑터(Ports & Adapters) 아키텍처를 적용하여 **PostgreSQL에 모든 데이터를 저장**합니다. 핵심 로직의 리팩토링 없이 향후 파일 기반 저장소(CSV / Parquet)로 확장할 수 있도록 설계되었습니다.
+5. FDR / pykrx / KRX / ECOS / FRED 기반 **공통 시장·거시 feature raw와 일자별 fact**를 수집·생성합니다.
+6. 공시 원문 기반 **섹터별 사업 KPI extractor 프레임워크**를 제공합니다 (파일럿: 조선/방산 수주).
+7. raw 테이블과 별도로 `metric_catalog` / `metric_mapping_rule` / `stock_metric_fact` 기반 **canonical metric 정규화 계층**을 운영합니다.
+8. 깔끔한 포트/어댑터(Ports & Adapters) 아키텍처를 적용하여 **PostgreSQL에 모든 데이터를 저장**합니다. 핵심 로직의 리팩토링 없이 향후 파일 기반 저장소(CSV / Parquet)로 확장할 수 있도록 설계되었습니다.
 
 ## 목표 제외 범위 (현재 스코프)
 
@@ -34,6 +35,7 @@ cp .env.example .env
 # .env 파일을 열어 데이터베이스 계정 정보 및 설정을 수정하세요
 # `dart` 계열 명령은 OPENDART_API_KEY 또는 OPENDART_API_KEYS가 반드시 설정되어야 동작합니다
 # `metrics` 계열 명령은 별도 API 호출 없이 이미 적재된 raw 데이터를 정규화합니다
+# `common sync --sources ecos/fred`는 ECOS_API_KEY / FRED_API_KEY가 필요합니다
 
 # 3. 데이터베이스 스키마 초기화
 uv run krx-collector db init
@@ -104,10 +106,34 @@ uv run krx-collector flows sync --incremental --lookback-days 14
 
 `flows sync`는 KRX MDC JSON endpoint를 직접 호출합니다. 적재 row의 `source` 컬럼은 `KRX`로 기록됩니다. KRX MDC가 비로그인 응답을 거부하면 `.env`의 `KRX_ID` / `KRX_PW` 자격증명으로 자동 로그인 후 재시도합니다.
 
+### 공통 시장 / 거시 feature
+
+공통 feature 계층은 source별 raw 관측치(`common_feature_observation_raw`)를 적재한 뒤 KRX 거래일 기준 long fact(`common_feature_daily_fact`)를 생성합니다. 첫 실행은 명시적 기간으로 backfill하고, 이후 일일 작업은 `--incremental` / `--lookback-days`로 최근 구간만 갱신합니다.
+
+```bash
+# 14. 공통 feature catalog/series seed
+uv run krx-collector common seed-catalog --init-schema
+
+# 15. 일간 시장 feature raw 적재 (FDR/KRX)
+uv run krx-collector common sync --sources fdr,krx --start 2026-01-01 --end 2026-06-13
+
+# 16. 거시 feature raw 적재 (ECOS/FRED, API key 필요)
+uv run krx-collector common sync --sources ecos,fred --start 2024-01-01 --end 2026-06-13 --force
+
+# 17. KRX 거래일 기준 daily fact 생성
+uv run krx-collector common build-daily --start 2026-01-01 --end 2026-06-13
+
+# 18. 커버리지 및 readiness 리포트
+uv run krx-collector common coverage-report --start 2026-01-01 --end 2026-06-13
+uv run krx-collector common readiness-report --start 2026-01-01 --end 2026-06-13 --fail-on-not-ready
+```
+
+운영 wrapper는 `deploy/prod/bin/common-features-refresh.sh`에 있으며, 기본 흐름과 환경 변수는 [docs/operations.md](docs/operations.md)의 "공통 시장/거시 feature 갱신" 섹션을 참고하세요.
+
 ### 사업 KPI 파일럿 (섹터별 extractor)
 
 ```bash
-# 14. 문서 등록 + 섹터별 extractor로 operating_metric_fact 적재
+# 19. 문서 등록 + 섹터별 extractor로 operating_metric_fact 적재
 uv run krx-collector operating process-document \
   --ticker 009540 \
   --market KOSPI \
@@ -146,6 +172,9 @@ uv run krx-collector operating process-document \
 > - `dart sync-xbrl`: `(corp_code, bsns_year, reprt_code, rcept_no)` XBRL 문서가 있으면 ZIP 다운로드/파싱을 건너뜁니다.
 > - `metrics normalize`: 이미 같은 `(ticker, metric_code, bsns_year, reprt_code)` canonical fact가 있으면 다시 쓰지 않습니다.
 > - `metrics coverage-report`: read-only 리포트라 외부 다운로드와 DB 쓰기를 하지 않습니다.
+> - `common sync`: 명시 기간 실행은 기존 raw coverage가 있으면 건너뛰며, `--force`를 주면 재조회합니다. `--incremental`은 기존 raw baseline 이후만 갱신합니다.
+> - `common build-daily`: `common_feature_daily_fact`를 `(feature_date, feature_code)` 기준으로 upsert합니다.
+> - `common coverage-report` / `common readiness-report` / `ops freshness-report`: read-only 리포트입니다.
 
 > **백필 모드 요약**
 > - **기본 모드** (gap detection): 거래일 캘린더 기준으로 누락된 모든 영업일을 찾아 채웁니다. 최초 백필이나 히스토리 보강에 적합합니다. 각 티커마다 `MIN(trade_date)`로 자동 클램핑되어 상장 이전(또는 pykrx가 제공하지 못하는 과거) 구간을 매번 재요청하지 않습니다.
@@ -177,37 +206,51 @@ uv run krx-collector db sync-remote --ssh-host whi@sj2-server
 
 ### 동기화 모드
 
-`db sync-remote`는 세 가지 모드를 지원합니다. 모든 모드는 SSH 터널 옵션(`--ssh-host`, `--ssh-local-port`)과 자유롭게 조합할 수 있습니다.
+`db sync-remote`는 학습 데이터 ETL에 필요한 19개 source-data mirror 테이블을 관리 대상으로 삼습니다. 모든 모드는 SSH 터널 옵션(`--ssh-host`, `--ssh-local-port`)과 자유롭게 조합할 수 있습니다.
 
 #### 1. 증분 동기화 (기본)
 
-핵심 가격/수급 테이블을 대상으로 새 행만 upsert 합니다.
+기본 실행은 관리 대상 19개 테이블 전체를 로컬 DB 상태 기준으로 증분 upsert 합니다.
 
-- `stock_master`
-- `stock_master_snapshot`
-- `stock_master_snapshot_items`
-- `daily_ohlcv`
-- `krx_security_flow_raw`
+```bash
+uv run krx-collector db sync-remote --ssh-host whi@sj2-server
+```
 
-각 테이블의 `updated_at`, `fetched_at` 또는 append-only identity cursor를 기준으로 동작하며, 동일 시각 행이 배치 경계에서 누락되지 않도록 `(timestamp, primary_key...)` 복합 커서를 사용합니다. `daily_ohlcv`는 `sync_checkpoints`에 재개 커서를 저장해 중단 지점에서 이어받습니다.
+`updated_at`, `fetched_at`, `generated_at`과 surrogate key를 조합한 복합 cursor를 사용하므로 동일 시각 행이 배치 경계에서 누락되지 않습니다. raw/fact 테이블은 natural-key conflict가 발생해도 원격의 `raw_id`, `document_id`, `fact_id` 같은 surrogate id를 로컬에 보존합니다. `daily_ohlcv`는 `sync_checkpoints`에 재개 cursor를 저장해 중단 지점에서 이어받습니다.
+
+catalog/link/snapshot 성격의 작은 mirror 테이블은 remote 전체를 scan한 뒤 원격에 없는 로컬 row를 prune합니다. prune은 FK child-first 순서로 수행되며, unsafe한 부분 table 조합은 실행 전에 거부됩니다.
 
 #### 2. `--full-refresh`
 
-위 대상 테이블을 `TRUNCATE` 후 원격 데이터를 처음부터 다시 적재합니다. 로컬 복제본이 손상됐거나 첫 동기화일 때 사용합니다.
+관리 대상 19개 테이블을 `TRUNCATE` 후 원격 데이터를 처음부터 다시 적재합니다. 로컬 복제본이 손상됐거나 첫 동기화일 때 사용합니다. `sync_checkpoints`와 로컬 `ingestion_runs`는 remote mirror 대상이 아니므로 유지됩니다.
 
 ```bash
 uv run krx-collector db sync-remote --ssh-host whi@sj2-server --full-refresh
 ```
 
-#### 3. `--all-tables` (반드시 `--full-refresh`와 함께)
+#### 3. `--tables`
 
-유니버스 동기화, 일봉 백필, KRX 수급, OpenDART 계정/재무/XBRL 및 canonical metric 정규화가 쓰는 관리 대상 테이블만 원격에서 로컬로 통째 복제합니다. 대상 로컬 테이블은 비워지고 다시 적재되므로 파괴적 작업입니다. `--full-refresh`를 함께 지정하지 않으면 즉시 에러로 중단됩니다.
+특정 관리 테이블만 검증하거나 보강할 때 쉼표 구분 목록으로 지정합니다. 필요한 FK parent 테이블은 자동으로 sync plan 앞쪽에 포함됩니다. `--all-tables`와는 동시에 사용할 수 없습니다.
+
+```bash
+uv run krx-collector db sync-remote \
+  --ssh-host whi@sj2-server \
+  --tables common_feature_daily_fact,stock_metric_fact
+```
+
+부분 `--full-refresh` 또는 prune에서 선택한 parent를 참조하는 child table이 빠져 있으면 mirror 일관성을 위해 실행을 거부합니다.
+
+#### 4. `--all-tables` (반드시 `--full-refresh`와 함께)
+
+관리 대상 mirror 테이블의 로컬 schema drift까지 교정해야 할 때 사용하는 schema-reset copy 경로입니다. 대상 로컬 테이블만 drop 후 `sql/postgres_ddl.sql`을 다시 적용하고, 원격 데이터를 바이너리 COPY로 통째 복제합니다. `--full-refresh`를 함께 지정하지 않으면 즉시 에러로 중단됩니다.
 
 ```bash
 uv run krx-collector db sync-remote --ssh-host whi@sj2-server --full-refresh --all-tables
 ```
 
-동기화 대상은 다음 테이블입니다.
+`--all-tables`와 일반 기본 sync의 관리 대상은 동일한 19개 테이블입니다.
+
+동기화 대상:
 
 - `stock_master`
 - `stock_master_snapshot`
@@ -223,7 +266,16 @@ uv run krx-collector db sync-remote --ssh-host whi@sj2-server --full-refresh --a
 - `metric_catalog`
 - `metric_mapping_rule`
 - `stock_metric_fact`
-- `ingestion_runs`
+- `common_feature_series`
+- `common_feature_observation_raw`
+- `common_feature_catalog`
+- `common_feature_catalog_input`
+- `common_feature_daily_fact`
+
+remote mirror에서 제외되는 로컬 운영 테이블:
+
+- `sync_checkpoints`: 로컬 증분 sync 재개 cursor
+- `ingestion_runs`: 로컬 sync 실행 audit row
 
 `--all-tables` 모드는 다음 순서로 동작합니다.
 
@@ -236,8 +288,9 @@ uv run krx-collector db sync-remote --ssh-host whi@sj2-server --full-refresh --a
 
 ### 옵션
 
-- `--full-refresh`: 기본 4개 테이블을 truncate 후 처음부터 적재합니다.
-- `--all-tables`: 관리 대상 파이프라인 테이블만 full-refresh 방식으로 복제합니다 (`--full-refresh` 필수).
+- `--full-refresh`: 관리 대상 mirror 테이블을 truncate 후 처음부터 적재합니다.
+- `--all-tables`: 관리 대상 mirror 테이블을 schema-reset copy 경로로 복제합니다 (`--full-refresh` 필수, `--tables`와 동시 사용 불가).
+- `--tables`: 쉼표 구분 관리 테이블 목록만 sync합니다. 필요한 FK parent 테이블은 자동 포함됩니다 (`--all-tables`와 동시 사용 불가).
 - `--db-info-path`: 원격 DB 정보 파일 경로를 변경합니다.
 - `--batch-size`: 증분 동기화에서 한 번에 읽어올 행 수를 조절합니다 (`--all-tables` 모드에서는 사용되지 않습니다).
 - `--remote-host`: `db_info`의 host 값을 다른 호스트명으로 덮어씁니다.
@@ -333,7 +386,7 @@ krx-data-pipeline/
 ├── docker-compose.yml                # PostgreSQL + collector 구성
 ├── pyproject.toml / uv.lock          # 프로젝트 메타데이터 및 의존성 (uv)
 ├── sql/
-│   └── postgres_ddl.sql              # 전체 스키마 DDL (OHLCV / DART / XBRL / 수급 / KPI)
+│   └── postgres_ddl.sql              # 전체 스키마 DDL (OHLCV / DART / XBRL / 수급 / common feature / KPI)
 ├── docs/
 │   ├── architecture.md               # 아키텍처 및 데이터 흐름 설명
 │   ├── database.md                   # 데이터베이스 스키마 문서
@@ -343,22 +396,29 @@ krx-data-pipeline/
 ├── src/krx_collector/
 │   ├── __main__.py                   # `python -m krx_collector` 진입점
 │   ├── main.py                       # main() 어댑터 shim
-│   ├── cli/app.py                    # argparse 기반 CLI (db/universe/prices/dart/metrics/flows/operating/validate)
+│   ├── cli/app.py                    # argparse 기반 CLI (db/ops/universe/prices/dart/metrics/common/flows/operating/validate)
 │   ├── domain/                       # 순수 도메인 모델 및 Enum (Source, RunType, RunStatus 등)
 │   ├── ports/                        # 프로토콜 인터페이스
 │   │                                 #   universe, prices, storage, corp_codes,
 │   │                                 #   financials, share_info, xbrl, flows,
+│   │                                 #   common_features,
 │   │                                 #   operating_extractors
 │   ├── adapters/                     # Provider 구현체
 │   │                                 #   universe_fdr / universe_pykrx / prices_pykrx
 │   │                                 #   opendart_common / opendart_corp / opendart_financials /
 │   │                                 #   opendart_share_info / opendart_xbrl
+│   │                                 #   common_features_fdr / common_features_krx /
+│   │                                 #   common_features_ecos / common_features_fred /
+│   │                                 #   common_features_pykrx
 │   │                                 #   flows_krx / operating_extractors
 │   ├── service/                      # 유스케이스 오케스트레이션
 │   │                                 #   sync_universe, backfill_daily, validate,
 │   │                                 #   sync_dart_corp / sync_dart_financials /
 │   │                                 #   sync_dart_share_info / sync_dart_xbrl,
 │   │                                 #   normalize_metrics, report_metric_coverage,
+│   │                                 #   sync_common_features, build_common_feature_daily_facts,
+│   │                                 #   report_common_feature_coverage,
+│   │                                 #   report_common_feature_readiness, freshness,
 │   │                                 #   sync_krx_flows, process_operating_document,
 │   │                                 #   operating_registry, sync_local_db
 │   ├── infra/
@@ -372,7 +432,7 @@ krx-data-pipeline/
     ├── unit/                         # 파서 / 매핑 / 재시도 / pipeline util 단위 테스트
     ├── integration/                  # DB 연결, OHLCV end-to-end, 운영 KPI round-trip
     ├── helpers/                      # 테스트용 fake provider/executor 헬퍼
-    └── fixtures/                     # 섹터별 KPI 샘플 문서 등 테스트 픽스처
+    └── fixtures/                     # flows KRX 응답, 섹터별 KPI 샘플 문서 등 테스트 픽스처
 ```
 
 ## 아키텍처 및 추가 문서

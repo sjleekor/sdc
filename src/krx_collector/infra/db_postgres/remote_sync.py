@@ -72,6 +72,11 @@ class TableSyncSpec:
     local_cursor_sql: str
     cursor_indexes: tuple[int, ...]
     json_columns: tuple[str, ...] = ()
+    conflict_constraint: str | None = None
+    do_nothing_when_no_update_columns: bool = False
+    always_full_scan: bool = False
+    prune_missing_after_full_scan: bool = False
+    preserve_remote_surrogate_columns: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,13 +113,29 @@ PIPELINE_FULL_REFRESH_TABLE_NAMES: tuple[str, ...] = (
     "metric_catalog",
     "metric_mapping_rule",
     "stock_metric_fact",
-    # audit rows written by these pipeline executions
-    "ingestion_runs",
+    # model-facing common feature layer
+    "common_feature_series",
+    "common_feature_observation_raw",
+    "common_feature_catalog",
+    "common_feature_catalog_input",
+    "common_feature_daily_fact",
 )
 PIPELINE_FULL_REFRESH_TABLES: tuple[DatabaseTable, ...] = tuple(
     DatabaseTable(schema=PUBLIC_SCHEMA, name=name)
     for name in PIPELINE_FULL_REFRESH_TABLE_NAMES
 )
+
+SYNC_TABLE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    "stock_master_snapshot_items": ("stock_master_snapshot",),
+    "metric_mapping_rule": ("metric_catalog",),
+    "stock_metric_fact": ("metric_catalog", "metric_mapping_rule"),
+    "common_feature_observation_raw": ("common_feature_series",),
+    "common_feature_catalog_input": (
+        "common_feature_catalog",
+        "common_feature_series",
+    ),
+    "common_feature_daily_fact": ("common_feature_catalog",),
+}
 
 
 SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
@@ -141,6 +162,8 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
             "LIMIT 1"
         ),
         cursor_indexes=(6, 0, 1),
+        always_full_scan=True,
+        prune_missing_after_full_scan=True,
     ),
     TableSyncSpec(
         name="stock_master_snapshot",
@@ -157,6 +180,8 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
             "LIMIT 1"
         ),
         cursor_indexes=(3, 0),
+        always_full_scan=True,
+        prune_missing_after_full_scan=True,
     ),
     TableSyncSpec(
         name="stock_master_snapshot_items",
@@ -177,6 +202,8 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
             "LIMIT 1"
         ),
         cursor_indexes=(5, 0, 1, 2),
+        always_full_scan=True,
+        prune_missing_after_full_scan=True,
     ),
     TableSyncSpec(
         name="daily_ohlcv",
@@ -214,7 +241,7 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
             "source, fetched_at, raw_payload"
         ),
         from_clause="krx_security_flow_raw",
-        order_columns=("raw_id",),
+        order_columns=("fetched_at", "raw_id"),
         insert_columns=(
             "raw_id",
             "trade_date",
@@ -231,13 +258,751 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
         conflict_columns=("trade_date", "ticker", "market", "metric_code", "source"),
         update_columns=("metric_name", "value", "unit", "fetched_at", "raw_payload"),
         local_cursor_sql=(
-            "SELECT raw_id "
+            "SELECT fetched_at, raw_id "
             "FROM krx_security_flow_raw "
-            "ORDER BY raw_id DESC "
+            "ORDER BY fetched_at DESC, raw_id DESC "
             "LIMIT 1"
         ),
-        cursor_indexes=(0,),
+        cursor_indexes=(9, 0),
         json_columns=("raw_payload",),
+        preserve_remote_surrogate_columns=("raw_id",),
+    ),
+    TableSyncSpec(
+        name="dart_corp_master",
+        select_list=(
+            "corp_code, ticker, corp_name, market, stock_name, modify_date, is_active, "
+            "source, fetched_at, updated_at"
+        ),
+        from_clause="dart_corp_master",
+        order_columns=("updated_at", "corp_code"),
+        insert_columns=(
+            "corp_code",
+            "ticker",
+            "corp_name",
+            "market",
+            "stock_name",
+            "modify_date",
+            "is_active",
+            "source",
+            "fetched_at",
+            "updated_at",
+        ),
+        conflict_columns=("corp_code",),
+        update_columns=(
+            "ticker",
+            "corp_name",
+            "market",
+            "stock_name",
+            "modify_date",
+            "is_active",
+            "source",
+            "fetched_at",
+            "updated_at",
+        ),
+        local_cursor_sql=(
+            "SELECT updated_at, corp_code "
+            "FROM dart_corp_master "
+            "ORDER BY updated_at DESC, corp_code DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(9, 0),
+    ),
+    TableSyncSpec(
+        name="dart_financial_statement_raw",
+        select_list=(
+            "raw_id, corp_code, ticker, bsns_year, reprt_code, fs_div, sj_div, sj_nm, "
+            "account_id, account_nm, account_detail, thstrm_nm, thstrm_add_amount, "
+            "frmtrm_nm, frmtrm_q_nm, frmtrm_q_amount, frmtrm_add_amount, "
+            "bfefrmtrm_nm, ord, thstrm_amount, frmtrm_amount, bfefrmtrm_amount, "
+            "currency, rcept_no, source, fetched_at, raw_payload"
+        ),
+        from_clause="dart_financial_statement_raw",
+        order_columns=("fetched_at", "raw_id"),
+        insert_columns=(
+            "raw_id",
+            "corp_code",
+            "ticker",
+            "bsns_year",
+            "reprt_code",
+            "fs_div",
+            "sj_div",
+            "sj_nm",
+            "account_id",
+            "account_nm",
+            "account_detail",
+            "thstrm_nm",
+            "thstrm_add_amount",
+            "frmtrm_nm",
+            "frmtrm_q_nm",
+            "frmtrm_q_amount",
+            "frmtrm_add_amount",
+            "bfefrmtrm_nm",
+            "ord",
+            "thstrm_amount",
+            "frmtrm_amount",
+            "bfefrmtrm_amount",
+            "currency",
+            "rcept_no",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        conflict_columns=(
+            "corp_code",
+            "bsns_year",
+            "reprt_code",
+            "fs_div",
+            "sj_div",
+            "account_id",
+            "ord",
+            "rcept_no",
+        ),
+        update_columns=(
+            "ticker",
+            "sj_nm",
+            "account_nm",
+            "account_detail",
+            "thstrm_nm",
+            "thstrm_add_amount",
+            "frmtrm_nm",
+            "frmtrm_q_nm",
+            "frmtrm_q_amount",
+            "frmtrm_add_amount",
+            "bfefrmtrm_nm",
+            "thstrm_amount",
+            "frmtrm_amount",
+            "bfefrmtrm_amount",
+            "currency",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        local_cursor_sql=(
+            "SELECT fetched_at, raw_id "
+            "FROM dart_financial_statement_raw "
+            "ORDER BY fetched_at DESC, raw_id DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(25, 0),
+        json_columns=("raw_payload",),
+        preserve_remote_surrogate_columns=("raw_id",),
+    ),
+    TableSyncSpec(
+        name="dart_share_count_raw",
+        select_list=(
+            "raw_id, corp_code, ticker, bsns_year, reprt_code, rcept_no, corp_cls, se, "
+            "isu_stock_totqy, now_to_isu_stock_totqy, now_to_dcrs_stock_totqy, redc, "
+            "profit_incnr, rdmstk_repy, etc, istc_totqy, tesstk_co, distb_stock_co, "
+            "stlm_dt, source, fetched_at, raw_payload"
+        ),
+        from_clause="dart_share_count_raw",
+        order_columns=("fetched_at", "raw_id"),
+        insert_columns=(
+            "raw_id",
+            "corp_code",
+            "ticker",
+            "bsns_year",
+            "reprt_code",
+            "rcept_no",
+            "corp_cls",
+            "se",
+            "isu_stock_totqy",
+            "now_to_isu_stock_totqy",
+            "now_to_dcrs_stock_totqy",
+            "redc",
+            "profit_incnr",
+            "rdmstk_repy",
+            "etc",
+            "istc_totqy",
+            "tesstk_co",
+            "distb_stock_co",
+            "stlm_dt",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        conflict_columns=("corp_code", "bsns_year", "reprt_code", "se", "rcept_no"),
+        update_columns=(
+            "ticker",
+            "corp_cls",
+            "isu_stock_totqy",
+            "now_to_isu_stock_totqy",
+            "now_to_dcrs_stock_totqy",
+            "redc",
+            "profit_incnr",
+            "rdmstk_repy",
+            "etc",
+            "istc_totqy",
+            "tesstk_co",
+            "distb_stock_co",
+            "stlm_dt",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        local_cursor_sql=(
+            "SELECT fetched_at, raw_id "
+            "FROM dart_share_count_raw "
+            "ORDER BY fetched_at DESC, raw_id DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(20, 0),
+        json_columns=("raw_payload",),
+        preserve_remote_surrogate_columns=("raw_id",),
+    ),
+    TableSyncSpec(
+        name="dart_shareholder_return_raw",
+        select_list=(
+            "raw_id, corp_code, ticker, bsns_year, reprt_code, statement_type, row_name, "
+            "stock_knd, dim1, dim2, dim3, metric_code, metric_name, value_numeric, "
+            "value_text, unit, rcept_no, stlm_dt, source, fetched_at, raw_payload"
+        ),
+        from_clause="dart_shareholder_return_raw",
+        order_columns=("fetched_at", "raw_id"),
+        insert_columns=(
+            "raw_id",
+            "corp_code",
+            "ticker",
+            "bsns_year",
+            "reprt_code",
+            "statement_type",
+            "row_name",
+            "stock_knd",
+            "dim1",
+            "dim2",
+            "dim3",
+            "metric_code",
+            "metric_name",
+            "value_numeric",
+            "value_text",
+            "unit",
+            "rcept_no",
+            "stlm_dt",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        conflict_columns=(
+            "corp_code",
+            "bsns_year",
+            "reprt_code",
+            "statement_type",
+            "row_name",
+            "stock_knd",
+            "dim1",
+            "dim2",
+            "dim3",
+            "metric_code",
+            "rcept_no",
+        ),
+        update_columns=(
+            "ticker",
+            "metric_name",
+            "value_numeric",
+            "value_text",
+            "unit",
+            "stlm_dt",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        local_cursor_sql=(
+            "SELECT fetched_at, raw_id "
+            "FROM dart_shareholder_return_raw "
+            "ORDER BY fetched_at DESC, raw_id DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(19, 0),
+        json_columns=("raw_payload",),
+        preserve_remote_surrogate_columns=("raw_id",),
+    ),
+    TableSyncSpec(
+        name="dart_xbrl_document",
+        select_list=(
+            "document_id, corp_code, ticker, bsns_year, reprt_code, rcept_no, "
+            "zip_entry_count, instance_document_name, label_ko_document_name, source, "
+            "fetched_at, raw_payload"
+        ),
+        from_clause="dart_xbrl_document",
+        order_columns=("fetched_at", "document_id"),
+        insert_columns=(
+            "document_id",
+            "corp_code",
+            "ticker",
+            "bsns_year",
+            "reprt_code",
+            "rcept_no",
+            "zip_entry_count",
+            "instance_document_name",
+            "label_ko_document_name",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        conflict_columns=("corp_code", "bsns_year", "reprt_code", "rcept_no"),
+        update_columns=(
+            "ticker",
+            "zip_entry_count",
+            "instance_document_name",
+            "label_ko_document_name",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        local_cursor_sql=(
+            "SELECT fetched_at, document_id "
+            "FROM dart_xbrl_document "
+            "ORDER BY fetched_at DESC, document_id DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(10, 0),
+        json_columns=("raw_payload",),
+        preserve_remote_surrogate_columns=("document_id",),
+    ),
+    TableSyncSpec(
+        name="dart_xbrl_fact_raw",
+        select_list=(
+            "raw_id, corp_code, ticker, bsns_year, reprt_code, rcept_no, concept_id, "
+            "concept_name, namespace_uri, context_id, context_type, period_start, "
+            "period_end, instant_date, dimensions, unit_id, unit_measure, decimals, "
+            "value_numeric, value_text, is_nil, label_ko, source, fetched_at, raw_payload"
+        ),
+        from_clause="dart_xbrl_fact_raw",
+        order_columns=("fetched_at", "raw_id"),
+        insert_columns=(
+            "raw_id",
+            "corp_code",
+            "ticker",
+            "bsns_year",
+            "reprt_code",
+            "rcept_no",
+            "concept_id",
+            "concept_name",
+            "namespace_uri",
+            "context_id",
+            "context_type",
+            "period_start",
+            "period_end",
+            "instant_date",
+            "dimensions",
+            "unit_id",
+            "unit_measure",
+            "decimals",
+            "value_numeric",
+            "value_text",
+            "is_nil",
+            "label_ko",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        conflict_columns=(
+            "corp_code",
+            "bsns_year",
+            "reprt_code",
+            "rcept_no",
+            "context_id",
+            "concept_id",
+        ),
+        update_columns=(
+            "ticker",
+            "concept_name",
+            "namespace_uri",
+            "context_type",
+            "period_start",
+            "period_end",
+            "instant_date",
+            "dimensions",
+            "unit_id",
+            "unit_measure",
+            "decimals",
+            "value_numeric",
+            "value_text",
+            "is_nil",
+            "label_ko",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        local_cursor_sql=(
+            "SELECT fetched_at, raw_id "
+            "FROM dart_xbrl_fact_raw "
+            "ORDER BY fetched_at DESC, raw_id DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(23, 0),
+        json_columns=("dimensions", "raw_payload"),
+        preserve_remote_surrogate_columns=("raw_id",),
+    ),
+    TableSyncSpec(
+        name="metric_catalog",
+        select_list=(
+            "metric_code, metric_name, category, unit, description, is_active, updated_at"
+        ),
+        from_clause="metric_catalog",
+        order_columns=("updated_at", "metric_code"),
+        insert_columns=(
+            "metric_code",
+            "metric_name",
+            "category",
+            "unit",
+            "description",
+            "is_active",
+            "updated_at",
+        ),
+        conflict_columns=("metric_code",),
+        update_columns=(
+            "metric_name",
+            "category",
+            "unit",
+            "description",
+            "is_active",
+            "updated_at",
+        ),
+        local_cursor_sql=(
+            "SELECT updated_at, metric_code "
+            "FROM metric_catalog "
+            "ORDER BY updated_at DESC, metric_code DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(6, 0),
+        always_full_scan=True,
+        prune_missing_after_full_scan=True,
+    ),
+    TableSyncSpec(
+        name="metric_mapping_rule",
+        select_list=(
+            "rule_code, metric_code, source_table, value_selector, priority, "
+            "statement_type, fs_div, sj_div, account_id, account_nm, row_name, "
+            "stock_knd, dim1, dim2, dim3, metric_code_match, is_active, updated_at"
+        ),
+        from_clause="metric_mapping_rule",
+        order_columns=("updated_at", "rule_code"),
+        insert_columns=(
+            "rule_code",
+            "metric_code",
+            "source_table",
+            "value_selector",
+            "priority",
+            "statement_type",
+            "fs_div",
+            "sj_div",
+            "account_id",
+            "account_nm",
+            "row_name",
+            "stock_knd",
+            "dim1",
+            "dim2",
+            "dim3",
+            "metric_code_match",
+            "is_active",
+            "updated_at",
+        ),
+        conflict_columns=("rule_code",),
+        update_columns=(
+            "metric_code",
+            "source_table",
+            "value_selector",
+            "priority",
+            "statement_type",
+            "fs_div",
+            "sj_div",
+            "account_id",
+            "account_nm",
+            "row_name",
+            "stock_knd",
+            "dim1",
+            "dim2",
+            "dim3",
+            "metric_code_match",
+            "is_active",
+            "updated_at",
+        ),
+        local_cursor_sql=(
+            "SELECT updated_at, rule_code "
+            "FROM metric_mapping_rule "
+            "ORDER BY updated_at DESC, rule_code DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(17, 0),
+        always_full_scan=True,
+        prune_missing_after_full_scan=True,
+    ),
+    TableSyncSpec(
+        name="stock_metric_fact",
+        select_list=(
+            "fact_id, ticker, market, corp_code, metric_code, period_type, period_end, "
+            "bsns_year, reprt_code, fs_div, value_numeric, value_text, unit, "
+            "source_table, source_key, mapping_rule_code, fetched_at, updated_at"
+        ),
+        from_clause="stock_metric_fact",
+        order_columns=("updated_at", "fact_id"),
+        insert_columns=(
+            "fact_id",
+            "ticker",
+            "market",
+            "corp_code",
+            "metric_code",
+            "period_type",
+            "period_end",
+            "bsns_year",
+            "reprt_code",
+            "fs_div",
+            "value_numeric",
+            "value_text",
+            "unit",
+            "source_table",
+            "source_key",
+            "mapping_rule_code",
+            "fetched_at",
+            "updated_at",
+        ),
+        conflict_columns=("ticker", "metric_code", "bsns_year", "reprt_code"),
+        update_columns=(
+            "market",
+            "corp_code",
+            "period_type",
+            "period_end",
+            "fs_div",
+            "value_numeric",
+            "value_text",
+            "unit",
+            "source_table",
+            "source_key",
+            "mapping_rule_code",
+            "fetched_at",
+            "updated_at",
+        ),
+        local_cursor_sql=(
+            "SELECT updated_at, fact_id "
+            "FROM stock_metric_fact "
+            "ORDER BY updated_at DESC, fact_id DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(17, 0),
+        preserve_remote_surrogate_columns=("fact_id",),
+    ),
+    TableSyncSpec(
+        name="common_feature_series",
+        select_list=(
+            "series_id, source, source_series_key, category, frequency, name_kr, name_en, "
+            "unit, country, market, endpoint_params, availability_policy, "
+            "manual_lag_days, source_timezone, history_start_date, "
+            "max_stale_business_days, default_transform, active, notes, updated_at"
+        ),
+        from_clause="common_feature_series",
+        order_columns=("updated_at", "series_id"),
+        insert_columns=(
+            "series_id",
+            "source",
+            "source_series_key",
+            "category",
+            "frequency",
+            "name_kr",
+            "name_en",
+            "unit",
+            "country",
+            "market",
+            "endpoint_params",
+            "availability_policy",
+            "manual_lag_days",
+            "source_timezone",
+            "history_start_date",
+            "max_stale_business_days",
+            "default_transform",
+            "active",
+            "notes",
+            "updated_at",
+        ),
+        conflict_columns=("series_id",),
+        update_columns=(
+            "source",
+            "source_series_key",
+            "category",
+            "frequency",
+            "name_kr",
+            "name_en",
+            "unit",
+            "country",
+            "market",
+            "endpoint_params",
+            "availability_policy",
+            "manual_lag_days",
+            "source_timezone",
+            "history_start_date",
+            "max_stale_business_days",
+            "default_transform",
+            "active",
+            "notes",
+            "updated_at",
+        ),
+        local_cursor_sql=(
+            "SELECT updated_at, series_id "
+            "FROM common_feature_series "
+            "ORDER BY updated_at DESC, series_id DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(19, 0),
+        json_columns=("endpoint_params",),
+        always_full_scan=True,
+        prune_missing_after_full_scan=True,
+    ),
+    TableSyncSpec(
+        name="common_feature_observation_raw",
+        select_list=(
+            "raw_id, source, series_id, observation_date, period_end_date, release_date, "
+            "available_from_date, vintage, value_numeric, value_text, unit, frequency, "
+            "source_updated_at, fetched_at, raw_payload"
+        ),
+        from_clause="common_feature_observation_raw",
+        order_columns=("fetched_at", "raw_id"),
+        insert_columns=(
+            "raw_id",
+            "source",
+            "series_id",
+            "observation_date",
+            "period_end_date",
+            "release_date",
+            "available_from_date",
+            "vintage",
+            "value_numeric",
+            "value_text",
+            "unit",
+            "frequency",
+            "source_updated_at",
+            "fetched_at",
+            "raw_payload",
+        ),
+        conflict_columns=(
+            "source",
+            "series_id",
+            "observation_date",
+            "period_end_date",
+            "release_date",
+            "vintage",
+        ),
+        update_columns=(
+            "available_from_date",
+            "value_numeric",
+            "value_text",
+            "unit",
+            "frequency",
+            "source_updated_at",
+            "fetched_at",
+            "raw_payload",
+        ),
+        local_cursor_sql=(
+            "SELECT fetched_at, raw_id "
+            "FROM common_feature_observation_raw "
+            "ORDER BY fetched_at DESC, raw_id DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(13, 0),
+        json_columns=("raw_payload",),
+        conflict_constraint="uq_common_feature_observation_raw",
+        preserve_remote_surrogate_columns=("raw_id",),
+    ),
+    TableSyncSpec(
+        name="common_feature_catalog",
+        select_list=(
+            "feature_code, feature_name_kr, category, frequency, unit, transform_code, "
+            "description, active, updated_at"
+        ),
+        from_clause="common_feature_catalog",
+        order_columns=("updated_at", "feature_code"),
+        insert_columns=(
+            "feature_code",
+            "feature_name_kr",
+            "category",
+            "frequency",
+            "unit",
+            "transform_code",
+            "description",
+            "active",
+            "updated_at",
+        ),
+        conflict_columns=("feature_code",),
+        update_columns=(
+            "feature_name_kr",
+            "category",
+            "frequency",
+            "unit",
+            "transform_code",
+            "description",
+            "active",
+            "updated_at",
+        ),
+        local_cursor_sql=(
+            "SELECT updated_at, feature_code "
+            "FROM common_feature_catalog "
+            "ORDER BY updated_at DESC, feature_code DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(8, 0),
+        always_full_scan=True,
+        prune_missing_after_full_scan=True,
+    ),
+    TableSyncSpec(
+        name="common_feature_catalog_input",
+        select_list="feature_code, series_id, role",
+        from_clause="common_feature_catalog_input",
+        order_columns=("feature_code", "series_id", "role"),
+        insert_columns=("feature_code", "series_id", "role"),
+        conflict_columns=("feature_code", "series_id", "role"),
+        update_columns=(),
+        local_cursor_sql=(
+            "SELECT feature_code, series_id, role "
+            "FROM common_feature_catalog_input "
+            "ORDER BY feature_code DESC, series_id DESC, role DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(0, 1, 2),
+        do_nothing_when_no_update_columns=True,
+        always_full_scan=True,
+        prune_missing_after_full_scan=True,
+    ),
+    TableSyncSpec(
+        name="common_feature_daily_fact",
+        select_list=(
+            "feature_date, feature_code, value_numeric, value_text, unit, "
+            "source_series_ids, source_observation_ids, asof_available_date, "
+            "selected_vintage, generated_at, generation_run_id"
+        ),
+        from_clause="common_feature_daily_fact",
+        order_columns=("generated_at", "feature_date", "feature_code"),
+        insert_columns=(
+            "feature_date",
+            "feature_code",
+            "value_numeric",
+            "value_text",
+            "unit",
+            "source_series_ids",
+            "source_observation_ids",
+            "asof_available_date",
+            "selected_vintage",
+            "generated_at",
+            "generation_run_id",
+        ),
+        conflict_columns=("feature_date", "feature_code"),
+        update_columns=(
+            "value_numeric",
+            "value_text",
+            "unit",
+            "source_series_ids",
+            "source_observation_ids",
+            "asof_available_date",
+            "selected_vintage",
+            "generated_at",
+            "generation_run_id",
+        ),
+        local_cursor_sql=(
+            "SELECT generated_at, feature_date, feature_code "
+            "FROM common_feature_daily_fact "
+            "ORDER BY generated_at DESC, feature_date DESC, feature_code DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(9, 0, 1),
+        json_columns=("source_series_ids", "source_observation_ids"),
     ),
 )
 
@@ -373,12 +1138,15 @@ def sync_remote_tables_to_local(
     batch_size: int,
     full_refresh: bool,
     all_tables: bool = False,
+    tables: tuple[str, ...] | None = None,
 ) -> dict[str, int]:
     """Copy the supported remote tables into the local PostgreSQL database."""
-    if batch_size <= 0:
-        raise ValueError("batch_size must be a positive integer")
-    if all_tables and not full_refresh:
-        raise ValueError("all_tables sync requires full_refresh=True")
+    validate_remote_sync_options(
+        batch_size=batch_size,
+        full_refresh=full_refresh,
+        all_tables=all_tables,
+        tables=tables,
+    )
 
     results: dict[str, int] = {}
     with contextlib.closing(psycopg2.connect(remote_dsn)) as remote_conn:
@@ -391,11 +1159,18 @@ def sync_remote_tables_to_local(
                     local_conn=local_conn,
                 )
 
+            target_specs = _select_sync_specs(tables)
             if full_refresh:
                 _prepare_local_full_refresh_session(local_conn)
-                _truncate_target_tables(local_conn)
+                _truncate_sync_tables(local_conn=local_conn, specs=target_specs)
 
-            for spec in SYNC_TABLE_SPECS:
+            dependencies = _list_foreign_key_dependencies(local_conn)
+            _validate_prune_external_fk_children(
+                specs=target_specs,
+                dependencies=dependencies,
+            )
+            prune_keys_by_table: dict[str, set[tuple[Any, ...]]] = {}
+            for spec in target_specs:
                 if spec.name == "daily_ohlcv":
                     copied = _sync_daily_ohlcv_via_copy(
                         remote_conn=remote_conn,
@@ -405,22 +1180,96 @@ def sync_remote_tables_to_local(
                         full_refresh=full_refresh,
                     )
                 else:
-                    copied = _sync_table(
+                    copied, remote_keys = _sync_table(
                         remote_conn=remote_conn,
                         local_conn=local_conn,
                         spec=spec,
                         batch_size=batch_size,
                         full_refresh=full_refresh,
                     )
+                    if remote_keys is not None:
+                        prune_keys_by_table[spec.name] = remote_keys
                 results[spec.name] = copied
+
+            _prune_missing_rows_for_specs(
+                local_conn=local_conn,
+                specs=target_specs,
+                keys_by_table=prune_keys_by_table,
+                dependencies=dependencies,
+            )
             _sync_owned_sequences(
                 remote_conn=remote_conn,
                 local_conn=local_conn,
-                tables=(DatabaseTable(schema=PUBLIC_SCHEMA, name="krx_security_flow_raw"),),
+                tables=_database_tables_for_specs(target_specs),
             )
             local_conn.commit()
 
     return results
+
+
+def validate_remote_sync_options(
+    *,
+    batch_size: int,
+    full_refresh: bool,
+    all_tables: bool = False,
+    tables: tuple[str, ...] | None = None,
+) -> None:
+    """Validate remote sync options before any local destructive operation."""
+    if batch_size <= 0:
+        raise ValueError("batch_size must be a positive integer")
+    if all_tables and not full_refresh:
+        raise ValueError("all_tables sync requires full_refresh=True")
+    if all_tables and tables is not None:
+        raise ValueError("all_tables sync cannot be combined with explicit tables")
+    if tables is not None:
+        _select_sync_specs(tables)
+
+
+def _select_sync_specs(table_names: tuple[str, ...] | None) -> tuple[TableSyncSpec, ...]:
+    """Resolve requested table names to ordered sync specs with FK parents included."""
+    specs_by_name = {spec.name: spec for spec in SYNC_TABLE_SPECS}
+    if table_names is None:
+        selected_names = set(specs_by_name)
+    else:
+        requested = tuple(dict.fromkeys(name.strip() for name in table_names if name.strip()))
+        unknown = sorted(name for name in requested if name not in specs_by_name)
+        if unknown:
+            raise ValueError(
+                "Unsupported sync table(s): "
+                + ", ".join(unknown)
+                + ". Supported tables: "
+                + ", ".join(specs_by_name)
+            )
+        selected_names = set(_expand_sync_table_dependencies(requested))
+
+    return tuple(spec for spec in SYNC_TABLE_SPECS if spec.name in selected_names)
+
+
+def _expand_sync_table_dependencies(table_names: tuple[str, ...]) -> tuple[str, ...]:
+    """Return requested sync table names plus all required FK parent tables."""
+    selected: set[str] = set()
+    visiting: set[str] = set()
+
+    def visit(table_name: str) -> None:
+        if table_name in selected:
+            return
+        if table_name in visiting:
+            raise ValueError(f"Cyclic sync table dependency detected at {table_name}")
+        visiting.add(table_name)
+        for parent_name in SYNC_TABLE_DEPENDENCIES.get(table_name, ()):
+            visit(parent_name)
+        visiting.remove(table_name)
+        selected.add(table_name)
+
+    for table_name in table_names:
+        visit(table_name)
+
+    return tuple(spec.name for spec in SYNC_TABLE_SPECS if spec.name in selected)
+
+
+def _database_tables_for_specs(specs: tuple[TableSyncSpec, ...]) -> tuple[DatabaseTable, ...]:
+    """Return physical public tables for sync specs."""
+    return tuple(DatabaseTable(schema=PUBLIC_SCHEMA, name=spec.name) for spec in specs)
 
 
 def _sync_pipeline_public_tables_to_local(
@@ -831,20 +1680,90 @@ def _table_sort_key(table: DatabaseTable) -> tuple[str, str]:
     return table.schema, table.name
 
 
-def _truncate_target_tables(local_conn: Any) -> None:
+def _truncate_sync_tables(
+    *,
+    local_conn: Any,
+    specs: tuple[TableSyncSpec, ...],
+) -> None:
     """Remove previously synced rows before a full refresh."""
-    with local_conn.cursor() as cur:
-        cur.execute(
-            "TRUNCATE TABLE "
-            "krx_security_flow_raw, daily_ohlcv, "
-            "stock_master_snapshot_items, stock_master_snapshot, stock_master "
-            "RESTART IDENTITY"
+    tables = _database_tables_for_specs(specs)
+    dependencies = _list_foreign_key_dependencies(local_conn)
+    _validate_no_external_fk_children(tables=tables, dependencies=dependencies)
+    table_order = _sort_tables_by_fk_dependencies(
+        tables=tables,
+        dependencies=dependencies,
+    )
+    _truncate_database_tables(local_conn=local_conn, tables=table_order)
+
+    if any(spec.name == "daily_ohlcv" for spec in specs):
+        with local_conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM sync_checkpoints WHERE sync_name = %s",
+                (DAILY_OHLCV_SYNC_NAME,),
+            )
+        local_conn.commit()
+
+
+def _truncate_target_tables(local_conn: Any) -> None:
+    """Compatibility wrapper for the legacy five-table full refresh path."""
+    legacy_specs = tuple(
+        spec
+        for spec in SYNC_TABLE_SPECS
+        if spec.name
+        in {
+            "stock_master",
+            "stock_master_snapshot",
+            "stock_master_snapshot_items",
+            "daily_ohlcv",
+            "krx_security_flow_raw",
+        }
+    )
+    _truncate_sync_tables(local_conn=local_conn, specs=legacy_specs)
+
+
+def _validate_no_external_fk_children(
+    *,
+    tables: tuple[DatabaseTable, ...],
+    dependencies: tuple[tuple[DatabaseTable, DatabaseTable], ...],
+) -> None:
+    """Reject partial full-refresh subsets that omit FK child tables."""
+    table_set = set(tables)
+    external_children = sorted(
+        child.display_name
+        for child, parent in dependencies
+        if parent in table_set and child not in table_set
+    )
+    if external_children:
+        raise ValueError(
+            "Unsafe full-refresh table subset; include FK child tables or choose "
+            "incremental sync: "
+            + ", ".join(external_children)
         )
-        cur.execute(
-            "DELETE FROM sync_checkpoints WHERE sync_name = %s",
-            (DAILY_OHLCV_SYNC_NAME,),
+
+
+def _validate_prune_external_fk_children(
+    *,
+    specs: tuple[TableSyncSpec, ...],
+    dependencies: tuple[tuple[DatabaseTable, DatabaseTable], ...],
+) -> None:
+    """Reject pruning a parent table while an omitted child can still reference it."""
+    selected_tables = set(_database_tables_for_specs(specs))
+    prune_tables = {
+        DatabaseTable(schema=PUBLIC_SCHEMA, name=spec.name)
+        for spec in specs
+        if spec.prune_missing_after_full_scan
+    }
+    external_children = sorted(
+        child.display_name
+        for child, parent in dependencies
+        if parent in prune_tables and child not in selected_tables
+    )
+    if external_children:
+        raise ValueError(
+            "Unsafe pruning table subset; include FK child tables or choose a "
+            "non-pruning table set: "
+            + ", ".join(external_children)
         )
-    local_conn.commit()
 
 
 def _sync_table(
@@ -854,10 +1773,17 @@ def _sync_table(
     spec: TableSyncSpec,
     batch_size: int,
     full_refresh: bool,
-) -> int:
+) -> tuple[int, set[tuple[Any, ...]] | None]:
     """Copy one table in batches using a stable incremental cursor."""
     copied_rows = 0
-    cursor_values = None if full_refresh else _get_local_cursor(local_conn=local_conn, spec=spec)
+    cursor_values = (
+        None
+        if full_refresh or spec.always_full_scan
+        else _get_local_cursor(local_conn=local_conn, spec=spec)
+    )
+    remote_keys: set[tuple[Any, ...]] | None = (
+        set() if spec.prune_missing_after_full_scan else None
+    )
 
     while True:
         rows = _fetch_remote_rows(
@@ -867,9 +1793,11 @@ def _sync_table(
             batch_size=batch_size,
         )
         if not rows:
-            return copied_rows
+            return copied_rows, remote_keys
 
         _upsert_rows(local_conn=local_conn, spec=spec, rows=rows)
+        if remote_keys is not None:
+            remote_keys.update(_row_conflict_key(spec=spec, row=row) for row in rows)
         copied_rows += len(rows)
         cursor_values = tuple(rows[-1][index] for index in spec.cursor_indexes)
 
@@ -1199,15 +2127,32 @@ def _effective_daily_ohlcv_batch_size(*, batch_size: int, full_refresh: bool) ->
 
 def _upsert_rows(*, local_conn: Any, spec: TableSyncSpec, rows: list[tuple[Any, ...]]) -> None:
     """Upsert a batch into the local table."""
-    assignments = ", ".join(f"{column} = EXCLUDED.{column}" for column in spec.update_columns)
     insert_columns = ", ".join(spec.insert_columns)
-    conflict_columns = ", ".join(spec.conflict_columns)
     values = [_adapt_insert_row(spec=spec, row=row) for row in rows]
+
+    if spec.conflict_constraint is not None:
+        conflict_target = f"ON CONFLICT ON CONSTRAINT {spec.conflict_constraint}"
+    else:
+        conflict_columns = ", ".join(spec.conflict_columns)
+        conflict_target = f"ON CONFLICT ({conflict_columns})"
+
+    assignment_columns = tuple(
+        dict.fromkeys((*spec.preserve_remote_surrogate_columns, *spec.update_columns))
+    )
+    if assignment_columns:
+        assignments = ", ".join(
+            f"{column} = EXCLUDED.{column}" for column in assignment_columns
+        )
+        conflict_action = f"{conflict_target} DO UPDATE SET {assignments}"
+    elif spec.do_nothing_when_no_update_columns:
+        conflict_action = f"{conflict_target} DO NOTHING"
+    else:
+        raise ValueError(f"Sync spec {spec.name} has no update columns")
 
     statement = (
         f"INSERT INTO {spec.name} ({insert_columns}) "
         f"VALUES %s "
-        f"ON CONFLICT ({conflict_columns}) DO UPDATE SET {assignments}"
+        f"{conflict_action}"
     )
 
     try:
@@ -1222,6 +2167,87 @@ def _upsert_rows(*, local_conn: Any, spec: TableSyncSpec, rows: list[tuple[Any, 
     except Exception:
         local_conn.rollback()
         raise
+
+
+def _row_conflict_key(*, spec: TableSyncSpec, row: tuple[Any, ...]) -> tuple[Any, ...]:
+    """Extract a row's conflict-key values from the selected column order."""
+    indexes = tuple(spec.insert_columns.index(column) for column in spec.conflict_columns)
+    return tuple(row[index] for index in indexes)
+
+
+def _prune_missing_rows(
+    *,
+    local_conn: Any,
+    spec: TableSyncSpec,
+    keys: set[tuple[Any, ...]],
+) -> None:
+    """Delete local rows that are absent from a completed remote full scan."""
+    if not spec.conflict_columns:
+        raise ValueError(f"Sync spec {spec.name} has no conflict columns for pruning")
+
+    try:
+        with local_conn.cursor() as cur:
+            if not keys:
+                cur.execute(f"DELETE FROM {spec.name}")
+            else:
+                temp_table = "remote_sync_prune_keys"
+                key_columns = ", ".join(spec.conflict_columns)
+                join_predicate = " AND ".join(
+                    f"target.{column} IS NOT DISTINCT FROM remote_keys.{column}"
+                    for column in spec.conflict_columns
+                )
+                cur.execute(f"DROP TABLE IF EXISTS {temp_table}")
+                cur.execute(
+                    f"CREATE TEMP TABLE {temp_table} ON COMMIT DROP AS "
+                    f"SELECT {key_columns} FROM {spec.name} WHERE FALSE"
+                )
+                insert_statement = f"INSERT INTO {temp_table} ({key_columns}) VALUES %s"
+                psycopg2.extras.execute_values(
+                    cur,
+                    insert_statement,
+                    list(keys),
+                    page_size=1000,
+                )
+                delete_statement = (
+                    f"DELETE FROM {spec.name} AS target "
+                    f"WHERE NOT EXISTS ("
+                    f"SELECT 1 FROM {temp_table} AS remote_keys "
+                    f"WHERE {join_predicate}"
+                    f")"
+                )
+                cur.execute(delete_statement)
+        local_conn.commit()
+    except Exception:
+        local_conn.rollback()
+        raise
+
+
+def _prune_missing_rows_for_specs(
+    *,
+    local_conn: Any,
+    specs: tuple[TableSyncSpec, ...],
+    keys_by_table: dict[str, set[tuple[Any, ...]]],
+    dependencies: tuple[tuple[DatabaseTable, DatabaseTable], ...],
+) -> None:
+    """Prune full-scan tables after all upserts, deleting FK children first."""
+    if not keys_by_table:
+        return
+
+    specs_by_name = {spec.name: spec for spec in specs}
+    prune_tables = tuple(
+        DatabaseTable(schema=PUBLIC_SCHEMA, name=table_name)
+        for table_name in keys_by_table
+    )
+    prune_order = reversed(
+        _sort_tables_by_fk_dependencies(tables=prune_tables, dependencies=dependencies)
+    )
+    for table in prune_order:
+        spec = specs_by_name[table.name]
+        _prune_missing_rows(
+            local_conn=local_conn,
+            spec=spec,
+            keys=keys_by_table[spec.name],
+        )
 
 
 def _adapt_insert_row(*, spec: TableSyncSpec, row: tuple[Any, ...]) -> tuple[Any, ...]:

@@ -4,7 +4,7 @@ Subcommands::
 
     krx-collector db init
     krx-collector db sync-remote [--db-info-path ...] [--ssh-host ...] [--full-refresh]
-                                  [--all-tables]
+                                  [--tables ...] [--all-tables]
     krx-collector universe sync  [--source fdr|pykrx] [--markets ...]
     krx-collector prices backfill [--market ...] [--tickers ...] [--start ...]
     krx-collector validate       [--date ...] [--market ...]
@@ -129,6 +129,14 @@ def _handle_db_init(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def _parse_remote_sync_tables(raw_value: str | None) -> tuple[str, ...] | None:
+    """Parse a comma-separated remote sync table list."""
+    if raw_value is None:
+        return None
+    table_names = tuple(part.strip() for part in raw_value.split(",") if part.strip())
+    return table_names or None
+
+
 def _handle_db_sync_remote(args: argparse.Namespace) -> None:
     """Handle ``krx-collector db sync-remote``."""
     settings = get_settings()
@@ -138,11 +146,12 @@ def _handle_db_sync_remote(args: argparse.Namespace) -> None:
     remote_host_override = args.remote_host or settings.remote_db_host_override
     ssh_host = args.ssh_host or settings.remote_db_ssh_host
     ssh_local_port = args.ssh_local_port or settings.remote_db_ssh_local_port
+    tables = _parse_remote_sync_tables(args.tables)
 
     print(
         f"→ db sync-remote: db_info_path={db_info_path}, "
         f"batch_size={batch_size}, full_refresh={args.full_refresh}, "
-        f"all_tables={args.all_tables}, "
+        f"all_tables={args.all_tables}, tables={tables}, "
         f"remote_host_override={remote_host_override}, ssh_host={ssh_host}, "
         f"ssh_local_port={ssh_local_port}"
     )
@@ -155,6 +164,7 @@ def _handle_db_sync_remote(args: argparse.Namespace) -> None:
         batch_size=batch_size,
         full_refresh=args.full_refresh,
         all_tables=args.all_tables,
+        tables=tables,
         remote_host_override=remote_host_override,
         ssh_host=ssh_host,
         ssh_local_port=ssh_local_port,
@@ -1772,14 +1782,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Truncate the local synced tables and copy everything from scratch.",
     )
-    db_sync_remote.add_argument(
+    db_sync_scope = db_sync_remote.add_mutually_exclusive_group()
+    db_sync_scope.add_argument(
         "--all-tables",
         action="store_true",
         default=False,
         help=(
-            "Sync the managed pipeline data tables. Requires --full-refresh. "
+            "Sync the managed mirror tables through the schema-reset copy path. "
+            "Requires --full-refresh. "
             "Drops only those local tables and re-applies sql/postgres_ddl.sql "
             "before copying so stale local schemas are replaced."
+        ),
+    )
+    db_sync_scope.add_argument(
+        "--tables",
+        default=None,
+        help=(
+            "Comma-separated managed table names to sync. FK parent tables are "
+            "included automatically. Omit to sync all managed mirror tables."
         ),
     )
     db_sync_remote.add_argument(

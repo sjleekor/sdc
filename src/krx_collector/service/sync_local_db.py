@@ -15,6 +15,7 @@ from krx_collector.infra.db_postgres.remote_sync import (
     reset_local_public_tables,
     resolve_remote_dsn,
     sync_remote_tables_to_local,
+    validate_remote_sync_options,
 )
 from krx_collector.infra.db_postgres.repositories import PostgresStorage
 from krx_collector.util.time import now_kst
@@ -34,6 +35,7 @@ class RemoteDbSyncResult:
     ended_at: datetime | None = None
     full_refresh: bool = False
     all_tables: bool = False
+    tables: tuple[str, ...] | None = None
     batch_size: int = 0
     remote_host: str = ""
     ssh_host: str | None = None
@@ -75,6 +77,7 @@ def sync_remote_db_to_local(
     batch_size: int,
     full_refresh: bool = False,
     all_tables: bool = False,
+    tables: tuple[str, ...] | None = None,
     remote_host_override: str | None = None,
     ssh_host: str | None = None,
     ssh_local_port: int | None = None,
@@ -85,6 +88,7 @@ def sync_remote_db_to_local(
         started_at=started_at,
         full_refresh=full_refresh,
         all_tables=all_tables,
+        tables=tables,
         batch_size=batch_size,
         ssh_host=ssh_host,
     )
@@ -99,11 +103,24 @@ def sync_remote_db_to_local(
             "batch_size": batch_size,
             "full_refresh": full_refresh,
             "all_tables": all_tables,
+            "tables": list(tables) if tables is not None else None,
             "remote_host_override": remote_host_override,
             "ssh_host": ssh_host,
             "ssh_local_port": ssh_local_port,
         },
     )
+
+    try:
+        validate_remote_sync_options(
+            batch_size=batch_size,
+            full_refresh=full_refresh,
+            all_tables=all_tables,
+            tables=tables,
+        )
+    except Exception as exc:
+        result.ended_at = now_kst()
+        result.error = str(exc)
+        return result
 
     if full_refresh and all_tables:
         dropped = reset_local_public_tables(local_dsn)
@@ -126,10 +143,11 @@ def sync_remote_db_to_local(
                 result.remote_host = remote_info.host
                 logger.info(
                     "Starting remote DB sync: remote_host=%s full_refresh=%s "
-                    "all_tables=%s batch_size=%s ssh_host=%s",
+                    "all_tables=%s tables=%s batch_size=%s ssh_host=%s",
                     remote_info.host,
                     full_refresh,
                     all_tables,
+                    tables,
                     batch_size,
                     ssh_host,
                 )
@@ -140,6 +158,7 @@ def sync_remote_db_to_local(
                     batch_size=batch_size,
                     full_refresh=full_refresh,
                     all_tables=all_tables,
+                    tables=tables,
                 )
                 result.table_counts = table_counts
                 result.ended_at = now_kst()
