@@ -7,9 +7,11 @@ import random
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import date, datetime
+from enum import Enum
 from typing import Any
 
-from krx_collector.domain.enums import RunStatus
+from krx_collector.domain.enums import RunStatus, RunType
 from krx_collector.domain.models import IngestionRun
 from krx_collector.ports.storage import Storage
 from krx_collector.util.time import now_kst
@@ -310,6 +312,46 @@ def fail_run(storage: Storage, run: IngestionRun, exc: Exception) -> None:
     run.status = RunStatus.FAILED
     run.error_summary = str(exc)
     storage.record_run(run)
+
+
+def record_terminal_run(
+    storage: Storage,
+    *,
+    run_type: RunType,
+    status: RunStatus,
+    params: Mapping[str, Any],
+    counts: Mapping[str, int] | None = None,
+    error_summary: str | None = None,
+) -> IngestionRun:
+    """Persist a run that finishes before the normal service path starts."""
+    now = now_kst()
+    run = IngestionRun(
+        run_type=run_type,
+        started_at=now,
+        ended_at=now,
+        status=status,
+        params=_jsonable_mapping(params),
+        counts=dict(counts or {}),
+        error_summary=error_summary,
+    )
+    storage.record_run(run)
+    return run
+
+
+def _jsonable_mapping(values: Mapping[str, Any]) -> dict[str, Any]:
+    return {str(key): _jsonable(value) for key, value in values.items()}
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, list | tuple | set):
+        return [_jsonable(item) for item in value]
+    return value
 
 
 def build_run_counts(**counts: Any) -> dict[str, int]:

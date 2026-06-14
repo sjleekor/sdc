@@ -43,6 +43,11 @@ def backfill_daily_prices(
     long_rest_interval: int = 100,
     long_rest_seconds: float = 10.0,
     incremental: bool = False,
+    lookback_days: int = 0,
+    max_auto_range_days: int | None = None,
+    new_ticker_start: date | None = None,
+    allow_new_ticker_backfill: bool = False,
+    allow_large_range: bool = False,
 ) -> BackfillResult:
     """Backfill daily OHLCV bars from *provider* into *storage*.
 
@@ -67,12 +72,20 @@ def backfill_daily_prices(
             "long_rest_interval": long_rest_interval,
             "long_rest_seconds": long_rest_seconds,
             "incremental": incremental,
+            "lookback_days": lookback_days,
+            "max_auto_range_days": max_auto_range_days,
+            "new_ticker_start": str(new_ticker_start) if new_ticker_start else None,
+            "allow_new_ticker_backfill": allow_new_ticker_backfill,
+            "allow_large_range": allow_large_range,
         },
     )
     storage.record_run(run)
 
     result = BackfillResult()
     api_requests_count = 0
+    no_work_tickers = 0
+    baseline_missing_tickers = 0
+    range_too_large_tickers = 0
 
     @retry(max_attempts=4, base_delay=0.5, backoff_factor=2.0)
     def _fetch_with_retry(t: str, m: Market, s: date, e: date) -> DailyPriceResult:
@@ -83,6 +96,11 @@ def backfill_daily_prices(
         return res
 
     try:
+        if lookback_days < 0:
+            raise ValueError("lookback_days must be >= 0")
+        if max_auto_range_days is not None and max_auto_range_days <= 0:
+            raise ValueError("max_auto_range_days must be positive")
+
         # 1. Resolve ticker list
         target_stocks: list[Stock] = []
         if tickers:
@@ -119,6 +137,8 @@ def backfill_daily_prices(
                 max_stored = storage.get_max_trade_date(ticker)
                 if max_stored:
                     next_date = max_stored + timedelta(days=1)
+                    if lookback_days > 0:
+                        next_date = min(next_date, resolved_end - timedelta(days=lookback_days))
                     if next_date > resolved_start:
                         logger.debug(
                             "Incremental: %s starts at %s (after last stored %s)",
@@ -127,6 +147,16 @@ def backfill_daily_prices(
                             max_stored,
                         )
                         resolved_start = next_date
+                elif start is None and not allow_new_ticker_backfill:
+                    if new_ticker_start is None:
+                        baseline_missing_tickers += 1
+                        result.errors[ticker] = (
+                            "No stored daily_ohlcv baseline for incremental backfill. "
+                            "Run explicit backfill or pass --new-ticker-start."
+                        )
+                        logger.warning("Skipping %s: %s", ticker, result.errors[ticker])
+                        continue
+                    resolved_start = new_ticker_start
             else:
                 # Clamp start to the ticker's earliest stored trade date (if any).
                 # This avoids re-requesting pre-listing / pre-data-start ranges
@@ -148,6 +178,22 @@ def backfill_daily_prices(
                     resolved_start,
                     resolved_end,
                 )
+                no_work_tickers += 1
+                continue
+
+            auto_range_days = (resolved_end - resolved_start).days + 1
+            if (
+                incremental
+                and max_auto_range_days is not None
+                and auto_range_days > max_auto_range_days
+                and not allow_large_range
+            ):
+                range_too_large_tickers += 1
+                result.errors[ticker] = (
+                    f"Resolved incremental range is too large "
+                    f"({auto_range_days} days > {max_auto_range_days})."
+                )
+                logger.warning("Skipping %s: %s", ticker, result.errors[ticker])
                 continue
             try:
                 ranges: list[tuple[date, date]] = []
@@ -231,6 +277,9 @@ def backfill_daily_prices(
         run.counts = {
             "tickers_processed": result.tickers_processed,
             "bars_upserted": result.bars_upserted,
+            "no_work_tickers": no_work_tickers,
+            "baseline_missing_tickers": baseline_missing_tickers,
+            "range_too_large_tickers": range_too_large_tickers,
             "error_count": len(result.errors),
         }
         if result.errors:

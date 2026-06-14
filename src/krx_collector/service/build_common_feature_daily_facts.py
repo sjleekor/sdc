@@ -7,7 +7,7 @@ import re
 from bisect import bisect_right
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from krx_collector.domain.enums import RunStatus, RunType
@@ -60,11 +60,15 @@ class _SeriesValue:
 
 def build_common_feature_daily_facts(
     storage: Storage,
-    start: date,
+    start: date | None,
     end: date,
     feature_codes: list[str] | None = None,
     active_only: bool = True,
     krx_trading_days: KrxTradingDayProvider | None = None,
+    incremental: bool = False,
+    lookback_days: int = 0,
+    max_auto_range_days: int | None = None,
+    allow_large_range: bool = False,
 ) -> CommonFeatureBuildResult:
     """Build point-in-time safe common feature facts for KRX trading days."""
     run = IngestionRun(
@@ -72,10 +76,14 @@ def build_common_feature_daily_facts(
         started_at=now_kst(),
         status=RunStatus.RUNNING,
         params={
-            "start": start.isoformat(),
+            "start": start.isoformat() if start else None,
             "end": end.isoformat(),
             "feature_codes": feature_codes,
             "active_only": active_only,
+            "incremental": incremental,
+            "lookback_days": lookback_days,
+            "max_auto_range_days": max_auto_range_days,
+            "allow_large_range": allow_large_range,
         },
     )
     storage.record_run(run)
@@ -85,12 +93,83 @@ def build_common_feature_daily_facts(
     generated_at = now_kst()
 
     try:
-        feature_dates = list(calendar(start, end))
+        if incremental and start is not None:
+            raise ValueError("common build-daily --incremental cannot be combined with start.")
+        if not incremental and start is None:
+            raise ValueError("common build-daily requires start unless incremental=True.")
+        if lookback_days < 0:
+            raise ValueError("lookback_days must be >= 0")
+        if max_auto_range_days is not None and max_auto_range_days <= 0:
+            raise ValueError("max_auto_range_days must be positive")
+
         catalog_rows = storage.get_common_feature_catalog(
             feature_codes=feature_codes,
             active_only=active_only,
         )
         result.features_processed = len(catalog_rows)
+        if incremental:
+            latest_by_feature = storage.get_common_feature_daily_fact_max_dates(
+                feature_codes=[feature.feature_code for feature in catalog_rows]
+            )
+            run.params["latest_by_feature"] = {
+                feature_code: latest.isoformat()
+                for feature_code, latest in sorted(latest_by_feature.items())
+            }
+            missing_features = [
+                feature.feature_code
+                for feature in catalog_rows
+                if feature.feature_code not in latest_by_feature
+            ]
+            if missing_features:
+                raise RuntimeError(
+                    "No stored common_feature_daily_fact baseline for incremental build. "
+                    f"Run explicit common build-daily backfill first. Missing: "
+                    f"{', '.join(missing_features[:10])}"
+                )
+            latest_fact_date = min(latest_by_feature.values()) if latest_by_feature else None
+            if latest_fact_date is None:
+                raise RuntimeError(
+                    "No stored common_feature_daily_fact baseline for incremental build."
+                )
+            resolved_start = latest_fact_date + timedelta(days=1)
+            if lookback_days > 0:
+                resolved_start = min(resolved_start, end - timedelta(days=lookback_days))
+        else:
+            resolved_start = start
+
+        if resolved_start > end:
+            complete_run(
+                storage,
+                run,
+                counts=build_run_counts(
+                    features_processed=result.features_processed,
+                    feature_dates_processed=0,
+                    facts_built=0,
+                    null_facts=0,
+                    facts_upserted=0,
+                    no_work=1,
+                ),
+                errors={},
+                partial_subject="common feature daily fact features",
+            )
+            return result
+
+        auto_range_days = (end - resolved_start).days + 1
+        if (
+            incremental
+            and max_auto_range_days is not None
+            and auto_range_days > max_auto_range_days
+            and not allow_large_range
+        ):
+            raise RuntimeError(
+                f"Resolved incremental common build range is too large "
+                f"({auto_range_days} days > {max_auto_range_days})."
+            )
+
+        run.params["resolved_start"] = resolved_start.isoformat()
+        run.params["resolved_end"] = end.isoformat()
+
+        feature_dates = list(calendar(resolved_start, end))
         result.feature_dates_processed = len(feature_dates)
 
         input_series_ids = sorted(

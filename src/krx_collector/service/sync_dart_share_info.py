@@ -38,6 +38,9 @@ def sync_dart_share_info(
     tickers: list[str] | None = None,
     rate_limit_seconds: float = 0.2,
     force: bool = False,
+    allowed_year_report_pairs: set[tuple[int, str]] | None = None,
+    skip_request_keys: set[str] | None = None,
+    run_params_extra: dict[str, object] | None = None,
 ) -> DartShareInfoSyncResult:
     """Synchronise OpenDART share-count/dividend/treasury-stock raw rows."""
     run = IngestionRun(
@@ -50,6 +53,12 @@ def sync_dart_share_info(
             "tickers": tickers,
             "rate_limit_seconds": rate_limit_seconds,
             "force": force,
+            "allowed_year_report_pairs": (
+                [f"{year}:{code}" for year, code in sorted(allowed_year_report_pairs)]
+                if allowed_year_report_pairs is not None
+                else None
+            ),
+            **(run_params_extra or {}),
         },
     )
     executor = _get_executor(share_count_provider) or _get_executor(shareholder_return_provider)
@@ -58,6 +67,8 @@ def sync_dart_share_info(
     storage.record_run(run)
 
     result = DartShareInfoSyncResult()
+    no_data_request_keys: list[str] = []
+    skip_request_keys = set() if force else (skip_request_keys or set())
     try:
         targets = storage.get_dart_corp_master(active_only=True, tickers=tickers)
         if not targets:
@@ -87,11 +98,23 @@ def sync_dart_share_info(
             result.targets_processed += 1
             for bsns_year in bsns_years:
                 for reprt_code in reprt_codes:
+                    if (
+                        allowed_year_report_pairs is not None
+                        and (bsns_year, reprt_code) not in allowed_year_report_pairs
+                    ):
+                        result.requests_skipped += 3
+                        continue
                     request_prefix = f"{corp.ticker}:{bsns_year}:{reprt_code}"
                     attempted_any = False
 
+                    share_count_key = f"{request_prefix}:share_count"
                     if (corp.corp_code, bsns_year, reprt_code) in existing_share_count_keys:
                         logger.debug("Skipping existing share_count request %s", request_prefix)
+                        result.requests_skipped += 1
+                    elif share_count_key in skip_request_keys:
+                        logger.debug(
+                            "Skipping negative-cached share_count request %s", request_prefix
+                        )
                         result.requests_skipped += 1
                     else:
                         result.requests_attempted += 1
@@ -117,12 +140,14 @@ def sync_dart_share_info(
                             )
                         elif share_count_result.no_data:
                             result.no_data_requests += 1
+                            no_data_request_keys.append(share_count_key)
                         elif share_count_result.records:
                             upsert = storage.upsert_dart_share_count_raw(share_count_result.records)
                             result.share_count_upsert.updated += upsert.updated
                             result.share_count_upsert.errors += upsert.errors
                             result.share_count_rows_upserted += upsert.updated
 
+                    dividend_key = f"{request_prefix}:dividend"
                     if (
                         corp.corp_code,
                         bsns_year,
@@ -130,6 +155,9 @@ def sync_dart_share_info(
                         "dividend",
                     ) in existing_return_keys:
                         logger.debug("Skipping existing dividend request %s", request_prefix)
+                        result.requests_skipped += 1
+                    elif dividend_key in skip_request_keys:
+                        logger.debug("Skipping negative-cached dividend request %s", request_prefix)
                         result.requests_skipped += 1
                     else:
                         result.requests_attempted += 1
@@ -153,6 +181,7 @@ def sync_dart_share_info(
                             result.errors[f"{request_prefix}:dividend"] = dividend_result.error
                         elif dividend_result.no_data:
                             result.no_data_requests += 1
+                            no_data_request_keys.append(dividend_key)
                         elif dividend_result.records:
                             upsert = storage.upsert_dart_shareholder_return_raw(
                                 dividend_result.records
@@ -161,6 +190,7 @@ def sync_dart_share_info(
                             result.shareholder_return_upsert.errors += upsert.errors
                             result.shareholder_return_rows_upserted += upsert.updated
 
+                    treasury_key = f"{request_prefix}:treasury_stock"
                     if (
                         corp.corp_code,
                         bsns_year,
@@ -168,6 +198,11 @@ def sync_dart_share_info(
                         "treasury_stock",
                     ) in existing_return_keys:
                         logger.debug("Skipping existing treasury_stock request %s", request_prefix)
+                        result.requests_skipped += 1
+                    elif treasury_key in skip_request_keys:
+                        logger.debug(
+                            "Skipping negative-cached treasury_stock request %s", request_prefix
+                        )
                         result.requests_skipped += 1
                     else:
                         result.requests_attempted += 1
@@ -193,6 +228,7 @@ def sync_dart_share_info(
                             )
                         elif treasury_result.no_data:
                             result.no_data_requests += 1
+                            no_data_request_keys.append(treasury_key)
                         elif treasury_result.records:
                             upsert = storage.upsert_dart_shareholder_return_raw(
                                 treasury_result.records
@@ -219,6 +255,9 @@ def sync_dart_share_info(
             errors=result.errors,
             partial_subject="share info requests",
         )
+        if no_data_request_keys:
+            run.params["no_data_request_keys"] = no_data_request_keys[:1000]
+            storage.record_run(run)
         return result
     except OpenDartKeyExhaustedError as exc:
         logger.warning("OpenDART share info sync stopped: %s", exc)

@@ -394,6 +394,14 @@ class Storage(Protocol):
         """Return raw common feature observations for sync/build services."""
         ...
 
+    def get_common_feature_observation_max_dates(
+        self,
+        sources: list[Source] | None = None,
+        series_ids: list[str] | None = None,
+    ) -> dict[str, date]:
+        """Return latest raw observation date grouped by ``series_id``."""
+        ...
+
     def upsert_common_feature_catalog(
         self,
         records: list[CommonFeatureCatalogEntry],
@@ -432,6 +440,25 @@ class Storage(Protocol):
         feature_codes: list[str] | None = None,
     ) -> dict[str, int]:
         """Return daily fact counts grouped by ``feature_code``."""
+        ...
+
+    def get_common_feature_daily_fact_max_dates(
+        self,
+        feature_codes: list[str] | None = None,
+    ) -> dict[str, date]:
+        """Return latest daily fact date grouped by ``feature_code``."""
+        ...
+
+    def get_table_bsns_year_range(self, table_name: str) -> tuple[int, int, int] | None:
+        """Return ``(min_year, max_year, rows)`` for a known business-year table."""
+        ...
+
+    def get_running_ingestion_runs(self, limit: int = 20) -> list[IngestionRun]:
+        """Return currently running ingestion runs ordered by start time."""
+        ...
+
+    def get_recent_ingestion_runs(self, run_type: RunType, limit: int = 20) -> list[IngestionRun]:
+        """Return recent ingestion runs for one run type, newest first."""
         ...
 
     def get_active_stocks(self, market: Market | None = None) -> list[Stock]:

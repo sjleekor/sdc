@@ -329,3 +329,190 @@ docker compose run --rm collector flows sync --incremental --lookback-days "${FL
 - `flows sync --incremental --lookback-days 14`가 `2007-06-05` 같은 full price start를 계산하지 않는지 확인.
 - 현재 sj2 상태 기준으로 investor/shorting 지연 구간을 포함하는 범위가 계산되는지 확인.
 - 배포 후 Cronicle 로그에서 `Price range resolved: start=2007-06-05`가 더 이상 출력되지 않는지 확인한다.
+
+## 11. 진행상황 및 세션 인계 메모
+
+최종 갱신: 2026-06-13 08:03 KST
+
+### 11.1 완료된 구현/배포
+
+- Unit 1~6의 핵심 구현은 완료했다.
+- `flows sync --incremental`을 추가했고, `FLOW_LOOKBACK_DAYS`, `FLOW_MAX_AUTO_RANGE_DAYS`, `FLOW_EXCLUDE_GROUPS`를 받는 일일 래퍼로 전환했다.
+- `deploy/prod/bin/flows-backfill-range.sh`를 추가해 명시 범위 백필 경로를 분리했다.
+- `ingestion_runs.params`에 증분 실행 감사 정보가 기록된다.
+- `v0.8.10` 이미지가 sj2-server 운영 compose에 배포되어 있다.
+- 배포 후 smoke test:
+  - `FLOW_EXCLUDE_GROUPS=investor,shorting FLOW_LOOKBACK_DAYS=0 ./bin/flows-sync.sh`
+  - 결과 run: `b893d9d6-9090-42f1-9145-1f9220188da1`
+  - `enabled_flow_groups=["foreign_holding"]`
+  - `resolved_start=2026-06-10`, `resolved_end=2026-06-10`
+  - `status=success`, `requests_attempted=0`, `requests_skipped=2`
+
+### 11.2 운영 DB 정리
+
+- 2026-06-13 00:01 KST 기준 오래된 `ingestion_runs.status='running'` 고아 run 18건을 `failed`로 정리했다.
+- 이후 잘못 시작된 명시 범위 run 1건도 `failed`로 정리했다.
+  - run_id: `e7f5a05c-63c1-4262-80f8-bb1c4cd7c67e`
+  - 사유: v0.8.10 CLI에서 명시 `--start/--end` 실행 시 `--exclude-groups`가 실제 수집 group에 반영되지 않음.
+
+### 11.3 발견된 추가 버그와 로컬 수정 상태
+
+v0.8.10에는 다음 버그가 남아 있다.
+
+- `flows sync --start ... --end ... --exclude-groups ...`에서 `--exclude-groups`가 로그에는 찍히지만 실제 `enabled_flow_groups`에는 반영되지 않는다.
+- 기존 구현이 `enabled_flow_groups` 계산을 `--incremental` 분기 안에서만 수행했기 때문이다.
+
+로컬 workspace에는 이 문제를 수정한 변경이 아직 미커밋 상태로 남아 있다.
+
+- `src/krx_collector/cli/app.py`
+  - `exclude_groups`와 `enabled_flow_groups` 계산을 `--incremental` 여부와 분리해 항상 적용하도록 수정.
+  - `--exclude-groups` help text를 "range resolution and collection"으로 수정.
+- `deploy/prod/bin/flows-backfill-range.sh`
+  - `FLOW_EXCLUDE_GROUPS`를 받아 `--exclude-groups`로 전달하도록 수정.
+- `tests/unit/test_sync_krx_flows.py`
+  - 명시 범위 실행에서 `--exclude-groups foreign_holding`가 `enabled_flow_groups=["investor","shorting"]`로 전달되는 회귀 테스트 추가.
+
+검증 결과:
+
+```bash
+uv run pytest
+# 289 passed, 10 skipped
+
+uv run ruff check src tests
+# All checks passed
+```
+
+다음 세션에서는 이 로컬 수정분을 commit/release/deploy해야 한다.
+
+### 11.4 현재 진행 중인 investor/shorting catch-up
+
+목표:
+
+- `investor`, `shorting` 계열 metric을 `2026-05-22`부터 `2026-06-10`까지 보강한다.
+- `foreign_holding`은 이미 `2026-06-10`까지 있으므로 제외한다.
+
+v0.8.10 CLI 버그 때문에 wrapper/CLI를 쓰지 않고, 운영 컨테이너 안에서 service API를 직접 호출해 `enabled_flow_groups=["investor","shorting"]`를 명시했다.
+
+현재 실행 정보:
+
+- run_id: `b1adfe71-7ee1-4210-8770-a3985c3750dd`
+- 상태: `running`
+- 시작: `2026-06-13 00:07:58 KST`
+- 대상 범위: `2026-05-22..2026-06-10`
+- 대상 group: `["investor", "shorting"]`
+- 로그 파일: `/home/whi/apps/sdc/logs/flows-catchup-investor-shorting-20260613.log`
+- 실행 컨테이너: `sdc-collector-run-e1b292d14c79` (`8bf86651cc82`)
+
+2026-06-13 08:03 KST 기준 진행률:
+
+```text
+processed=1689/5538
+attempted=1689
+skipped=0
+rows_upserted=59379
+no_data=32
+errors=1
+```
+
+주의:
+
+- 최신 metric 일자는 이미 모두 `2026-06-10`까지 올라왔다.
+- 단, catch-up run 자체는 아직 전체 ticker-group을 완료하지 않았다. "최신일자 도달"과 "전체 run 완료"를 분리해서 판단해야 한다.
+- 중복 실행을 피하기 위해 이 run이 종료되기 전에는 같은 범위 catch-up을 새로 시작하지 않는다.
+
+2026-06-13 08:03 KST 기준 sj2 운영 DB의 최신일:
+
+```text
+foreign_net_buy_volume          2026-06-10
+individual_net_buy_volume       2026-06-10
+institution_net_buy_volume      2026-06-10
+short_selling_balance_quantity  2026-06-10
+short_selling_value             2026-06-10
+short_selling_volume            2026-06-10
+```
+
+### 11.5 다음 세션에서 먼저 확인할 것
+
+1. catch-up 컨테이너가 아직 실행 중인지 확인한다.
+
+```bash
+ssh whi@sj2-server 'docker ps --format "{{.ID}} {{.Names}} {{.Status}}" | grep sdc-collector-run || true'
+```
+
+2. catch-up 로그 tail을 확인한다.
+
+```bash
+ssh whi@sj2-server 'tail -n 80 /home/whi/apps/sdc/logs/flows-catchup-investor-shorting-20260613.log'
+```
+
+3. run 상태를 확인한다.
+
+```bash
+.agents/skills/sdc-db/scripts/dbq.sh sj2 "
+select run_id, status, started_at, ended_at, now() - started_at as age,
+       params->>'enabled_flow_groups' as enabled_flow_groups,
+       counts,
+       left(coalesce(error_summary,''), 300) as error_summary
+  from ingestion_runs
+ where run_id='b1adfe71-7ee1-4210-8770-a3985c3750dd'::uuid;
+"
+```
+
+4. catch-up 종료 후 metric 최신일과 범위 coverage를 다시 확인한다.
+
+```bash
+.agents/skills/sdc-db/scripts/dbq.sh sj2 "
+select metric_code, max(trade_date) as max_trade_date
+  from krx_security_flow_raw
+ where metric_code in (
+       'institution_net_buy_volume',
+       'individual_net_buy_volume',
+       'foreign_net_buy_volume',
+       'short_selling_volume',
+       'short_selling_value',
+       'short_selling_balance_quantity'
+ )
+ group by metric_code
+ order by metric_code;
+"
+```
+
+```bash
+.agents/skills/sdc-db/scripts/dbq.sh sj2 "
+select metric_code,
+       min(trade_date) as min_trade_date,
+       max(trade_date) as max_trade_date,
+       count(distinct trade_date) as trade_dates,
+       count(distinct ticker) as tickers,
+       count(*) as rows
+  from krx_security_flow_raw
+ where trade_date between date '2026-05-22' and date '2026-06-10'
+   and metric_code in (
+       'institution_net_buy_volume',
+       'individual_net_buy_volume',
+       'foreign_net_buy_volume',
+       'short_selling_volume',
+       'short_selling_value',
+       'short_selling_balance_quantity'
+   )
+ group by metric_code
+ order by metric_code;
+"
+```
+
+5. run이 `partial` 또는 `failed`로 끝났다면 `error_summary`와 로그의 error sample을 보고 재시도 범위를 결정한다.
+
+6. 로컬의 CLI/wrapper 수정분을 commit하고 patch release를 만든 뒤 sj2에 배포한다.
+
+권장 순서:
+
+```bash
+git status --short
+uv run pytest
+uv run ruff check src tests
+uv run python .agents/skills/sdc-release/scripts/release.py --bump patch --stage-all --remote-update
+uv run python .agents/skills/sdc-release/scripts/release.py --bump patch --stage-all --remote-update --apply
+./deploy/deploy_to_sj2.sh
+```
+
+release 후에는 `docker compose pull collector`와 운영 smoke test로 새 이미지/wrapper가 `FLOW_EXCLUDE_GROUPS`를 명시 범위에도 반영하는지 확인한다.

@@ -171,6 +171,231 @@ def _handle_db_sync_remote(args: argparse.Namespace) -> None:
         print(f"   - {table_name}: {row_count}")
 
 
+def _handle_ops_freshness_report(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector ops freshness-report``."""
+    settings = get_settings()
+
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.freshness import build_freshness_report
+
+    storage = PostgresStorage(settings.db_dsn)
+    report = build_freshness_report(storage, running_limit=args.running_limit)
+
+    print("✅ Freshness report generated.")
+    print(f"   - daily_ohlcv latest: {report.price_latest_date or '-'}")
+
+    print("   - flow group latest:")
+    for group, latest in sorted(report.flow_group_latest_dates.items()):
+        print(f"     {group}: {latest or '-'}")
+
+    print("   - common raw latest by source:")
+    common_by_source: dict[str, list[str]] = {}
+    for row in report.common_series:
+        common_by_source.setdefault(row.source.value, []).append(
+            f"{row.series_id}={row.latest_observation_date or '-'}"
+        )
+    for source, rows in sorted(common_by_source.items()):
+        preview = ", ".join(rows[:8])
+        suffix = "" if len(rows) <= 8 else f", ... (+{len(rows) - 8})"
+        print(f"     {source}: {preview}{suffix}")
+
+    if report.common_fact_latest_dates:
+        latest_fact = max(report.common_fact_latest_dates.values())
+        print(f"   - common daily fact latest: {latest_fact}")
+    else:
+        print("   - common daily fact latest: -")
+
+    print("   - DART/metric year ranges:")
+    for row in report.dart_year_ranges:
+        year_range = (
+            f"{row.min_year}..{row.max_year}" if row.min_year is not None else "-"
+        )
+        print(f"     {row.table_name}: years={year_range} rows={row.rows}")
+
+    print("   - running ingestion runs:")
+    if not report.running_runs:
+        print("     -")
+    for run in report.running_runs:
+        started_at = run.started_at.isoformat() if run.started_at else "-"
+        print(f"     {run.run_id} {run.run_type.value} started_at={started_at}")
+
+
+def _handle_ops_assert_common_freshness(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector ops assert-common-freshness``."""
+    settings = get_settings()
+
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.freshness import assert_common_freshness
+    from krx_collector.util.time import today_kst
+
+    end = args.end or today_kst()
+    series_ids = _split_csv(args.series)
+    storage = PostgresStorage(settings.db_dsn)
+    result = assert_common_freshness(
+        storage=storage,
+        sources=args.sources,
+        end=end,
+        max_run_age_hours=args.max_run_age_hours,
+        daily_max_lag_days=args.daily_max_lag_days,
+        macro_max_lag_days=args.macro_max_lag_days,
+        series_ids=series_ids,
+    )
+
+    source_text = ",".join(source.value.lower() for source in result.sources)
+    if result.ok:
+        print(
+            "✅ Common freshness assertion passed. "
+            f"sources={source_text} checked_series={result.checked_series} end={end}"
+        )
+        for row in result.run_freshness:
+            age = "-" if row.age_hours is None else f"{row.age_hours:.1f}h"
+            ended_at = row.ended_at.isoformat() if row.ended_at else "-"
+            print(f"   - {row.source.value}: run={row.run_id or '-'} ended_at={ended_at} age={age}")
+        return
+
+    print(
+        "❌ Common freshness assertion failed. "
+        f"sources={source_text} checked_series={result.checked_series} end={end}",
+        file=sys.stderr,
+    )
+    for violation in result.violations:
+        series = f" series={violation.series_id}" if violation.series_id else ""
+        print(
+            f"   - {violation.source.value} {violation.check}{series}: "
+            f"{violation.message}",
+            file=sys.stderr,
+        )
+    sys.exit(2)
+
+
+def _dart_financial_actual_attempt_estimate(
+    *,
+    storage: object,
+    targets: list[object],
+    allowed_pairs: set[tuple[int, str]],
+    fs_divs: list[str],
+    force: bool,
+    skip_request_keys: set[str],
+) -> int:
+    if force:
+        existing_keys: set[tuple[str, int, str, str]] = set()
+        effective_skip_keys: set[str] = set()
+    else:
+        existing_keys = storage.get_existing_dart_financial_statement_keys(
+            bsns_years=sorted({year for year, _ in allowed_pairs}),
+            reprt_codes=sorted({reprt_code for _, reprt_code in allowed_pairs}),
+            fs_divs=fs_divs,
+            corp_codes=[corp.corp_code for corp in targets],
+        )
+        effective_skip_keys = skip_request_keys
+
+    attempts = 0
+    for corp in targets:
+        for bsns_year, reprt_code in allowed_pairs:
+            for fs_div in fs_divs:
+                request_key = f"{corp.ticker}:{bsns_year}:{reprt_code}:{fs_div}"
+                if (corp.corp_code, bsns_year, reprt_code, fs_div) in existing_keys:
+                    continue
+                if request_key in effective_skip_keys:
+                    continue
+                attempts += 1
+    return attempts
+
+
+def _dart_share_info_actual_attempt_estimate(
+    *,
+    storage: object,
+    targets: list[object],
+    allowed_pairs: set[tuple[int, str]],
+    force: bool,
+    skip_request_keys: set[str],
+) -> int:
+    if force:
+        existing_share_count_keys: set[tuple[str, int, str]] = set()
+        existing_return_keys: set[tuple[str, int, str, str]] = set()
+        effective_skip_keys: set[str] = set()
+    else:
+        bsns_years = sorted({year for year, _ in allowed_pairs})
+        reprt_codes = sorted({reprt_code for _, reprt_code in allowed_pairs})
+        corp_codes = [corp.corp_code for corp in targets]
+        existing_share_count_keys = storage.get_existing_dart_share_count_keys(
+            bsns_years=bsns_years,
+            reprt_codes=reprt_codes,
+            corp_codes=corp_codes,
+        )
+        existing_return_keys = storage.get_existing_dart_shareholder_return_keys(
+            bsns_years=bsns_years,
+            reprt_codes=reprt_codes,
+            corp_codes=corp_codes,
+        )
+        effective_skip_keys = skip_request_keys
+
+    attempts = 0
+    for corp in targets:
+        for bsns_year, reprt_code in allowed_pairs:
+            request_prefix = f"{corp.ticker}:{bsns_year}:{reprt_code}"
+            if (
+                (corp.corp_code, bsns_year, reprt_code) not in existing_share_count_keys
+                and f"{request_prefix}:share_count" not in effective_skip_keys
+            ):
+                attempts += 1
+            if (
+                (corp.corp_code, bsns_year, reprt_code, "dividend") not in existing_return_keys
+                and f"{request_prefix}:dividend" not in effective_skip_keys
+            ):
+                attempts += 1
+            if (
+                (corp.corp_code, bsns_year, reprt_code, "treasury_stock")
+                not in existing_return_keys
+                and f"{request_prefix}:treasury_stock" not in effective_skip_keys
+            ):
+                attempts += 1
+    return attempts
+
+
+def _dart_xbrl_actual_attempt_estimate(
+    *,
+    storage: object,
+    allowed_pairs: set[tuple[int, str]],
+    tickers: list[str] | None,
+    force: bool,
+    skip_request_keys: set[str],
+) -> int:
+    bsns_years = sorted({year for year, _ in allowed_pairs})
+    reprt_codes = sorted({reprt_code for _, reprt_code in allowed_pairs})
+    corp_rows = storage.get_dart_corp_master(active_only=True, tickers=tickers)
+    corp_by_ticker = {corp.ticker: corp for corp in corp_rows if corp.ticker}
+    financial_rows = storage.get_dart_financial_statement_raw(bsns_years, reprt_codes, tickers)
+    request_targets: set[tuple[str, int, str, str]] = set()
+    for row in financial_rows:
+        if row.ticker and row.rcept_no and (row.bsns_year, row.reprt_code) in allowed_pairs:
+            request_targets.add((row.ticker, row.bsns_year, row.reprt_code, row.rcept_no))
+
+    if force:
+        existing_doc_keys: set[tuple[str, int, str, str]] = set()
+        effective_skip_keys: set[str] = set()
+    else:
+        existing_doc_keys = storage.get_existing_dart_xbrl_document_keys(
+            bsns_years=bsns_years,
+            reprt_codes=reprt_codes,
+            corp_codes=[corp.corp_code for corp in corp_by_ticker.values()],
+        )
+        effective_skip_keys = skip_request_keys
+
+    attempts = 0
+    for ticker, bsns_year, reprt_code, rcept_no in request_targets:
+        corp = corp_by_ticker.get(ticker)
+        if corp is None:
+            continue
+        request_key = f"{ticker}:{bsns_year}:{reprt_code}:{rcept_no}"
+        if (corp.corp_code, bsns_year, reprt_code, rcept_no) in existing_doc_keys:
+            continue
+        if request_key in effective_skip_keys:
+            continue
+        attempts += 1
+    return attempts
+
+
 def _handle_dart_sync_corp(args: argparse.Namespace) -> None:
     """Handle ``krx-collector dart sync-corp``."""
     settings = get_settings()
@@ -213,6 +438,8 @@ def _handle_dart_sync_financials(args: argparse.Namespace) -> None:
     reprt_codes = [value.strip() for value in args.reprt_codes.split(",") if value.strip()]
     fs_divs = [value.strip().upper() for value in args.fs_divs.split(",") if value.strip()]
     tickers = [value.strip() for value in args.tickers.split(",")] if args.tickers else None
+    if args.incremental and args.reprt_codes == "11011":
+        reprt_codes = ["11011", "11012", "11013", "11014"]
 
     print(
         f"→ dart sync-financials: years={bsns_years}, reprt_codes={reprt_codes}, "
@@ -233,6 +460,93 @@ def _handle_dart_sync_financials(args: argparse.Namespace) -> None:
 
     provider = OpenDartFinancialStatementProvider(request_executor=request_executor)
     storage = PostgresStorage(settings.db_dsn)
+    allowed_year_report_pairs = None
+    skip_request_keys = None
+    run_params_extra = None
+    if args.incremental:
+        from krx_collector.domain.enums import RunStatus, RunType
+        from krx_collector.service.dart_target_plan import build_dart_target_plan
+        from krx_collector.util.pipeline import record_terminal_run
+
+        active_targets = storage.get_dart_corp_master(active_only=True, tickers=tickers)
+        active_count = len(active_targets)
+        plan = build_dart_target_plan(
+            storage,
+            run_type=RunType.DART_FINANCIAL_SYNC,
+            active_corp_count=active_count,
+            requests_per_corp_target=len(fs_divs),
+            lookback_years=args.lookback_years,
+            reprt_codes=reprt_codes,
+            negative_cache_ttl_days=args.negative_cache_ttl_days,
+        )
+        if not plan.allowed_year_report_pairs:
+            record_terminal_run(
+                storage,
+                run_type=RunType.DART_FINANCIAL_SYNC,
+                status=RunStatus.SUCCESS,
+                params={**plan.audit_params(), "no_work": True},
+                counts={"requests_attempted": 0, "requests_skipped": 0},
+            )
+            print("✅ OpenDART financial sync skipped: no available incremental targets.")
+            return
+        actual_attempt_estimate = _dart_financial_actual_attempt_estimate(
+            storage=storage,
+            targets=active_targets,
+            allowed_pairs=plan.allowed_year_report_pairs,
+            fs_divs=fs_divs,
+            force=args.force,
+            skip_request_keys=plan.negative_cache_request_keys,
+        )
+        if actual_attempt_estimate == 0:
+            audit_params = {
+                **plan.audit_params(),
+                "prefilter_estimated_request_count": plan.estimated_request_count,
+                "estimated_request_count": actual_attempt_estimate,
+                "no_work": True,
+            }
+            record_terminal_run(
+                storage,
+                run_type=RunType.DART_FINANCIAL_SYNC,
+                status=RunStatus.SUCCESS,
+                params=audit_params,
+                counts={"requests_attempted": 0, "requests_skipped": 0},
+            )
+            print("✅ OpenDART financial sync skipped: no incremental request candidates.")
+            return
+        if actual_attempt_estimate > args.max_attempt_targets:
+            audit_params = {
+                **plan.audit_params(),
+                "prefilter_estimated_request_count": plan.estimated_request_count,
+                "estimated_request_count": actual_attempt_estimate,
+                "max_attempt_targets": args.max_attempt_targets,
+            }
+            record_terminal_run(
+                storage,
+                run_type=RunType.DART_FINANCIAL_SYNC,
+                status=RunStatus.FAILED,
+                params=audit_params,
+                counts={"estimated_request_count": actual_attempt_estimate},
+                error_summary=(
+                    f"Estimated OpenDART requests exceed guard "
+                    f"({actual_attempt_estimate} > {args.max_attempt_targets})."
+                ),
+            )
+            print(
+                "❌ OpenDART financial sync failed: estimated requests exceed guard "
+                f"({actual_attempt_estimate} > {args.max_attempt_targets}).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        bsns_years = plan.bsns_years
+        reprt_codes = plan.reprt_codes
+        allowed_year_report_pairs = plan.allowed_year_report_pairs
+        skip_request_keys = set() if args.force else plan.negative_cache_request_keys
+        run_params_extra = {
+            **plan.audit_params(),
+            "prefilter_estimated_request_count": plan.estimated_request_count,
+            "estimated_request_count": actual_attempt_estimate,
+            "force_bypasses_negative_cache": args.force,
+        }
     result = sync_dart_financial_statements(
         provider=provider,
         storage=storage,
@@ -242,6 +556,9 @@ def _handle_dart_sync_financials(args: argparse.Namespace) -> None:
         tickers=tickers,
         rate_limit_seconds=args.rate_limit_seconds,
         force=args.force,
+        allowed_year_report_pairs=allowed_year_report_pairs,
+        skip_request_keys=skip_request_keys,
+        run_params_extra=run_params_extra,
     )
 
     if result.errors:
@@ -266,6 +583,8 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
     bsns_years = [int(value.strip()) for value in args.bsns_years.split(",") if value.strip()]
     reprt_codes = [value.strip() for value in args.reprt_codes.split(",") if value.strip()]
     tickers = [value.strip() for value in args.tickers.split(",")] if args.tickers else None
+    if args.incremental and args.reprt_codes == "11011":
+        reprt_codes = ["11011", "11012", "11013", "11014"]
 
     print(
         f"→ dart sync-share-info: years={bsns_years}, reprt_codes={reprt_codes}, "
@@ -284,6 +603,92 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
 
     provider = OpenDartShareInfoProvider(request_executor=request_executor)
     storage = PostgresStorage(settings.db_dsn)
+    allowed_year_report_pairs = None
+    skip_request_keys = None
+    run_params_extra = None
+    if args.incremental:
+        from krx_collector.domain.enums import RunStatus, RunType
+        from krx_collector.service.dart_target_plan import build_dart_target_plan
+        from krx_collector.util.pipeline import record_terminal_run
+
+        active_targets = storage.get_dart_corp_master(active_only=True, tickers=tickers)
+        active_count = len(active_targets)
+        plan = build_dart_target_plan(
+            storage,
+            run_type=RunType.DART_SHARE_INFO_SYNC,
+            active_corp_count=active_count,
+            requests_per_corp_target=3,
+            lookback_years=args.lookback_years,
+            reprt_codes=reprt_codes,
+            negative_cache_ttl_days=args.negative_cache_ttl_days,
+        )
+        if not plan.allowed_year_report_pairs:
+            record_terminal_run(
+                storage,
+                run_type=RunType.DART_SHARE_INFO_SYNC,
+                status=RunStatus.SUCCESS,
+                params={**plan.audit_params(), "no_work": True},
+                counts={"requests_attempted": 0, "requests_skipped": 0},
+            )
+            print("✅ OpenDART share info sync skipped: no available incremental targets.")
+            return
+        actual_attempt_estimate = _dart_share_info_actual_attempt_estimate(
+            storage=storage,
+            targets=active_targets,
+            allowed_pairs=plan.allowed_year_report_pairs,
+            force=args.force,
+            skip_request_keys=plan.negative_cache_request_keys,
+        )
+        if actual_attempt_estimate == 0:
+            audit_params = {
+                **plan.audit_params(),
+                "prefilter_estimated_request_count": plan.estimated_request_count,
+                "estimated_request_count": actual_attempt_estimate,
+                "no_work": True,
+            }
+            record_terminal_run(
+                storage,
+                run_type=RunType.DART_SHARE_INFO_SYNC,
+                status=RunStatus.SUCCESS,
+                params=audit_params,
+                counts={"requests_attempted": 0, "requests_skipped": 0},
+            )
+            print("✅ OpenDART share info sync skipped: no incremental request candidates.")
+            return
+        if actual_attempt_estimate > args.max_attempt_targets:
+            audit_params = {
+                **plan.audit_params(),
+                "prefilter_estimated_request_count": plan.estimated_request_count,
+                "estimated_request_count": actual_attempt_estimate,
+                "max_attempt_targets": args.max_attempt_targets,
+            }
+            record_terminal_run(
+                storage,
+                run_type=RunType.DART_SHARE_INFO_SYNC,
+                status=RunStatus.FAILED,
+                params=audit_params,
+                counts={"estimated_request_count": actual_attempt_estimate},
+                error_summary=(
+                    f"Estimated OpenDART requests exceed guard "
+                    f"({actual_attempt_estimate} > {args.max_attempt_targets})."
+                ),
+            )
+            print(
+                "❌ OpenDART share info sync failed: estimated requests exceed guard "
+                f"({actual_attempt_estimate} > {args.max_attempt_targets}).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        bsns_years = plan.bsns_years
+        reprt_codes = plan.reprt_codes
+        allowed_year_report_pairs = plan.allowed_year_report_pairs
+        skip_request_keys = set() if args.force else plan.negative_cache_request_keys
+        run_params_extra = {
+            **plan.audit_params(),
+            "prefilter_estimated_request_count": plan.estimated_request_count,
+            "estimated_request_count": actual_attempt_estimate,
+            "force_bypasses_negative_cache": args.force,
+        }
     result = sync_dart_share_info(
         share_count_provider=provider,
         shareholder_return_provider=provider,
@@ -293,6 +698,9 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
         tickers=tickers,
         rate_limit_seconds=args.rate_limit_seconds,
         force=args.force,
+        allowed_year_report_pairs=allowed_year_report_pairs,
+        skip_request_keys=skip_request_keys,
+        run_params_extra=run_params_extra,
     )
 
     if result.errors:
@@ -318,6 +726,8 @@ def _handle_dart_sync_xbrl(args: argparse.Namespace) -> None:
     bsns_years = [int(value.strip()) for value in args.bsns_years.split(",") if value.strip()]
     reprt_codes = [value.strip() for value in args.reprt_codes.split(",") if value.strip()]
     tickers = [value.strip() for value in args.tickers.split(",")] if args.tickers else None
+    if args.incremental and args.reprt_codes == "11011":
+        reprt_codes = ["11011", "11012", "11013", "11014"]
 
     print(
         f"→ dart sync-xbrl: years={bsns_years}, reprt_codes={reprt_codes}, "
@@ -336,6 +746,91 @@ def _handle_dart_sync_xbrl(args: argparse.Namespace) -> None:
 
     provider = OpenDartXbrlProvider(request_executor=request_executor)
     storage = PostgresStorage(settings.db_dsn)
+    allowed_year_report_pairs = None
+    skip_request_keys = None
+    run_params_extra = None
+    if args.incremental:
+        from krx_collector.domain.enums import RunStatus, RunType
+        from krx_collector.service.dart_target_plan import build_dart_target_plan
+        from krx_collector.util.pipeline import record_terminal_run
+
+        active_count = len(storage.get_dart_corp_master(active_only=True, tickers=tickers))
+        plan = build_dart_target_plan(
+            storage,
+            run_type=RunType.XBRL_PARSE,
+            active_corp_count=active_count,
+            requests_per_corp_target=1,
+            lookback_years=args.lookback_years,
+            reprt_codes=reprt_codes,
+            negative_cache_ttl_days=args.negative_cache_ttl_days,
+        )
+        if not plan.allowed_year_report_pairs:
+            record_terminal_run(
+                storage,
+                run_type=RunType.XBRL_PARSE,
+                status=RunStatus.SUCCESS,
+                params={**plan.audit_params(), "no_work": True},
+                counts={"requests_attempted": 0, "requests_skipped": 0},
+            )
+            print("✅ OpenDART XBRL sync skipped: no available incremental targets.")
+            return
+        actual_attempt_estimate = _dart_xbrl_actual_attempt_estimate(
+            storage=storage,
+            allowed_pairs=plan.allowed_year_report_pairs,
+            tickers=tickers,
+            force=args.force,
+            skip_request_keys=plan.negative_cache_request_keys,
+        )
+        if actual_attempt_estimate == 0:
+            audit_params = {
+                **plan.audit_params(),
+                "prefilter_estimated_request_count": plan.estimated_request_count,
+                "estimated_request_count": actual_attempt_estimate,
+                "no_work": True,
+            }
+            record_terminal_run(
+                storage,
+                run_type=RunType.XBRL_PARSE,
+                status=RunStatus.SUCCESS,
+                params=audit_params,
+                counts={"requests_attempted": 0, "requests_skipped": 0},
+            )
+            print("✅ OpenDART XBRL sync skipped: no incremental request candidates.")
+            return
+        if actual_attempt_estimate > args.max_attempt_targets:
+            audit_params = {
+                **plan.audit_params(),
+                "prefilter_estimated_request_count": plan.estimated_request_count,
+                "estimated_request_count": actual_attempt_estimate,
+                "max_attempt_targets": args.max_attempt_targets,
+            }
+            record_terminal_run(
+                storage,
+                run_type=RunType.XBRL_PARSE,
+                status=RunStatus.FAILED,
+                params=audit_params,
+                counts={"estimated_request_count": actual_attempt_estimate},
+                error_summary=(
+                    f"Estimated OpenDART requests exceed guard "
+                    f"({actual_attempt_estimate} > {args.max_attempt_targets})."
+                ),
+            )
+            print(
+                "❌ OpenDART XBRL sync failed: estimated requests exceed guard "
+                f"({actual_attempt_estimate} > {args.max_attempt_targets}).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        bsns_years = plan.bsns_years
+        reprt_codes = plan.reprt_codes
+        allowed_year_report_pairs = plan.allowed_year_report_pairs
+        skip_request_keys = set() if args.force else plan.negative_cache_request_keys
+        run_params_extra = {
+            **plan.audit_params(),
+            "prefilter_estimated_request_count": plan.estimated_request_count,
+            "estimated_request_count": actual_attempt_estimate,
+            "force_bypasses_negative_cache": args.force,
+        }
     result = sync_dart_xbrl(
         provider=provider,
         storage=storage,
@@ -344,6 +839,9 @@ def _handle_dart_sync_xbrl(args: argparse.Namespace) -> None:
         tickers=tickers,
         rate_limit_seconds=args.rate_limit_seconds,
         force=args.force,
+        allowed_year_report_pairs=allowed_year_report_pairs,
+        skip_request_keys=skip_request_keys,
+        run_params_extra=run_params_extra,
     )
 
     if result.errors:
@@ -368,10 +866,14 @@ def _handle_metrics_normalize(args: argparse.Namespace) -> None:
     bsns_years = [int(value.strip()) for value in args.bsns_years.split(",") if value.strip()]
     reprt_codes = [value.strip() for value in args.reprt_codes.split(",") if value.strip()]
     tickers = [value.strip() for value in args.tickers.split(",")] if args.tickers else None
+    if args.incremental:
+        current_year = date.today().year
+        bsns_years = [current_year - offset for offset in range(args.lookback_years + 1)]
 
     print(
         f"→ metrics normalize: years={bsns_years}, reprt_codes={reprt_codes}, "
-        f"tickers={tickers}, batch_size={args.batch_size}"
+        f"tickers={tickers}, batch_size={args.batch_size}, "
+        f"incremental={args.incremental}, lookback_years={args.lookback_years}"
     )
 
     from krx_collector.infra.config.settings import get_settings as _get_settings
@@ -386,6 +888,7 @@ def _handle_metrics_normalize(args: argparse.Namespace) -> None:
         reprt_codes=reprt_codes,
         tickers=tickers,
         batch_size=args.batch_size,
+        incremental=args.incremental,
     )
 
     if result.errors:
@@ -469,7 +972,10 @@ def _handle_common_sync(args: argparse.Namespace) -> None:
         f"→ common sync: sources={[source.value for source in sources]}, "
         f"series={series_ids}, start={args.start}, end={args.end}, "
         f"force={args.force}, rate_limit={args.rate_limit_seconds}, "
-        f"include_inactive={include_inactive}, init_schema={args.init_schema}"
+        f"include_inactive={include_inactive}, init_schema={args.init_schema}, "
+        f"incremental={args.incremental}, lookback_days={args.lookback_days}, "
+        f"max_auto_range_days={args.max_auto_range_days}, "
+        f"allow_large_range={args.allow_large_range}"
     )
 
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
@@ -489,6 +995,10 @@ def _handle_common_sync(args: argparse.Namespace) -> None:
         active_only=not include_inactive,
         force=args.force,
         rate_limit_seconds=args.rate_limit_seconds,
+        incremental=args.incremental,
+        lookback_days=args.lookback_days,
+        max_auto_range_days=args.max_auto_range_days,
+        allow_large_range=args.allow_large_range,
     )
 
     if result.errors:
@@ -504,6 +1014,8 @@ def _handle_common_sync(args: argparse.Namespace) -> None:
     if result.errors:
         for request_key, error in list(result.errors.items())[:10]:
             print(f"   - Error {request_key}: {error}")
+        if args.incremental:
+            sys.exit(1)
 
 
 def _handle_common_build_daily(args: argparse.Namespace) -> None:
@@ -517,7 +1029,10 @@ def _handle_common_build_daily(args: argparse.Namespace) -> None:
     print(
         f"→ common build-daily: feature_codes={feature_codes}, "
         f"start={args.start}, end={args.end}, include_inactive={include_inactive}, "
-        f"init_schema={args.init_schema}"
+        f"init_schema={args.init_schema}, incremental={args.incremental}, "
+        f"lookback_days={args.lookback_days}, "
+        f"max_auto_range_days={args.max_auto_range_days}, "
+        f"allow_large_range={args.allow_large_range}"
     )
 
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
@@ -535,6 +1050,10 @@ def _handle_common_build_daily(args: argparse.Namespace) -> None:
         end=args.end,
         feature_codes=feature_codes,
         active_only=not include_inactive,
+        incremental=args.incremental,
+        lookback_days=args.lookback_days,
+        max_auto_range_days=args.max_auto_range_days,
+        allow_large_range=args.allow_large_range,
     )
 
     if result.errors:
@@ -553,6 +1072,8 @@ def _handle_common_build_daily(args: argparse.Namespace) -> None:
     if result.errors:
         for feature_code, error in list(result.errors.items())[:10]:
             print(f"   - Error {feature_code}: {error}")
+        if args.incremental:
+            sys.exit(1)
 
 
 def _handle_common_coverage_report(args: argparse.Namespace) -> None:
@@ -737,27 +1258,26 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
     )
 
     from krx_collector.adapters.flows_krx.provider import KrxDirectFlowProvider
-    from krx_collector.domain.enums import Source
+    from krx_collector.domain.enums import RunStatus, RunType, Source
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
     from krx_collector.service.sync_krx_flows import (
         FLOW_METRIC_GROUPS,
         resolve_incremental_flow_range,
         sync_krx_security_flows,
     )
-    from krx_collector.util.pipeline import HumanThrottle, HumanThrottlePolicy
+    from krx_collector.util.pipeline import HumanThrottle, HumanThrottlePolicy, record_terminal_run
 
     storage = PostgresStorage(settings.db_dsn)
     run_params_extra: dict[str, object] | None = None
-    enabled_flow_groups: list[str] | None = None
+    exclude_groups = _split_csv(args.exclude_groups) or []
+    enabled_flow_groups = [
+        group for group in sorted(FLOW_METRIC_GROUPS) if group not in set(exclude_groups)
+    ]
 
     if args.incremental:
         metric_codes = sorted(
             {metric for metrics in FLOW_METRIC_GROUPS.values() for metric in metrics}
         )
-        exclude_groups = _split_csv(args.exclude_groups) or []
-        enabled_flow_groups = [
-            group for group in sorted(FLOW_METRIC_GROUPS) if group not in set(exclude_groups)
-        ]
         try:
             incremental_range = resolve_incremental_flow_range(
                 latest_price_date=storage.get_latest_daily_price_date(tickers=tickers),
@@ -801,6 +1321,24 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
         run_params_extra["allow_large_range"] = args.allow_large_range
 
         if incremental_range.no_work:
+            record_terminal_run(
+                storage,
+                run_type=RunType.KRX_FLOW_SYNC,
+                status=RunStatus.SUCCESS,
+                params={
+                    **(run_params_extra or {}),
+                    "tickers": tickers,
+                    "no_work": True,
+                    "skip_reason": "flow metrics are current",
+                },
+                counts={
+                    "targets_processed": 0,
+                    "requests_attempted": 0,
+                    "requests_skipped": 0,
+                    "rows_upserted": 0,
+                    "no_data_requests": 0,
+                },
+            )
             print("✅ KRX flow sync skipped: no incremental work.")
             return
 
@@ -1054,7 +1592,12 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
         f"rate_limit={rate_limit}, "
         f"long_rest_interval={long_rest_interval}, "
         f"long_rest_seconds={long_rest_seconds}, "
-        f"incremental={args.incremental}"
+        f"incremental={args.incremental}, "
+        f"lookback_days={args.lookback_days}, "
+        f"max_auto_range_days={args.max_auto_range_days}, "
+        f"new_ticker_start={args.new_ticker_start}, "
+        f"allow_new_ticker_backfill={args.allow_new_ticker_backfill}, "
+        f"allow_large_range={args.allow_large_range}"
     )
 
     from krx_collector.domain.enums import Market
@@ -1095,6 +1638,11 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
         long_rest_interval=long_rest_interval,
         long_rest_seconds=long_rest_seconds,
         incremental=args.incremental,
+        lookback_days=args.lookback_days,
+        max_auto_range_days=args.max_auto_range_days,
+        new_ticker_start=args.new_ticker_start,
+        allow_new_ticker_backfill=args.allow_new_ticker_backfill,
+        allow_large_range=args.allow_large_range,
     )
 
     if result.errors:
@@ -1104,6 +1652,8 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
 
     print(f"   - Tickers processed: {result.tickers_processed}")
     print(f"   - Bars upserted: {result.bars_upserted}")
+    if args.incremental and result.errors:
+        sys.exit(1)
 
 
 def _handle_validate(args: argparse.Namespace) -> None:
@@ -1250,6 +1800,62 @@ def build_parser() -> argparse.ArgumentParser:
     )
     db_sync_remote.set_defaults(handler=_handle_db_sync_remote)
 
+    # -- ops ------------------------------------------------------------------
+    ops_parser = subparsers.add_parser("ops", help="Read-only operational reports.")
+    ops_sub = ops_parser.add_subparsers(dest="ops_command", required=True)
+    ops_freshness = ops_sub.add_parser(
+        "freshness-report",
+        help="Report latest stored data points and running ingestion jobs.",
+    )
+    ops_freshness.add_argument(
+        "--running-limit",
+        type=int,
+        default=20,
+        help="Maximum running ingestion runs to show (default: 20).",
+    )
+    ops_freshness.set_defaults(handler=_handle_ops_freshness_report)
+
+    ops_common_freshness = ops_sub.add_parser(
+        "assert-common-freshness",
+        help="Fail unless required common feature sources are fresh enough for build.",
+    )
+    ops_common_freshness.add_argument(
+        "--sources",
+        type=_parse_common_sources,
+        default=_parse_common_sources("fdr,fred,ecos,krx"),
+        help="Comma-separated required common sources (default: fdr,fred,ecos,krx).",
+    )
+    ops_common_freshness.add_argument(
+        "--end",
+        type=_parse_date,
+        default=None,
+        help="Freshness reference date (YYYY-MM-DD). Default: today in KST.",
+    )
+    ops_common_freshness.add_argument(
+        "--max-run-age-hours",
+        type=int,
+        default=30,
+        help="Maximum age in hours for the latest successful source sync run.",
+    )
+    ops_common_freshness.add_argument(
+        "--daily-max-lag-days",
+        type=int,
+        default=2,
+        help="Maximum latest-observation lag for FDR/KRX/PYKRX daily sources.",
+    )
+    ops_common_freshness.add_argument(
+        "--macro-max-lag-days",
+        type=int,
+        default=45,
+        help="Maximum latest-observation lag for FRED/ECOS macro sources.",
+    )
+    ops_common_freshness.add_argument(
+        "--series",
+        default=None,
+        help="Optional comma-separated source series allowlist.",
+    )
+    ops_common_freshness.set_defaults(handler=_handle_ops_assert_common_freshness)
+
     # -- dart -----------------------------------------------------------------
     dart_parser = subparsers.add_parser("dart", help="OpenDART ingestion commands.")
     dart_sub = dart_parser.add_subparsers(dest="dart_command", required=True)
@@ -1300,6 +1906,30 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-download even when raw rows already exist for a request key.",
     )
+    dart_sync_financials.add_argument(
+        "--incremental",
+        action="store_true",
+        default=False,
+        help="Resolve business years/report codes from filing availability and recent no-data.",
+    )
+    dart_sync_financials.add_argument(
+        "--lookback-years",
+        type=int,
+        default=1,
+        help="Number of prior business years to include in --incremental mode.",
+    )
+    dart_sync_financials.add_argument(
+        "--max-attempt-targets",
+        type=int,
+        default=10000,
+        help="Maximum estimated OpenDART requests allowed in --incremental mode.",
+    )
+    dart_sync_financials.add_argument(
+        "--negative-cache-ttl-days",
+        type=int,
+        default=3,
+        help="Days to skip request keys that recently returned no-data.",
+    )
     dart_sync_financials.set_defaults(handler=_handle_dart_sync_financials)
 
     dart_sync_share_info = dart_sub.add_parser(
@@ -1331,6 +1961,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Re-download even when raw rows already exist for a request key.",
+    )
+    dart_sync_share_info.add_argument(
+        "--incremental",
+        action="store_true",
+        default=False,
+        help="Resolve business years/report codes from filing availability and recent no-data.",
+    )
+    dart_sync_share_info.add_argument(
+        "--lookback-years",
+        type=int,
+        default=1,
+        help="Number of prior business years to include in --incremental mode.",
+    )
+    dart_sync_share_info.add_argument(
+        "--max-attempt-targets",
+        type=int,
+        default=10000,
+        help="Maximum estimated OpenDART requests allowed in --incremental mode.",
+    )
+    dart_sync_share_info.add_argument(
+        "--negative-cache-ttl-days",
+        type=int,
+        default=3,
+        help="Days to skip request keys that recently returned no-data.",
     )
     dart_sync_share_info.set_defaults(handler=_handle_dart_sync_share_info)
 
@@ -1364,6 +2018,30 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-parse even when an XBRL document is already stored for a filing.",
     )
+    dart_sync_xbrl.add_argument(
+        "--incremental",
+        action="store_true",
+        default=False,
+        help="Resolve business years/report codes from filing availability and recent no-data.",
+    )
+    dart_sync_xbrl.add_argument(
+        "--lookback-years",
+        type=int,
+        default=1,
+        help="Number of prior business years to include in --incremental mode.",
+    )
+    dart_sync_xbrl.add_argument(
+        "--max-attempt-targets",
+        type=int,
+        default=10000,
+        help="Maximum estimated OpenDART requests allowed in --incremental mode.",
+    )
+    dart_sync_xbrl.add_argument(
+        "--negative-cache-ttl-days",
+        type=int,
+        default=3,
+        help="Days to skip request keys that recently returned no-data.",
+    )
     dart_sync_xbrl.set_defaults(handler=_handle_dart_sync_xbrl)
 
     # -- metrics --------------------------------------------------------------
@@ -1394,6 +2072,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=("Ticker batch size (env: SDC_METRICS_NORMALIZE_BATCH_SIZE, " "default 100)."),
+    )
+    metrics_normalize.add_argument(
+        "--incremental",
+        action="store_true",
+        default=False,
+        help="Normalize only recent business years instead of an explicit full range.",
+    )
+    metrics_normalize.add_argument(
+        "--lookback-years",
+        type=int,
+        default=2,
+        help="Number of prior business years to include in --incremental mode.",
     )
     metrics_normalize.set_defaults(handler=_handle_metrics_normalize)
 
@@ -1455,14 +2145,38 @@ def build_parser() -> argparse.ArgumentParser:
     common_sync.add_argument(
         "--start",
         type=_parse_date,
-        required=True,
-        help="Start date (YYYY-MM-DD).",
+        default=None,
+        help="Start date (YYYY-MM-DD). Required unless --incremental is used.",
     )
     common_sync.add_argument(
         "--end",
         type=_parse_date,
-        required=True,
-        help="End date (YYYY-MM-DD).",
+        default=date.today(),
+        help="End date (YYYY-MM-DD). Default: today.",
+    )
+    common_sync.add_argument(
+        "--incremental",
+        action="store_true",
+        default=False,
+        help="Resolve start from stored raw observation latest dates.",
+    )
+    common_sync.add_argument(
+        "--lookback-days",
+        type=int,
+        default=0,
+        help="Recent calendar-day window to rescan in --incremental mode.",
+    )
+    common_sync.add_argument(
+        "--max-auto-range-days",
+        type=int,
+        default=90,
+        help="Maximum inclusive day range allowed for --incremental without override.",
+    )
+    common_sync.add_argument(
+        "--allow-large-range",
+        action="store_true",
+        default=False,
+        help="Allow resolved common sync ranges larger than the safety guard.",
     )
     common_sync.add_argument(
         "--force",
@@ -1502,14 +2216,38 @@ def build_parser() -> argparse.ArgumentParser:
     common_build_daily.add_argument(
         "--start",
         type=_parse_date,
-        required=True,
-        help="Start date (YYYY-MM-DD).",
+        default=None,
+        help="Start date (YYYY-MM-DD). Required unless --incremental is used.",
     )
     common_build_daily.add_argument(
         "--end",
         type=_parse_date,
-        required=True,
-        help="End date (YYYY-MM-DD).",
+        default=date.today(),
+        help="End date (YYYY-MM-DD). Default: today.",
+    )
+    common_build_daily.add_argument(
+        "--incremental",
+        action="store_true",
+        default=False,
+        help="Resolve start from stored daily fact latest dates.",
+    )
+    common_build_daily.add_argument(
+        "--lookback-days",
+        type=int,
+        default=0,
+        help="Recent calendar-day window to rebuild in --incremental mode.",
+    )
+    common_build_daily.add_argument(
+        "--max-auto-range-days",
+        type=int,
+        default=180,
+        help="Maximum inclusive day range allowed for --incremental without override.",
+    )
+    common_build_daily.add_argument(
+        "--allow-large-range",
+        action="store_true",
+        default=False,
+        help="Allow resolved common build ranges larger than the safety guard.",
     )
     common_build_daily.add_argument(
         "--init-schema",
@@ -1686,8 +2424,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--exclude-groups",
         default=None,
         help=(
-            "Comma-separated flow metric groups to exclude from --incremental range "
-            "resolution (foreign_holding,investor,shorting)."
+            "Comma-separated flow metric groups to exclude from range resolution and "
+            "collection (foreign_holding,investor,shorting)."
         ),
     )
     flows_sync.add_argument(
@@ -1925,6 +2663,36 @@ def build_parser() -> argparse.ArgumentParser:
             "Skip per-day gap detection and fetch only days after each "
             "ticker's MAX(trade_date). Intended for fast daily catch-up runs."
         ),
+    )
+    prices_backfill.add_argument(
+        "--lookback-days",
+        type=int,
+        default=0,
+        help="Recent calendar-day window to rescan in --incremental mode (default: 0).",
+    )
+    prices_backfill.add_argument(
+        "--max-auto-range-days",
+        type=int,
+        default=10,
+        help="Maximum inclusive day range allowed for --incremental without override.",
+    )
+    prices_backfill.add_argument(
+        "--new-ticker-start",
+        type=_parse_date,
+        default=None,
+        help="Explicit start date for tickers with no stored price baseline.",
+    )
+    prices_backfill.add_argument(
+        "--allow-new-ticker-backfill",
+        action="store_true",
+        default=False,
+        help="Allow baseline-missing tickers to use --start or the default early start.",
+    )
+    prices_backfill.add_argument(
+        "--allow-large-range",
+        action="store_true",
+        default=False,
+        help="Allow resolved incremental price ranges larger than the safety guard.",
     )
     prices_backfill.set_defaults(handler=_handle_prices_backfill)
 

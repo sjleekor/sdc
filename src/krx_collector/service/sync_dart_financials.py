@@ -38,6 +38,9 @@ def sync_dart_financial_statements(
     tickers: list[str] | None = None,
     rate_limit_seconds: float = 0.2,
     force: bool = False,
+    allowed_year_report_pairs: set[tuple[int, str]] | None = None,
+    skip_request_keys: set[str] | None = None,
+    run_params_extra: dict[str, object] | None = None,
 ) -> DartFinancialSyncResult:
     """Synchronise OpenDART financial raw rows into local storage."""
     run = IngestionRun(
@@ -51,6 +54,12 @@ def sync_dart_financial_statements(
             "tickers": tickers,
             "rate_limit_seconds": rate_limit_seconds,
             "force": force,
+            "allowed_year_report_pairs": (
+                [f"{year}:{code}" for year, code in sorted(allowed_year_report_pairs)]
+                if allowed_year_report_pairs is not None
+                else None
+            ),
+            **(run_params_extra or {}),
         },
     )
     executor = _get_executor(provider)
@@ -59,6 +68,8 @@ def sync_dart_financial_statements(
     storage.record_run(run)
 
     result = DartFinancialSyncResult()
+    no_data_request_keys: list[str] = []
+    skip_request_keys = set() if force else (skip_request_keys or set())
 
     try:
         targets = storage.get_dart_corp_master(active_only=True, tickers=tickers)
@@ -83,8 +94,20 @@ def sync_dart_financial_statements(
 
             for bsns_year in bsns_years:
                 for reprt_code in reprt_codes:
+                    if (
+                        allowed_year_report_pairs is not None
+                        and (bsns_year, reprt_code) not in allowed_year_report_pairs
+                    ):
+                        result.requests_skipped += len(fs_divs)
+                        continue
                     for fs_div in fs_divs:
                         request_key = f"{corp.ticker}:{bsns_year}:{reprt_code}:{fs_div}"
+                        if request_key in skip_request_keys:
+                            logger.debug(
+                                "Skipping negative-cached financial request %s", request_key
+                            )
+                            result.requests_skipped += 1
+                            continue
                         if (corp.corp_code, bsns_year, reprt_code, fs_div) in existing_keys:
                             logger.debug("Skipping existing financial request %s", request_key)
                             result.requests_skipped += 1
@@ -115,6 +138,7 @@ def sync_dart_financial_statements(
                             result.errors[request_key] = fetch_result.error
                         elif fetch_result.no_data:
                             result.no_data_requests += 1
+                            no_data_request_keys.append(request_key)
                         elif fetch_result.records:
                             upsert_result = storage.upsert_dart_financial_statement_raw(
                                 fetch_result.records
@@ -139,6 +163,9 @@ def sync_dart_financial_statements(
             errors=result.errors,
             partial_subject="financial sync requests",
         )
+        if no_data_request_keys:
+            run.params["no_data_request_keys"] = no_data_request_keys[:1000]
+            storage.record_run(run)
         return result
     except OpenDartKeyExhaustedError as exc:
         logger.warning("OpenDART financial sync stopped: %s", exc)

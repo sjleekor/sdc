@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$HOME/apps/sdc"
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$script_dir/lib/sdc-wrapper.sh"
 
 args=(
   flows sync
@@ -17,4 +19,5 @@ if [[ -n "${FLOW_EXCLUDE_GROUPS:-}" ]]; then
   args+=(--exclude-groups "$FLOW_EXCLUDE_GROUPS")
 fi
 
-docker compose run --rm collector "${args[@]}"
+sdc_use_daily_lock_defaults
+sdc_run_collector_with_lock krx_marketdata "${args[@]}"

@@ -4,6 +4,9 @@
 - 범위: `src/krx_collector` 전체 수집 모듈 + `deploy/prod/bin/` 운영 래퍼 + **sj2-server 프로덕션 DB(`krx_data`) / Cronicle 실측**
 - 감사 항목: ① 중복 다운로드 방지(멱등성) ② 수집 대상 기간(2015~현재) ③ KRX API throttling 및 중앙화
 
+> 2026-06-13 추가: 실제 sj2-server Cronicle 이벤트 3개를 기준으로 "DB 최신 적재 지점 이후만 수집" 계약을 정렬하는 실행 계획은
+> `docs/dev/20260612_module_align_refactor/cronicle_incremental_refactor_plan.md`에 별도 문서화했다.
+
 ---
 
 ## 0. 전제에 대한 정정

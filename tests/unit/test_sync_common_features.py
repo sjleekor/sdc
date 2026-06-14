@@ -165,6 +165,18 @@ class MockCommonFeatureStorage:
             ]
         return rows
 
+    def get_common_feature_observation_max_dates(
+        self,
+        sources: list[Source] | None = None,
+        series_ids: list[str] | None = None,
+    ) -> dict[str, date]:
+        selected_series_ids = series_ids or [series.series_id for series in self.series]
+        return {
+            series_id: max(row.observation_date for row in self.observation_rows.get(series_id, []))
+            for series_id in selected_series_ids
+            if self.observation_rows.get(series_id)
+        }
+
 
 def test_sync_common_features_writes_observations_with_service_availability() -> None:
     storage = MockCommonFeatureStorage([_series("market_kospi")])
@@ -437,6 +449,44 @@ def test_sync_common_features_force_fetches_even_with_existing_coverage() -> Non
     assert result.rows_upserted == 1
     assert provider.calls == [("market_kospi", date(2026, 6, 8), date(2026, 6, 8))]
     assert storage.count_queries == []
+
+
+def test_sync_common_features_incremental_lookback_bypasses_existing_coverage() -> None:
+    storage = MockCommonFeatureStorage(
+        [_series("market_kospi")],
+        observation_counts={"market_kospi": 3},
+        observation_rows={
+            "market_kospi": [
+                _observation("market_kospi", observation_date=date(2026, 6, 9))
+            ]
+        },
+    )
+    provider = MockCommonFeatureProvider(
+        Source.PYKRX,
+        {
+            "market_kospi": CommonFeatureFetchResult(
+                records=[
+                    _observation("market_kospi", observation_date=date(2026, 6, 10))
+                ]
+            )
+        },
+    )
+
+    result = sync_common_features(
+        providers=[provider],
+        storage=storage,  # type: ignore[arg-type]
+        start=None,
+        end=date(2026, 6, 10),
+        sources=[Source.PYKRX],
+        incremental=True,
+        lookback_days=3,
+        rate_limit_seconds=0.0,
+        krx_trading_days=_krx_days,
+    )
+
+    assert result.requests_attempted == 1
+    assert result.requests_skipped == 0
+    assert provider.calls == [("market_kospi", date(2026, 6, 7), date(2026, 6, 10))]
 
 
 def test_sync_common_features_records_missing_provider_as_partial() -> None:

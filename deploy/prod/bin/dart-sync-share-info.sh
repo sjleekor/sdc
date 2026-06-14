@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$HOME/apps/sdc"
-docker compose run --rm collector dart sync-share-info
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$script_dir/lib/sdc-wrapper.sh"
+
+args=(
+  dart sync-share-info
+  --incremental
+  --lookback-years "${DART_LOOKBACK_YEARS:-1}"
+  --max-attempt-targets "${DART_SHARE_INFO_MAX_ATTEMPT_TARGETS:-10000}"
+  --negative-cache-ttl-days "${DART_NEGATIVE_CACHE_TTL_DAYS:-3}"
+)
+
+sdc_use_daily_lock_defaults
+sdc_run_collector_with_lock opendart "${args[@]}"

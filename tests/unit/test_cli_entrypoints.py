@@ -15,6 +15,10 @@ from krx_collector.domain.models import (
     CommonFeatureSyncResult,
     UpsertResult,
 )
+from krx_collector.service.freshness import (
+    CommonFreshnessAssertResult,
+    CommonFreshnessViolation,
+)
 
 
 def test_dart_main_prefixes_dart_subcommand(monkeypatch) -> None:
@@ -277,6 +281,48 @@ def test_common_readiness_report_parser_supports_fail_on_not_ready() -> None:
     assert args.fail_on_not_ready is True
 
 
+def test_ops_assert_common_freshness_parser_defaults_to_required_sources() -> None:
+    args = app.build_parser().parse_args(["ops", "assert-common-freshness"])
+
+    assert args.command == "ops"
+    assert args.ops_command == "assert-common-freshness"
+    assert args.sources == [Source.FDR, Source.FRED, Source.ECOS, Source.KRX]
+    assert args.end is None
+    assert args.max_run_age_hours == 30
+    assert args.daily_max_lag_days == 2
+    assert args.macro_max_lag_days == 45
+    assert args.series is None
+    assert args.handler == app._handle_ops_assert_common_freshness
+
+
+def test_ops_assert_common_freshness_parser_supports_overrides() -> None:
+    args = app.build_parser().parse_args(
+        [
+            "ops",
+            "assert-common-freshness",
+            "--sources",
+            "fdr,krx",
+            "--end",
+            "2026-06-13",
+            "--max-run-age-hours",
+            "48",
+            "--daily-max-lag-days",
+            "3",
+            "--macro-max-lag-days",
+            "60",
+            "--series",
+            "market_kospi,market_kosdaq",
+        ]
+    )
+
+    assert args.sources == [Source.FDR, Source.KRX]
+    assert args.end == date(2026, 6, 13)
+    assert args.max_run_age_hours == 48
+    assert args.daily_max_lag_days == 3
+    assert args.macro_max_lag_days == 60
+    assert args.series == "market_kospi,market_kosdaq"
+
+
 @pytest.mark.parametrize("value", ["-0.1", "1.1", "nan", "Infinity", "abc"])
 def test_common_readiness_report_parser_rejects_invalid_threshold(value: str) -> None:
     with pytest.raises(SystemExit):
@@ -330,6 +376,93 @@ def test_handle_common_seed_catalog_calls_storage_and_seed(monkeypatch) -> None:
     assert calls["dsn"] == "postgresql://test"
     assert calls["seed_storage"] is storage
     assert storage.init_schema_called is True
+
+
+def test_handle_ops_assert_common_freshness_calls_service(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeStorage:
+        def __init__(self, dsn: str) -> None:
+            calls["dsn"] = dsn
+            calls["storage"] = self
+
+    def fake_assert_common_freshness(**kwargs):
+        calls["assert_kwargs"] = kwargs
+        return CommonFreshnessAssertResult(
+            sources=kwargs["sources"],
+            end=kwargs["end"],
+            checked_series=4,
+        )
+
+    monkeypatch.setattr(app, "get_settings", lambda: SimpleNamespace(db_dsn="postgresql://test"))
+    monkeypatch.setattr(
+        "krx_collector.infra.db_postgres.repositories.PostgresStorage",
+        FakeStorage,
+    )
+    monkeypatch.setattr(
+        "krx_collector.service.freshness.assert_common_freshness",
+        fake_assert_common_freshness,
+    )
+
+    args = app.build_parser().parse_args(
+        [
+            "ops",
+            "assert-common-freshness",
+            "--sources",
+            "fdr,krx",
+            "--end",
+            "2026-06-13",
+            "--series",
+            "market_kospi,market_kosdaq",
+        ]
+    )
+    app._handle_ops_assert_common_freshness(args)
+
+    assert calls["dsn"] == "postgresql://test"
+    assert calls["assert_kwargs"]["storage"] is calls["storage"]
+    assert calls["assert_kwargs"]["sources"] == [Source.FDR, Source.KRX]
+    assert calls["assert_kwargs"]["end"] == date(2026, 6, 13)
+    assert calls["assert_kwargs"]["series_ids"] == ["market_kospi", "market_kosdaq"]
+
+
+def test_handle_ops_assert_common_freshness_exits_on_failure(monkeypatch) -> None:
+    class FakeStorage:
+        def __init__(self, dsn: str) -> None:
+            self.dsn = dsn
+
+    def fake_assert_common_freshness(**kwargs):
+        return CommonFreshnessAssertResult(
+            sources=kwargs["sources"],
+            end=kwargs["end"],
+            checked_series=1,
+            violations=[
+                CommonFreshnessViolation(
+                    source=Source.KRX,
+                    check="latest_observation",
+                    message="stale",
+                    series_id="market_kospi",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(app, "get_settings", lambda: SimpleNamespace(db_dsn="postgresql://test"))
+    monkeypatch.setattr(
+        "krx_collector.infra.db_postgres.repositories.PostgresStorage",
+        FakeStorage,
+    )
+    monkeypatch.setattr(
+        "krx_collector.service.freshness.assert_common_freshness",
+        fake_assert_common_freshness,
+    )
+
+    args = app.build_parser().parse_args(
+        ["ops", "assert-common-freshness", "--sources", "krx"]
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        app._handle_ops_assert_common_freshness(args)
+
+    assert exc_info.value.code == 2
 
 
 def test_handle_common_sync_calls_service_with_providers(monkeypatch) -> None:

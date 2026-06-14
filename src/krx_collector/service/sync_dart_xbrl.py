@@ -37,6 +37,9 @@ def sync_dart_xbrl(
     tickers: list[str] | None = None,
     rate_limit_seconds: float = 0.2,
     force: bool = False,
+    allowed_year_report_pairs: set[tuple[int, str]] | None = None,
+    skip_request_keys: set[str] | None = None,
+    run_params_extra: dict[str, object] | None = None,
 ) -> DartXbrlSyncResult:
     """Synchronise parsed XBRL ZIP data for filings already present in financial raw."""
     run = IngestionRun(
@@ -49,6 +52,12 @@ def sync_dart_xbrl(
             "tickers": tickers,
             "rate_limit_seconds": rate_limit_seconds,
             "force": force,
+            "allowed_year_report_pairs": (
+                [f"{year}:{code}" for year, code in sorted(allowed_year_report_pairs)]
+                if allowed_year_report_pairs is not None
+                else None
+            ),
+            **(run_params_extra or {}),
         },
     )
     executor = _get_executor(provider)
@@ -57,6 +66,8 @@ def sync_dart_xbrl(
     storage.record_run(run)
 
     result = DartXbrlSyncResult()
+    no_data_request_keys: list[str] = []
+    skip_request_keys = set() if force else (skip_request_keys or set())
 
     try:
         corp_rows = storage.get_dart_corp_master(active_only=True, tickers=tickers)
@@ -70,6 +81,11 @@ def sync_dart_xbrl(
         request_targets: dict[tuple[str, int, str, str], tuple[str, int, str, str]] = {}
         for row in financial_rows:
             if not row.ticker or not row.rcept_no:
+                continue
+            if (
+                allowed_year_report_pairs is not None
+                and (row.bsns_year, row.reprt_code) not in allowed_year_report_pairs
+            ):
                 continue
             key = (row.ticker, row.bsns_year, row.reprt_code, row.rcept_no)
             request_targets.setdefault(key, key)
@@ -100,6 +116,10 @@ def sync_dart_xbrl(
                 logger.debug("Skipping existing XBRL document %s", request_key)
                 result.requests_skipped += 1
                 continue
+            if request_key in skip_request_keys:
+                logger.debug("Skipping negative-cached XBRL document %s", request_key)
+                result.requests_skipped += 1
+                continue
 
             result.requests_attempted += 1
             fetch_result = call_with_retry(
@@ -123,6 +143,7 @@ def sync_dart_xbrl(
                 result.errors[request_key] = fetch_result.error
             elif fetch_result.no_data:
                 result.no_data_requests += 1
+                no_data_request_keys.append(request_key)
             else:
                 if fetch_result.document is not None:
                     upsert_document = storage.upsert_dart_xbrl_documents([fetch_result.document])
@@ -153,6 +174,9 @@ def sync_dart_xbrl(
             errors=result.errors,
             partial_subject="XBRL sync requests",
         )
+        if no_data_request_keys:
+            run.params["no_data_request_keys"] = no_data_request_keys[:1000]
+            storage.record_run(run)
         return result
     except OpenDartKeyExhaustedError as exc:
         logger.warning("OpenDART XBRL sync stopped: %s", exc)

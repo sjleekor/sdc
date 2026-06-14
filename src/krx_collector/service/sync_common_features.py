@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 
 from krx_collector.domain.availability import compute_available_from
 from krx_collector.domain.enums import RunStatus, RunType, Source
@@ -39,7 +39,7 @@ _RELAXED_DAILY_COVERAGE_MIN_DENOMINATOR = 10
 def sync_common_features(
     providers: Sequence[CommonFeatureProvider],
     storage: Storage,
-    start: date,
+    start: date | None,
     end: date,
     sources: list[Source] | None = None,
     series_ids: list[str] | None = None,
@@ -47,6 +47,10 @@ def sync_common_features(
     force: bool = False,
     rate_limit_seconds: float = 0.0,
     krx_trading_days: KrxTradingDayProvider | None = None,
+    incremental: bool = False,
+    lookback_days: int = 0,
+    max_auto_range_days: int | None = None,
+    allow_large_range: bool = False,
 ) -> CommonFeatureSyncResult:
     """Synchronise configured common feature source series into raw storage."""
     provider_map = {provider.source(): provider for provider in providers}
@@ -57,7 +61,7 @@ def sync_common_features(
         started_at=now_kst(),
         status=RunStatus.RUNNING,
         params={
-            "start": start.isoformat(),
+            "start": start.isoformat() if start else None,
             "end": end.isoformat(),
             "sources": source_values,
             "series_ids": series_ids,
@@ -65,6 +69,10 @@ def sync_common_features(
             "force": force,
             "rate_limit_seconds": rate_limit_seconds,
             "provider_sources": provider_source_values,
+            "incremental": incremental,
+            "lookback_days": lookback_days,
+            "max_auto_range_days": max_auto_range_days,
+            "allow_large_range": allow_large_range,
         },
     )
     storage.record_run(run)
@@ -73,6 +81,15 @@ def sync_common_features(
     calendar = krx_trading_days or _default_krx_trading_days()
 
     try:
+        if incremental and start is not None:
+            raise ValueError("common sync --incremental cannot be combined with start.")
+        if not incremental and start is None:
+            raise ValueError("common sync requires start unless incremental=True.")
+        if lookback_days < 0:
+            raise ValueError("lookback_days must be >= 0")
+        if max_auto_range_days is not None and max_auto_range_days <= 0:
+            raise ValueError("max_auto_range_days must be positive")
+
         catalog_rows = storage.get_common_feature_series(
             sources=sources,
             series_ids=series_ids,
@@ -80,10 +97,21 @@ def sync_common_features(
         )
         target_series = _filter_series(catalog_rows, sources=sources, series_ids=series_ids)
         result.series_processed = len(target_series)
+        latest_by_series = (
+            storage.get_common_feature_observation_max_dates(
+                sources=sources,
+                series_ids=[series.series_id for series in target_series],
+            )
+            if incremental
+            else {}
+        )
+        run.params["latest_by_series"] = {
+            series_id: latest.isoformat() for series_id, latest in sorted(latest_by_series.items())
+        }
 
         logger.info(
             "Common feature sync started: range=%s..%s series=%d sources=%s force=%s",
-            start.isoformat(),
+            start.isoformat() if start else "<incremental>",
             end.isoformat(),
             len(target_series),
             ",".join(source_values or provider_source_values),
@@ -99,12 +127,42 @@ def sync_common_features(
                 )
                 continue
 
-            effective_start = _effective_start(start, series)
+            if incremental:
+                latest = latest_by_series.get(series.series_id)
+                if latest is None:
+                    result.requests_skipped += 1
+                    result.errors[series.series_id] = (
+                        "No stored common_feature_observation_raw baseline for "
+                        "incremental sync. Run explicit common sync backfill first."
+                    )
+                    continue
+                effective_start = latest + timedelta(days=1)
+                if lookback_days > 0:
+                    effective_start = min(effective_start, end - timedelta(days=lookback_days))
+            else:
+                effective_start = start
+
+            effective_start = _effective_start(effective_start, series)
             if effective_start > end:
                 result.requests_skipped += 1
                 continue
 
-            if not force and _has_existing_coverage(
+            auto_range_days = (end - effective_start).days + 1
+            if (
+                incremental
+                and max_auto_range_days is not None
+                and auto_range_days > max_auto_range_days
+                and not allow_large_range
+            ):
+                result.requests_skipped += 1
+                result.errors[series.series_id] = (
+                    f"Resolved incremental range is too large "
+                    f"({auto_range_days} days > {max_auto_range_days})."
+                )
+                continue
+
+            skip_existing_coverage = not incremental or lookback_days == 0
+            if skip_existing_coverage and not force and _has_existing_coverage(
                 storage=storage,
                 series=series,
                 start=effective_start,

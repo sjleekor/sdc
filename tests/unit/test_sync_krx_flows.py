@@ -1,9 +1,11 @@
 import logging
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
+from krx_collector.cli import app as cli_app
 from krx_collector.cli.app import build_parser
 from krx_collector.domain.enums import ListingStatus, Market, RunStatus, RunType, Source
 from krx_collector.domain.models import (
@@ -503,6 +505,81 @@ def test_flows_sync_parser_supports_incremental_options() -> None:
     assert args.max_auto_range_days == 30
     assert args.allow_large_range is True
     assert args.exclude_groups == "shorting"
+
+
+def test_flows_sync_handler_applies_exclude_groups_to_explicit_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeStorage:
+        def __init__(self, dsn: str) -> None:
+            captured["dsn"] = dsn
+
+    class FakeProvider:
+        def __init__(self, **kwargs: object) -> None:
+            captured["provider_kwargs"] = kwargs
+
+        def source(self) -> Source:
+            return Source.KRX
+
+    def fake_sync_krx_security_flows(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace(
+            errors={},
+            targets_processed=0,
+            requests_attempted=0,
+            requests_skipped=0,
+            rows_upserted=0,
+            no_data_requests=0,
+            pending_metrics=[],
+        )
+
+    monkeypatch.setattr(
+        cli_app,
+        "get_settings",
+        lambda: SimpleNamespace(
+            db_dsn="postgresql://example",
+            krx_mdc_timeout_seconds=150.0,
+            krx_logical_rate_limit_seconds=8.0,
+            krx_min_delay_seconds=1.5,
+            krx_max_delay_seconds=4.0,
+            krx_long_rest_every=15,
+            krx_long_rest_min_seconds=30.0,
+            krx_long_rest_max_seconds=90.0,
+            krx_auth_cooldown_seconds=10.0,
+            krx_error_backoff_min_seconds=45.0,
+            krx_error_backoff_max_seconds=180.0,
+            krx_id="id",
+            krx_pw="pw",
+        ),
+    )
+    monkeypatch.setattr("krx_collector.infra.db_postgres.repositories.PostgresStorage", FakeStorage)
+    monkeypatch.setattr(
+        "krx_collector.adapters.flows_krx.provider.KrxDirectFlowProvider",
+        FakeProvider,
+    )
+    monkeypatch.setattr(
+        "krx_collector.service.sync_krx_flows.sync_krx_security_flows",
+        fake_sync_krx_security_flows,
+    )
+
+    args = build_parser().parse_args(
+        [
+            "flows",
+            "sync",
+            "--start",
+            "2026-05-22",
+            "--end",
+            "2026-06-10",
+            "--exclude-groups",
+            "foreign_holding",
+        ]
+    )
+
+    args.handler(args)
+
+    assert captured["enabled_flow_groups"] == ["investor", "shorting"]
 
 
 def test_flows_sync_parser_rejects_provider_selection() -> None:

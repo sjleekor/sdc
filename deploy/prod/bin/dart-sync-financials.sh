@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$HOME/apps/sdc"
-# 기존 데이터 보존하며 누락된 보고서 코드(11011,11012,11013,11014) 수집
-docker compose run --rm collector dart sync-financials \
-  --reprt-codes 11011,11012,11013,11014 \
-  --bsns-years "$(date +%Y),$(($(date +%Y)-1))"
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$script_dir/lib/sdc-wrapper.sh"
+
+args=(
+  dart sync-financials
+  --incremental
+  --lookback-years "${DART_LOOKBACK_YEARS:-1}"
+  --max-attempt-targets "${DART_FINANCIAL_MAX_ATTEMPT_TARGETS:-10000}"
+  --negative-cache-ttl-days "${DART_NEGATIVE_CACHE_TTL_DAYS:-3}"
+)
+
+sdc_use_daily_lock_defaults
+sdc_run_collector_with_lock opendart "${args[@]}"

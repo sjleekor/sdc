@@ -2451,6 +2451,30 @@ class PostgresStorage:
                     )
         return records
 
+    def get_common_feature_observation_max_dates(
+        self,
+        sources: list[Source] | None = None,
+        series_ids: list[str] | None = None,
+    ) -> dict[str, date]:
+        """Return latest raw observation date grouped by series_id."""
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                sql = """
+                    SELECT series_id, MAX(observation_date)
+                    FROM common_feature_observation_raw
+                    WHERE 1=1
+                """
+                params: list[object] = []
+                if sources:
+                    sql += " AND source = ANY(%s)"
+                    params.append([source.value for source in sources])
+                if series_ids:
+                    sql += " AND series_id = ANY(%s)"
+                    params.append(series_ids)
+                sql += " GROUP BY series_id"
+                cur.execute(sql, params)
+                return {row[0]: row[1] for row in cur.fetchall() if row[1] is not None}
+
     def upsert_common_feature_catalog(
         self,
         records: list[CommonFeatureCatalogEntry],
@@ -2716,6 +2740,26 @@ class PostgresStorage:
                 cur.execute(sql, params)
                 return {row[0]: row[1] for row in cur.fetchall()}
 
+    def get_common_feature_daily_fact_max_dates(
+        self,
+        feature_codes: list[str] | None = None,
+    ) -> dict[str, date]:
+        """Return latest daily fact date grouped by feature_code."""
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                sql = """
+                    SELECT feature_code, MAX(feature_date)
+                    FROM common_feature_daily_fact
+                    WHERE 1=1
+                """
+                params: list[object] = []
+                if feature_codes:
+                    sql += " AND feature_code = ANY(%s)"
+                    params.append(feature_codes)
+                sql += " GROUP BY feature_code"
+                cur.execute(sql, params)
+                return {row[0]: row[1] for row in cur.fetchall() if row[1] is not None}
+
     # -- Daily OHLCV ----------------------------------------------------------
 
     def upsert_daily_bars(self, bars: list[DailyBar]) -> UpsertResult:
@@ -2814,6 +2858,117 @@ class PostgresStorage:
                         run.error_summary,
                     ),
                 )
+
+    def get_table_bsns_year_range(self, table_name: str) -> tuple[int, int, int] | None:
+        """Return min/max business-year coverage and row count for a known table."""
+        allowed_tables = {
+            "dart_financial_statement_raw",
+            "dart_share_count_raw",
+            "dart_shareholder_return_raw",
+            "dart_xbrl_document",
+            "dart_xbrl_fact_raw",
+            "stock_metric_fact",
+        }
+        if table_name not in allowed_tables:
+            raise ValueError(f"Unsupported business-year table: {table_name}")
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT MIN(bsns_year), MAX(bsns_year), COUNT(*)::int FROM {table_name}"
+                )
+                row = cur.fetchone()
+        if not row or row[0] is None or row[1] is None:
+            return None
+        return int(row[0]), int(row[1]), int(row[2])
+
+    def get_running_ingestion_runs(self, limit: int = 20) -> list[IngestionRun]:
+        """Return currently running ingestion runs ordered by start time."""
+        import json
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        run_id,
+                        run_type,
+                        started_at,
+                        ended_at,
+                        status,
+                        params,
+                        counts,
+                        error_summary
+                    FROM ingestion_runs
+                    WHERE status = %s
+                    ORDER BY started_at
+                    LIMIT %s
+                    """,
+                    (RunStatus.RUNNING.value, max(1, limit)),
+                )
+                rows = cur.fetchall()
+
+        runs: list[IngestionRun] = []
+        for row in rows:
+            params = row[5] if isinstance(row[5], dict) else (json.loads(row[5]) if row[5] else {})
+            counts = row[6] if isinstance(row[6], dict) else (json.loads(row[6]) if row[6] else {})
+            runs.append(
+                IngestionRun(
+                    run_id=str(row[0]),
+                    run_type=RunType(row[1]),
+                    started_at=row[2],
+                    ended_at=row[3],
+                    status=RunStatus(row[4]),
+                    params=params,
+                    counts=counts,
+                    error_summary=row[7],
+                )
+            )
+        return runs
+
+    def get_recent_ingestion_runs(self, run_type: RunType, limit: int = 20) -> list[IngestionRun]:
+        """Return recent ingestion runs for one run type, newest first."""
+        import json
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        run_id,
+                        run_type,
+                        started_at,
+                        ended_at,
+                        status,
+                        params,
+                        counts,
+                        error_summary
+                    FROM ingestion_runs
+                    WHERE run_type = %s
+                    ORDER BY started_at DESC
+                    LIMIT %s
+                    """,
+                    (run_type.value, max(1, limit)),
+                )
+                rows = cur.fetchall()
+
+        runs: list[IngestionRun] = []
+        for row in rows:
+            params = row[5] if isinstance(row[5], dict) else (json.loads(row[5]) if row[5] else {})
+            counts = row[6] if isinstance(row[6], dict) else (json.loads(row[6]) if row[6] else {})
+            runs.append(
+                IngestionRun(
+                    run_id=str(row[0]),
+                    run_type=RunType(row[1]),
+                    started_at=row[2],
+                    ended_at=row[3],
+                    status=RunStatus(row[4]),
+                    params=params,
+                    counts=counts,
+                    error_summary=row[7],
+                )
+            )
+        return runs
 
     # -- Query helpers --------------------------------------------------------
 

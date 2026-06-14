@@ -672,6 +672,7 @@ def normalize_stock_metrics(
     tickers: list[str] | None = None,
     *,
     batch_size: int | None = None,
+    incremental: bool = False,
 ) -> MetricNormalizationResult:
     """Seed metric rules and normalize canonical facts from raw tables."""
     run = IngestionRun(
@@ -683,6 +684,7 @@ def normalize_stock_metrics(
             "reprt_codes": reprt_codes,
             "tickers": tickers,
             "batch_size": batch_size,
+            "incremental": incremental,
         },
     )
     storage.record_run(run)
