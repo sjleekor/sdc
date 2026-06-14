@@ -111,7 +111,7 @@ def test_default_common_feature_series_declares_stale_limits() -> None:
     assert series_by_id["global_nasdaq"].max_stale_business_days == 5
     assert series_by_id["global_vix"].max_stale_business_days == 5
     assert series_by_id["commodity_wti"].max_stale_business_days == 5
-    assert series_by_id["commodity_wti_fred"].max_stale_business_days == 5
+    assert series_by_id["commodity_wti_fred"].max_stale_business_days == 10
     assert series_by_id["fx_usdkrw"].max_stale_business_days == 10
     assert series_by_id["fx_usdkrw_ecos"].max_stale_business_days == 10
     assert series_by_id["rate_us2y"].max_stale_business_days == 5
@@ -119,6 +119,7 @@ def test_default_common_feature_series_declares_stale_limits() -> None:
     assert series_by_id["rate_kr_gov3y"].max_stale_business_days == 5
     assert series_by_id["rate_kr_gov10y"].max_stale_business_days == 5
     assert series_by_id["macro_cpi"].max_stale_business_days == 45
+    assert series_by_id["macro_m2"].max_stale_business_days == 90
 
 
 def test_default_common_feature_catalog_contains_phase1_mvp_features() -> None:
@@ -529,6 +530,7 @@ def test_default_common_feature_macro_monthly_candidates_are_active_after_valida
             "macro_price",
             "2020=100",
             date(1965, 1, 1),
+            45,
             {"stat_code": "404Y014", "cycle": "M", "item_code1": "*AA"},
         ),
         "macro_m2": (
@@ -536,6 +538,7 @@ def test_default_common_feature_macro_monthly_candidates_are_active_after_valida
             "macro_money",
             "KRW_bn",
             date(2003, 10, 1),
+            90,
             {"stat_code": "161Y005", "cycle": "M", "item_code1": "BBHS00"},
         ),
         "macro_consumer_sentiment": (
@@ -543,6 +546,7 @@ def test_default_common_feature_macro_monthly_candidates_are_active_after_valida
             "macro_sentiment",
             "index",
             date(2008, 7, 1),
+            45,
             {
                 "stat_code": "511Y002",
                 "cycle": "M",
@@ -554,7 +558,7 @@ def test_default_common_feature_macro_monthly_candidates_are_active_after_valida
 
     for (
         series_id,
-        (source_key, category, unit, history_start, endpoint_params),
+        (source_key, category, unit, history_start, max_stale_days, endpoint_params),
     ) in expected_series.items():
         series = series_by_id[series_id]
         assert series.source == Source.ECOS
@@ -566,7 +570,7 @@ def test_default_common_feature_macro_monthly_candidates_are_active_after_valida
         assert series.availability_policy == "manual_lag_days"
         assert series.manual_lag_days == 20
         assert series.history_start_date == history_start
-        assert series.max_stale_business_days == 45
+        assert series.max_stale_business_days == max_stale_days
         assert series.endpoint_params == endpoint_params
 
     expected_features = {

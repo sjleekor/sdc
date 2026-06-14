@@ -672,12 +672,15 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="same_krx_session_morning",
             source_timezone="America/New_York",
             history_start_date=date(1986, 1, 2),
-            max_stale_business_days=5,
+            max_stale_business_days=10,
             default_transform="level",
             notes=(
                 "FRED official WTI spot source. Active as a separate spot "
                 "feature after comparison showed material differences from the "
-                "FDR CL=F futures fallback."
+                "FDR CL=F futures fallback. FRED DCOILWTICO may lag market "
+                "sessions by about a week around weekends and source release "
+                "delays, so freshness gating allows a wider per-series stale "
+                "window than rates."
             ),
         ),
         CommonFeatureSeries(
@@ -812,12 +815,14 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             manual_lag_days=20,
             source_timezone="Asia/Seoul",
             history_start_date=date(2003, 10, 1),
-            max_stale_business_days=45,
+            max_stale_business_days=90,
             default_transform="level",
             notes=(
                 "ECOS M2 average seasonally adjusted source. Activated after "
                 "inactive smoke and active-only coverage/readiness passed under "
-                "the conservative period-end + 20 calendar day availability policy."
+                "the conservative period-end + 20 calendar day availability policy. "
+                "M2 can publish with a multi-month lag, so freshness gating uses "
+                "a wider per-series stale window than CPI/PPI/CSI."
             ),
         ),
         CommonFeatureSeries(
