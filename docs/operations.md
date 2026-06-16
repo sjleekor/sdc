@@ -135,7 +135,16 @@ uv run krx-collector operating process-document \
 
 ### OpenDART 전체 사업연도 백필
 
-전체 사업연도 백필은 매일 최신분을 처리하는 계정/수급 이벤트와 분리해서 실행합니다. 백필은 시간이 길고 OpenDART quota 소진으로 실패 종료될 수 있으므로, Cronicle에서는 별도 이벤트(예: `sdc_opendart_all_years_backfill`)로 등록합니다.
+전체 사업연도 백필은 매일 최신분을 처리하는 계정/수급 이벤트와 분리해서 실행합니다. 백필은 시간이 길고 OpenDART quota 소진으로 실패 종료될 수 있으므로, Cronicle에서는 별도 manual 이벤트(예: `sdc_manual_backfill_opendart_all_years`)로 등록합니다.
+
+백필 실행 전 안전 절차:
+
+1. Cronicle에서 OpenDART daily root인 `sdc_daily_opendart_corp`를 일시 disable합니다.
+2. `get_active_jobs` 또는 UI에서 OpenDART daily chain이 이미 실행 중이 아닌지 확인합니다.
+3. 백필을 실행합니다.
+4. 백필 종료 후 `sdc_daily_opendart_corp`를 다시 enable합니다.
+
+`dart-backfill-all-years.sh`는 `opendart` source lock을 유지하지만, daily wrapper는 기본값에서 source lock을 잡지 않습니다. 따라서 daily event disable이 daily-backfill overlap을 막는 1차 방어선입니다. 긴급하게 daily lock 보호를 되살려야 할 때만 daily event script에 `SDC_DAILY_USE_SOURCE_LOCK=1`을 주입합니다.
 
 권장 Cronicle command:
 
@@ -162,6 +171,23 @@ SDC_DART_BACKFILL_FS_DIVS=CFS,OFS
 ```
 
 모든 OpenDART API key가 일일 한도에 도달하면 각 OpenDART CLI는 exit code `75`로 종료됩니다. 스크립트는 `set -euo pipefail`이므로 그 지점에서 멈추고, 다음 실행 때 이미 저장된 raw/XBRL은 skip되어 같은 범위를 이어받습니다.
+
+### KRX 수급 범위 백필
+
+KRX 수급 히스토리 보수는 daily KRX chain과 분리해서 명시 범위 wrapper로 실행합니다.
+
+```bash
+FLOW_START=2026-05-01 FLOW_END=2026-05-31 /home/whi/apps/sdc/bin/flows-backfill-range.sh
+```
+
+백필 실행 전 안전 절차:
+
+1. Cronicle에서 KRX daily root인 `sdc_daily_fdr_universe`를 일시 disable합니다.
+2. `get_active_jobs` 또는 UI에서 KRX daily chain이 이미 실행 중이 아닌지 확인합니다.
+3. 백필을 실행합니다.
+4. 백필 종료 후 `sdc_daily_fdr_universe`를 다시 enable합니다.
+
+`flows-backfill-range.sh`는 `krx_marketdata` source lock을 유지하지만, daily KRX wrapper는 기본값에서 source lock을 잡지 않습니다. 따라서 daily event disable이 daily-backfill overlap을 막는 1차 방어선입니다. 자동 schedule guard는 아직 wrapper에 구현하지 않았습니다.
 
 ### 공통 시장/거시 feature 갱신
 

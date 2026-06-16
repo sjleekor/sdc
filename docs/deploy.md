@@ -2,11 +2,11 @@
 
 이 문서는 `sj2-server`에서 Cronicle이 실행하는 SDC 운영 래퍼 스크립트가 어떤 collector 명령을 실행하고, 각 명령이 어떤 DB 테이블에 어떤 데이터를 저장하는지 정리한다.
 
-> 2026-06-13 구현 기준: source별 wrapper와 lock/throttle helper는 repository에 준비되었지만, 실제 sj2-server 배포와 Cronicle event 등록/전환은 별도 배포 절차에서 수행한다.
+> 2026-06-16 구현 기준: source별 wrapper와 Cronicle event 전환은 `sj2-server`에 반영되어 있다. daily wrapper는 source lock을 기본 사용하지 않고, manual/backfill wrapper만 source lock을 유지한다.
 
 ## 확인 기준
 
-- 기준일: 2026-06-13 KST
+- 기준일: 2026-06-16 KST
 - Cronicle source: `http://192.168.0.11:3012/api/app/get_event/v1`
 - 운영 래퍼 source: `whi@sj2-server:/home/whi/apps/sdc/bin/*.sh`
 - IaC source: [`deploy/prod/bin`](../deploy/prod/bin), [`deploy/prod/compose.yaml`](../deploy/prod/compose.yaml)
@@ -15,7 +15,7 @@
 
 Cronicle 이벤트는 shell plugin으로 `/home/whi/apps/sdc/bin/*.sh` 래퍼를 호출한다. 각 래퍼는 `/home/whi/apps/sdc`에서 `docker compose run --rm collector ...`를 실행한다. 이 문서의 수집/정규화 collector 명령은 실행 감사 로그를 `ingestion_runs`에 기록한다.
 
-source별 wrapper는 `deploy/prod/bin/lib/sdc-wrapper.sh`를 통해 host-side lock/throttle을 공유한다. 일일 Cronicle wrapper는 같은 source overlap을 최대 900초 대기하고, 이후에도 lock을 얻지 못하면 exit `75`로 실패한다.
+source별 wrapper는 `deploy/prod/bin/lib/sdc-wrapper.sh`를 통해 host-side lock/throttle helper를 공유한다. 일일 Cronicle wrapper는 `sdc_run_daily_collector`를 호출하며, 기본값(`SDC_DAILY_USE_SOURCE_LOCK=0`)에서는 source lock을 잡지 않는다. 같은 source를 치는 daily event는 Cronicle chain 순서로 직렬화한다. 긴급 fallback이 필요하면 daily event script에 `SDC_DAILY_USE_SOURCE_LOCK=1`을 주입해 기존 source lock 대기 정책을 되살릴 수 있다. manual/backfill wrapper(`flows-backfill-range.sh`, `dart-backfill-all-years.sh`)는 source lock을 계속 사용한다.
 
 보고서 코드 해석:
 
@@ -28,27 +28,27 @@ source별 wrapper는 `deploy/prod/bin/lib/sdc-wrapper.sh`를 통해 host-side lo
 
 ## Cronicle 이벤트 요약
 
-전환 전 기존 이벤트는 세 개의 큰 pipeline으로 묶여 있었다. 전환 후 목표 구조는 source별 event가 wrapper를 직접 호출하는 형태다.
+전환 전 기존 이벤트는 세 개의 큰 pipeline으로 묶여 있었다. 현재 구조는 source별 event가 wrapper를 직접 호출하고, 같은 source의 daily path는 Cronicle chain으로 순차 실행하는 형태다.
 
 | Cronicle event id | Title | 상태 | 실행 순서 |
 |---|---|---|---|
-| `sdc_daily_fdr_universe` | FDR universe | 목표 신규 | `universe-sync.sh` |
-| `sdc_daily_pykrx_prices` | PYKRX prices | 목표 신규 | `prices-backfill-incremental.sh` |
-| `sdc_daily_krx_flows` | KRX flows | 목표 신규 | `flows-sync.sh` |
-| `sdc_daily_fdr_common` | FDR common features | 목표 신규 | `common-sync-fdr.sh` |
-| `sdc_daily_fred_common` | FRED common features | 목표 신규 | `common-sync-fred.sh` |
-| `sdc_daily_ecos_common_daily` | ECOS daily common features | 목표 신규 | `common-sync-ecos-daily.sh` |
-| `sdc_daily_ecos_common_macro` | ECOS macro common features | 목표 신규 | `common-sync-ecos-macro.sh` |
-| `sdc_daily_krx_common` | KRX common features | 목표 신규 | `common-sync-krx.sh` |
+| `sdc_daily_fdr_universe` | FDR universe | 등록/활성 | `universe-sync.sh` |
+| `sdc_daily_pykrx_prices` | PYKRX prices | 등록/활성 | `prices-backfill-incremental.sh` |
+| `sdc_daily_krx_flows` | KRX flows | 등록/활성 | `flows-sync.sh` |
+| `sdc_daily_fdr_common` | FDR common features | 등록/활성 | `common-sync-fdr.sh` |
+| `sdc_daily_fred_common` | FRED common features | 등록/활성 | `common-sync-fred.sh` |
+| `sdc_daily_ecos_common_daily` | ECOS daily common features | 등록/활성 | `common-sync-ecos-daily.sh` |
+| `sdc_daily_ecos_common_macro` | ECOS macro common features | 등록/활성 | `common-sync-ecos-macro.sh` |
+| `sdc_daily_krx_common` | KRX common features | 등록/활성 | `common-sync-krx.sh` |
 | `sdc_daily_pykrx_common` | PYKRX common features | optional, 기본 비활성 | `common-sync-pykrx.sh` |
-| `sdc_daily_common_build` | Common feature build | 목표 신규 | `common-build-daily.sh` |
-| `sdc_daily_common_coverage` | Common feature coverage | 목표 신규 | `common-coverage-report.sh` |
-| `sdc_daily_common_readiness` | Common feature readiness | 목표 신규 | `common-readiness-check.sh` |
-| `sdc_daily_opendart_corp` | OpenDART corp | 목표 신규 | `dart-sync-corp.sh` |
-| `sdc_daily_opendart_financials` | OpenDART financials | 목표 신규 | `dart-sync-financials.sh` |
-| `sdc_daily_opendart_share_info` | OpenDART share info | 목표 신규 | `dart-sync-share-info.sh` |
-| `sdc_daily_opendart_xbrl` | OpenDART XBRL | 목표 신규 | `dart-sync-xbrl.sh` |
-| `sdc_daily_metrics_normalize` | Metric normalize | 목표 신규 | `metrics-normalize.sh` |
+| `sdc_daily_common_build` | Common feature build | 등록/활성 | `common-build-daily.sh` |
+| `sdc_daily_common_coverage` | Common feature coverage | 등록/활성 | `common-coverage-report.sh` |
+| `sdc_daily_common_readiness` | Common feature readiness | 등록/활성 | `common-readiness-check.sh` |
+| `sdc_daily_opendart_corp` | OpenDART corp | 등록/활성 | `dart-sync-corp.sh` |
+| `sdc_daily_opendart_financials` | OpenDART financials | 등록/활성 | `dart-sync-financials.sh` |
+| `sdc_daily_opendart_share_info` | OpenDART share info | 등록/활성 | `dart-sync-share-info.sh` |
+| `sdc_daily_opendart_xbrl` | OpenDART XBRL | 등록/활성 | `dart-sync-xbrl.sh` |
+| `sdc_daily_metrics_normalize` | Metric normalize | 등록/활성 | `metrics-normalize.sh` |
 
 Cronicle script는 `set -euo pipefail`을 사용하므로 앞 단계 래퍼가 실패하면 이후 래퍼는 실행되지 않는다.
 
@@ -136,7 +136,7 @@ FLOW_START=2026-05-01 FLOW_END=2026-05-31 /home/whi/apps/sdc/bin/flows-backfill-
 | `short_selling_value` | 공매도 거래대금 | `KRW` |
 | `short_selling_balance_quantity` | 공매도 잔고 수량 | `shares` |
 
-`--incremental` 모드의 종료일은 가격 최신일이므로 가격 데이터가 먼저 적재되어 있어야 수급 수집이 진행된다. 전환 후 Cronicle은 `sdc_daily_pykrx_prices` 성공 후 `sdc_daily_krx_flows`를 실행하도록 chain 또는 시간차를 구성해 이 전제를 만족시킨다.
+`--incremental` 모드의 종료일은 가격 최신일이므로 가격 데이터가 먼저 적재되어 있어야 수급 수집이 진행된다. Cronicle은 `sdc_daily_fdr_universe -> sdc_daily_pykrx_prices -> sdc_daily_krx_flows -> sdc_daily_krx_common` chain으로 이 전제를 만족시키고, KRX daily path의 source overlap을 구조적으로 제거한다.
 
 ## OpenDART/Metric 일일 이벤트
 
@@ -340,4 +340,5 @@ docker compose run --rm collector common readiness-report --start <readiness_sta
 - 대부분의 raw 수집 명령은 기존 key가 있으면 `--force` 없이는 skip한다. 재실행은 대체로 멱등적이며, 필요한 경우 동일 파라미터로 다시 실행해 누락분을 이어받는다.
 - OpenDART 명령은 모든 API key가 일일 한도에 도달하면 exit code `75`로 종료한다. Cronicle script는 `set -e`라서 그 시점에서 이벤트가 중단된다.
 - KRX 수급(`krx_security_flow_raw`) 수집은 `sdc_daily_krx_flows`의 `flows-sync.sh`가 수행한다. OpenDART 계열 event는 DART raw 수집과 `stock_metric_fact` 정규화만 담당한다.
+- manual/backfill 실행 전에는 해당 domain의 daily root event를 Cronicle에서 일시 비활성화한다. daily wrapper는 기본적으로 source lock을 잡지 않으므로, backfill lock만으로 daily overlap을 막을 수 없다.
 - 현재 나열된 collector 경로는 `sync_checkpoints`, `operating_source_document`, `operating_metric_fact`에는 쓰지 않는다.
