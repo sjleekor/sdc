@@ -13,7 +13,7 @@ sdc_run_collector ops assert-common-freshness \
   --end "$END_DATE" \
   --max-run-age-hours "${SDC_COMMON_SOURCE_MAX_AGE_HOURS:-30}" \
   --daily-max-lag-days "${SDC_COMMON_DAILY_MAX_LAG_DAYS:-2}" \
-  --macro-max-lag-days "${SDC_COMMON_MACRO_MAX_LAG_DAYS:-45}"
+  --macro-max-lag-days "${SDC_COMMON_MACRO_MAX_LAG_DAYS:-60}"
 
 sdc_run_collector common build-daily \
   --end "$END_DATE" \

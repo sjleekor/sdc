@@ -136,7 +136,7 @@ FLOW_START=2026-05-01 FLOW_END=2026-05-31 /home/whi/apps/sdc/bin/flows-backfill-
 | `short_selling_value` | 공매도 거래대금 | `KRW` |
 | `short_selling_balance_quantity` | 공매도 잔고 수량 | `shares` |
 
-`--incremental` 모드의 종료일은 가격 최신일이므로 가격 데이터가 먼저 적재되어 있어야 수급 수집이 진행된다. Cronicle은 `sdc_daily_fdr_universe -> sdc_daily_pykrx_prices -> sdc_daily_krx_flows -> sdc_daily_krx_common` chain으로 이 전제를 만족시키고, KRX daily path의 source overlap을 구조적으로 제거한다.
+`--incremental` 모드의 종료일은 가격 최신일이므로 가격 데이터가 먼저 적재되어 있어야 수급 수집이 진행된다. Cronicle은 `sdc_daily_fdr_universe -> sdc_daily_pykrx_prices -> sdc_daily_krx_flows -> sdc_daily_krx_common` chain으로 이 전제를 만족시키고, 같은 날짜 chain 내부의 KRX source overlap을 구조적으로 제거한다. 단, 전날 `flows` catch-up이 24시간 이상 길어져 다음날 18:30 root와 겹치면 daily wrapper가 source lock을 잡지 않으므로 KRX 요청이 cross-day로 동시에 발생할 수 있다. 이 경우 다음 daily root를 일시 disable하거나 `SDC_DAILY_USE_SOURCE_LOCK=1` fallback을 사용한다.
 
 ## OpenDART/Metric 일일 이벤트
 
@@ -291,7 +291,7 @@ docker compose run --rm collector common readiness-report --start <readiness_sta
 | build daily | 120 calendar days | 최근 모델 feature row 재생성 |
 | readiness | 60 calendar days | 운영 품질 판정 |
 
-`common-build-daily.sh`는 build 전에 `ops assert-common-freshness`를 실행한다. 기본 필수 source는 `fdr,fred,ecos,krx`이며 `pykrx` common source는 wrapper만 준비하고 기본 Cronicle 활성화/필수 source에서는 제외한다. `pykrx`를 운영 필수로 승격할 때는 `SDC_COMMON_ENABLE_PYKRX=1`과 `SDC_COMMON_REQUIRED_SOURCES=fdr,fred,ecos,krx,pykrx`를 함께 적용한다.
+`common-build-daily.sh`는 build 전에 `ops assert-common-freshness`를 실행한다. 기본 필수 source는 `fdr,fred,ecos,krx`이며 `pykrx` common source는 wrapper만 준비하고 기본 Cronicle 활성화/필수 source에서는 제외한다. `pykrx`를 운영 필수로 승격할 때는 `SDC_COMMON_ENABLE_PYKRX=1`과 `SDC_COMMON_REQUIRED_SOURCES=fdr,fred,ecos,krx,pykrx`를 함께 적용한다. freshness guard 기본값은 source run age 30시간, daily observation lag 2일, macro observation lag 60일이다.
 
 `readiness-report --fail-on-not-ready`가 not-ready feature 또는 report error를 발견하면 exit code `2`로 종료한다. Cronicle은 이 exit code를 이벤트 실패로 기록한다.
 
