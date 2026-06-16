@@ -39,6 +39,7 @@ class RemoteDbSyncResult:
     batch_size: int = 0
     remote_host: str = ""
     ssh_host: str | None = None
+    ssh_compression: bool = False
     table_counts: dict[str, int] = field(default_factory=dict)
     error: str | None = None
 
@@ -81,6 +82,7 @@ def sync_remote_db_to_local(
     remote_host_override: str | None = None,
     ssh_host: str | None = None,
     ssh_local_port: int | None = None,
+    ssh_compression: bool = False,
 ) -> RemoteDbSyncResult:
     """Sync remote PostgreSQL tables from sj2-server into the local database."""
     started_at = now_kst()
@@ -91,6 +93,7 @@ def sync_remote_db_to_local(
         tables=tables,
         batch_size=batch_size,
         ssh_host=ssh_host,
+        ssh_compression=ssh_compression,
     )
     storage = PostgresStorage(local_dsn)
 
@@ -107,6 +110,7 @@ def sync_remote_db_to_local(
             "remote_host_override": remote_host_override,
             "ssh_host": ssh_host,
             "ssh_local_port": ssh_local_port,
+            "ssh_compression": ssh_compression,
         },
     )
 
@@ -139,17 +143,20 @@ def sync_remote_db_to_local(
                 host_override=remote_host_override,
                 ssh_host=ssh_host,
                 ssh_local_port=ssh_local_port,
+                ssh_compression=ssh_compression,
             ) as (remote_info, remote_dsn):
                 result.remote_host = remote_info.host
                 logger.info(
                     "Starting remote DB sync: remote_host=%s full_refresh=%s "
-                    "all_tables=%s tables=%s batch_size=%s ssh_host=%s",
+                    "all_tables=%s tables=%s batch_size=%s ssh_host=%s "
+                    "ssh_compression=%s",
                     remote_info.host,
                     full_refresh,
                     all_tables,
                     tables,
                     batch_size,
                     ssh_host,
+                    ssh_compression,
                 )
 
                 table_counts = sync_remote_tables_to_local(

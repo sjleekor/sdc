@@ -10,8 +10,6 @@ boundaries.
 from __future__ import annotations
 
 import contextlib
-import csv
-import io
 import json
 import logging
 import os
@@ -32,8 +30,6 @@ from psycopg2 import sql
 logger = logging.getLogger(__name__)
 
 DAILY_OHLCV_SYNC_NAME = "remote_db_sync.daily_ohlcv"
-DAILY_OHLCV_STAGING_TABLE = "staging_daily_ohlcv"
-FULL_REFRESH_DAILY_OHLCV_BATCH_SIZE = 200_000
 PUBLIC_SCHEMA = "public"
 
 
@@ -77,6 +73,8 @@ class TableSyncSpec:
     always_full_scan: bool = False
     prune_missing_after_full_scan: bool = False
     preserve_remote_surrogate_columns: tuple[str, ...] = ()
+    copy_merge_enabled: bool = False
+    conflict_update_where_sql: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +231,8 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
             "LIMIT 1"
         ),
         cursor_indexes=(9, 0, 1, 2),
+        copy_merge_enabled=True,
+        conflict_update_where_sql="daily_ohlcv.fetched_at <= EXCLUDED.fetched_at",
     ),
     TableSyncSpec(
         name="krx_security_flow_raw",
@@ -266,6 +266,7 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
         cursor_indexes=(9, 0),
         json_columns=("raw_payload",),
         preserve_remote_surrogate_columns=("raw_id",),
+        copy_merge_enabled=True,
     ),
     TableSyncSpec(
         name="dart_corp_master",
@@ -386,6 +387,7 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
         cursor_indexes=(25, 0),
         json_columns=("raw_payload",),
         preserve_remote_surrogate_columns=("raw_id",),
+        copy_merge_enabled=True,
     ),
     TableSyncSpec(
         name="dart_share_count_raw",
@@ -449,6 +451,7 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
         cursor_indexes=(20, 0),
         json_columns=("raw_payload",),
         preserve_remote_surrogate_columns=("raw_id",),
+        copy_merge_enabled=True,
     ),
     TableSyncSpec(
         name="dart_shareholder_return_raw",
@@ -515,6 +518,7 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
         cursor_indexes=(19, 0),
         json_columns=("raw_payload",),
         preserve_remote_surrogate_columns=("raw_id",),
+        copy_merge_enabled=True,
     ),
     TableSyncSpec(
         name="dart_xbrl_document",
@@ -558,6 +562,7 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
         cursor_indexes=(10, 0),
         json_columns=("raw_payload",),
         preserve_remote_surrogate_columns=("document_id",),
+        copy_merge_enabled=True,
     ),
     TableSyncSpec(
         name="dart_xbrl_fact_raw",
@@ -633,6 +638,7 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
         cursor_indexes=(23, 0),
         json_columns=("dimensions", "raw_payload"),
         preserve_remote_surrogate_columns=("raw_id",),
+        copy_merge_enabled=True,
     ),
     TableSyncSpec(
         name="metric_catalog",
@@ -781,6 +787,7 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
         ),
         cursor_indexes=(17, 0),
         preserve_remote_surrogate_columns=("fact_id",),
+        copy_merge_enabled=True,
     ),
     TableSyncSpec(
         name="common_feature_series",
@@ -901,6 +908,7 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
         json_columns=("raw_payload",),
         conflict_constraint="uq_common_feature_observation_raw",
         preserve_remote_surrogate_columns=("raw_id",),
+        copy_merge_enabled=True,
     ),
     TableSyncSpec(
         name="common_feature_catalog",
@@ -1003,6 +1011,7 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
         ),
         cursor_indexes=(9, 0, 1),
         json_columns=("source_series_ids", "source_observation_ids"),
+        copy_merge_enabled=True,
     ),
 )
 
@@ -1111,6 +1120,7 @@ def resolve_remote_dsn(
     host_override: str | None = None,
     ssh_host: str | None = None,
     ssh_local_port: int | None = None,
+    ssh_compression: bool = False,
 ) -> tuple[RemoteDbInfo, str]:
     """Yield the remote DB metadata and a connectable DSN.
 
@@ -1124,6 +1134,7 @@ def resolve_remote_dsn(
             ssh_host=ssh_host,
             remote_port=info.port,
             local_port=ssh_local_port,
+            compression=ssh_compression,
         ) as forwarded_port:
             yield info, info.to_dsn(host_override="127.0.0.1", port_override=forwarded_port)
         return
@@ -1161,8 +1172,11 @@ def sync_remote_tables_to_local(
 
             target_specs = _select_sync_specs(tables)
             if full_refresh:
-                _prepare_local_full_refresh_session(local_conn)
-                _truncate_sync_tables(local_conn=local_conn, specs=target_specs)
+                return _sync_selected_public_tables_to_local(
+                    remote_conn=remote_conn,
+                    local_conn=local_conn,
+                    specs=target_specs,
+                )
 
             dependencies = _list_foreign_key_dependencies(local_conn)
             _validate_prune_external_fk_children(
@@ -1171,13 +1185,12 @@ def sync_remote_tables_to_local(
             )
             prune_keys_by_table: dict[str, set[tuple[Any, ...]]] = {}
             for spec in target_specs:
-                if spec.name == "daily_ohlcv":
-                    copied = _sync_daily_ohlcv_via_copy(
+                if spec.copy_merge_enabled:
+                    copied = _sync_table_via_copy_merge(
                         remote_conn=remote_conn,
                         local_conn=local_conn,
                         spec=spec,
                         batch_size=batch_size,
-                        full_refresh=full_refresh,
                     )
                 else:
                     copied, remote_keys = _sync_table(
@@ -1313,6 +1326,64 @@ def _sync_pipeline_public_tables_to_local(
     _sync_owned_sequences(remote_conn=remote_conn, local_conn=local_conn, tables=table_order)
     _reset_daily_ohlcv_checkpoint_from_local(local_conn)
     local_conn.commit()
+    return results
+
+
+def _sync_selected_public_tables_to_local(
+    *,
+    remote_conn: Any,
+    local_conn: Any,
+    specs: tuple[TableSyncSpec, ...],
+) -> dict[str, int]:
+    """Full-refresh selected managed mirror tables through direct binary COPY."""
+    _prepare_local_full_refresh_session(local_conn)
+    tables = _database_tables_for_specs(specs)
+    dependencies = _list_foreign_key_dependencies(local_conn)
+    _validate_no_external_fk_children(tables=tables, dependencies=dependencies)
+    _validate_full_database_columns(
+        remote_conn=remote_conn,
+        local_conn=local_conn,
+        tables=tables,
+    )
+
+    table_order = _sort_tables_by_fk_dependencies(
+        tables=tables,
+        dependencies=dependencies,
+    )
+
+    try:
+        _truncate_database_tables(local_conn=local_conn, tables=table_order, commit=False)
+
+        results: dict[str, int] = {}
+        for table in table_order:
+            columns = _list_table_columns(remote_conn, table)
+            copied = _copy_database_table(
+                remote_conn=remote_conn,
+                local_conn=local_conn,
+                table=table,
+                columns=columns,
+            )
+            results[table.display_name] = copied
+            logger.info(
+                "selected table sync copied table=%s rows=%s",
+                table.display_name,
+                copied,
+            )
+
+        if any(spec.name == "daily_ohlcv" for spec in specs):
+            _reset_daily_ohlcv_checkpoint_from_local(local_conn)
+        local_conn.commit()
+    except Exception:
+        local_conn.rollback()
+        raise
+
+    try:
+        _sync_owned_sequences(remote_conn=remote_conn, local_conn=local_conn, tables=table_order)
+        local_conn.commit()
+    except Exception:
+        local_conn.rollback()
+        raise
+
     return results
 
 
@@ -1494,7 +1565,12 @@ def _sort_tables_by_fk_dependencies(
     return tuple(ordered)
 
 
-def _truncate_database_tables(*, local_conn: Any, tables: tuple[DatabaseTable, ...]) -> None:
+def _truncate_database_tables(
+    *,
+    local_conn: Any,
+    tables: tuple[DatabaseTable, ...],
+    commit: bool = True,
+) -> None:
     """Truncate target tables before a full refresh."""
     if not tables:
         return
@@ -1503,7 +1579,8 @@ def _truncate_database_tables(*, local_conn: Any, tables: tuple[DatabaseTable, .
     statement = sql.SQL("TRUNCATE TABLE {} RESTART IDENTITY").format(table_list)
     with local_conn.cursor() as cur:
         cur.execute(statement)
-    local_conn.commit()
+    if commit:
+        local_conn.commit()
 
 
 def _copy_database_table(
@@ -1736,8 +1813,7 @@ def _validate_no_external_fk_children(
     if external_children:
         raise ValueError(
             "Unsafe full-refresh table subset; include FK child tables or choose "
-            "incremental sync: "
-            + ", ".join(external_children)
+            "incremental sync: " + ", ".join(external_children)
         )
 
 
@@ -1761,8 +1837,7 @@ def _validate_prune_external_fk_children(
     if external_children:
         raise ValueError(
             "Unsafe pruning table subset; include FK child tables or choose a "
-            "non-pruning table set: "
-            + ", ".join(external_children)
+            "non-pruning table set: " + ", ".join(external_children)
         )
 
 
@@ -1781,9 +1856,7 @@ def _sync_table(
         if full_refresh or spec.always_full_scan
         else _get_local_cursor(local_conn=local_conn, spec=spec)
     )
-    remote_keys: set[tuple[Any, ...]] | None = (
-        set() if spec.prune_missing_after_full_scan else None
-    )
+    remote_keys: set[tuple[Any, ...]] | None = set() if spec.prune_missing_after_full_scan else None
 
     while True:
         rows = _fetch_remote_rows(
@@ -1802,81 +1875,70 @@ def _sync_table(
         cursor_values = tuple(rows[-1][index] for index in spec.cursor_indexes)
 
 
-def _sync_daily_ohlcv_via_copy(
+def _sync_table_via_copy_merge(
     *,
     remote_conn: Any,
     local_conn: Any,
     spec: TableSyncSpec,
     batch_size: int,
-    full_refresh: bool,
 ) -> int:
-    """Copy ``daily_ohlcv`` using ``COPY`` into a local temp staging table."""
-    _ensure_daily_ohlcv_staging_table(local_conn)
+    """Copy one incremental table through remote COPY into local staging."""
+    _ensure_copy_merge_staging_table(local_conn=local_conn, spec=spec)
     copied_rows = 0
     batch_number = 0
-    cursor_values = None
-    effective_batch_size = _effective_daily_ohlcv_batch_size(
-        batch_size=batch_size,
-        full_refresh=full_refresh,
-    )
 
-    if not full_refresh:
+    if spec.name == "daily_ohlcv":
         checkpoint_cursor = _load_daily_ohlcv_checkpoint(local_conn)
         local_cursor = _get_local_cursor(local_conn=local_conn, spec=spec)
         cursor_values = _select_resume_cursor(checkpoint_cursor, local_cursor)
+    else:
+        cursor_values = _get_local_cursor(local_conn=local_conn, spec=spec)
 
-    query, params = _build_streaming_query(
-        spec=spec,
-        cursor_values=cursor_values,
-        full_refresh=full_refresh,
-    )
-    remote_cursor_name = f"daily_ohlcv_sync_{int(time.time())}"
+    stage_table = _copy_merge_stage_table_name(spec)
 
     try:
-        with remote_conn.cursor(name=remote_cursor_name) as remote_cur:
-            remote_cur.itersize = effective_batch_size
-            remote_cur.execute(query, params)
+        while True:
+            started_at = time.monotonic()
+            batch_rows = _copy_remote_select_to_staging(
+                remote_conn=remote_conn,
+                local_conn=local_conn,
+                spec=spec,
+                stage_table=stage_table,
+                cursor_values=cursor_values,
+                batch_size=batch_size,
+            )
+            if batch_rows == 0:
+                break
 
-            while True:
-                started_at = time.monotonic()
-                rows = remote_cur.fetchmany(effective_batch_size)
-                if not rows:
-                    break
+            try:
+                _merge_staging_rows(local_conn=local_conn, spec=spec, stage_table=stage_table)
+                next_cursor = _get_staging_cursor(
+                    local_conn=local_conn,
+                    spec=spec,
+                    stage_table=stage_table,
+                )
+                if next_cursor is None:
+                    raise RuntimeError(f"Staging table {stage_table} has no cursor row")
+                cursor_values = next_cursor
+                if spec.name == "daily_ohlcv":
+                    _save_daily_ohlcv_checkpoint(local_conn, cursor_values)
+                local_conn.commit()
+            except Exception:
+                local_conn.rollback()
+                raise
 
-                try:
-                    _copy_daily_ohlcv_rows_to_staging(local_conn=local_conn, rows=rows)
-                    if full_refresh:
-                        _insert_daily_ohlcv_from_staging(local_conn)
-                    else:
-                        _merge_daily_ohlcv_from_staging(local_conn)
-                        cursor_values = tuple(rows[-1][index] for index in spec.cursor_indexes)
-                        _save_daily_ohlcv_checkpoint(local_conn, cursor_values)
-                    local_conn.commit()
-                except Exception:
-                    local_conn.rollback()
-                    raise
-
-                copied_rows += len(rows)
-                batch_number += 1
-                elapsed = max(time.monotonic() - started_at, 0.001)
-                if full_refresh:
-                    logger.info(
-                        "daily_ohlcv full-refresh batch=%s rows=%s total=%s rate=%.0f rows/s",
-                        batch_number,
-                        len(rows),
-                        copied_rows,
-                        len(rows) / elapsed,
-                    )
-                else:
-                    logger.info(
-                        "daily_ohlcv copy-sync batch=%s rows=%s total=%s "
-                        "rate=%.0f rows/s cursor=%s",
-                        batch_number,
-                        len(rows),
-                        copied_rows,
-                        len(rows) / elapsed,
-                        _format_cursor_for_log(cursor_values),
-                    )
+            copied_rows += batch_rows
+            batch_number += 1
+            elapsed = max(time.monotonic() - started_at, 0.001)
+            logger.info(
+                "%s copy-merge batch=%s rows=%s total=%s rate=%.0f rows/s cursor=%s",
+                spec.name,
+                batch_number,
+                batch_rows,
+                copied_rows,
+                batch_rows / elapsed,
+                _format_cursor_for_log(cursor_values),
+            )
     finally:
         remote_conn.rollback()
 
@@ -1957,33 +2019,6 @@ def _select_resume_cursor(
     return max(checkpoint_cursor, local_cursor)
 
 
-def _build_streaming_query(
-    *,
-    spec: TableSyncSpec,
-    cursor_values: tuple[Any, ...] | None,
-    full_refresh: bool,
-) -> tuple[str, list[Any]]:
-    """Build a streaming SELECT for named-cursor iteration."""
-    if full_refresh:
-        return f"SELECT {spec.select_list} FROM {spec.from_clause}", []
-
-    predicate = ""
-    params: list[Any] = []
-    if cursor_values is not None:
-        tuple_expr = ", ".join(spec.order_columns)
-        placeholders = ", ".join(["%s"] * len(cursor_values))
-        predicate = f"WHERE ({tuple_expr}) > ({placeholders})"
-        params.extend(cursor_values)
-
-    query = (
-        f"SELECT {spec.select_list} "
-        f"FROM {spec.from_clause} "
-        f"{predicate} "
-        f"ORDER BY {', '.join(spec.order_columns)}"
-    )
-    return query, params
-
-
 def _fetch_remote_rows(
     *,
     remote_conn: Any,
@@ -2015,94 +2050,187 @@ def _fetch_remote_rows(
         return list(cur.fetchall())
 
 
-def _ensure_daily_ohlcv_staging_table(local_conn: Any) -> None:
-    """Create the temp staging table used by ``COPY``."""
+def _copy_merge_stage_table_name(spec: TableSyncSpec) -> str:
+    """Return the per-table temporary staging table name for COPY merge."""
+    return f"remote_sync_stage_{spec.name}"
+
+
+def _ensure_copy_merge_staging_table(*, local_conn: Any, spec: TableSyncSpec) -> None:
+    """Create the temp staging table used by generic COPY merge."""
+    stage_table = _copy_merge_stage_table_name(spec)
+    column_list = sql.SQL(", ").join(sql.Identifier(column) for column in spec.insert_columns)
+    statement = sql.SQL(
+        "CREATE TEMP TABLE IF NOT EXISTS {} "
+        "ON COMMIT DELETE ROWS AS "
+        "SELECT {} FROM {} WHERE FALSE"
+    ).format(
+        sql.Identifier(stage_table),
+        column_list,
+        _table_identifier(DatabaseTable(schema=PUBLIC_SCHEMA, name=spec.name)),
+    )
     with local_conn.cursor() as cur:
-        cur.execute(f"""
-            CREATE TEMP TABLE IF NOT EXISTS {DAILY_OHLCV_STAGING_TABLE} (
-                trade_date  DATE        NOT NULL,
-                ticker      TEXT        NOT NULL,
-                market      TEXT        NOT NULL,
-                open        BIGINT      NOT NULL,
-                high        BIGINT      NOT NULL,
-                low         BIGINT      NOT NULL,
-                close       BIGINT      NOT NULL,
-                volume      BIGINT      NOT NULL,
-                source      TEXT        NOT NULL,
-                fetched_at  TIMESTAMPTZ NOT NULL
-            ) ON COMMIT DELETE ROWS
-            """)
+        cur.execute(statement)
 
 
-def _copy_daily_ohlcv_rows_to_staging(*, local_conn: Any, rows: list[tuple[Any, ...]]) -> None:
-    """Bulk load a batch into the temp staging table via ``COPY``."""
-    buffer = io.StringIO()
-    writer = csv.writer(buffer, lineterminator="\n")
-    for row in rows:
-        writer.writerow(_serialize_copy_row(row))
-    buffer.seek(0)
+def _copy_remote_select_to_staging(
+    *,
+    remote_conn: Any,
+    local_conn: Any,
+    spec: TableSyncSpec,
+    stage_table: str,
+    cursor_values: tuple[Any, ...] | None,
+    batch_size: int,
+) -> int:
+    """Stream one remote SELECT batch into a local temp staging table via COPY."""
+    with local_conn.cursor() as cur:
+        cur.execute(sql.SQL("TRUNCATE TABLE {}").format(sql.Identifier(stage_table)))
 
-    copy_sql = f"""
-        COPY {DAILY_OHLCV_STAGING_TABLE} (
-            trade_date, ticker, market, open, high, low, close, volume, source, fetched_at
+    read_fd, write_fd = os.pipe()
+    producer_errors: list[BaseException] = []
+
+    def produce_copy_stream() -> None:
+        try:
+            with os.fdopen(write_fd, "wb", closefd=True) as write_file:
+                with remote_conn.cursor() as remote_cur:
+                    copy_to = _build_copy_select_sql(
+                        remote_cur=remote_cur,
+                        spec=spec,
+                        cursor_values=cursor_values,
+                        batch_size=batch_size,
+                    )
+                    remote_cur.copy_expert(copy_to, write_file)
+        except BaseException as exc:  # pragma: no cover - surfaced through main thread
+            producer_errors.append(exc)
+
+    producer = threading.Thread(target=produce_copy_stream, daemon=True)
+    producer.start()
+
+    status_message = ""
+    try:
+        with os.fdopen(read_fd, "rb", closefd=True) as read_file:
+            with local_conn.cursor() as local_cur:
+                local_cur.copy_expert(
+                    _build_copy_stage_from_stdin_sql(
+                        local_conn=local_conn,
+                        spec=spec,
+                        stage_table=stage_table,
+                    ),
+                    read_file,
+                )
+                status_message = local_cur.statusmessage
+    finally:
+        producer.join()
+
+    if producer_errors:
+        raise RuntimeError(
+            f"Remote COPY merge failed for {spec.name}: {producer_errors[0]}"
+        ) from producer_errors[0]
+
+    copied_rows = _copy_status_row_count(status_message)
+    if copied_rows is not None:
+        return copied_rows
+    return _count_stage_rows(local_conn=local_conn, stage_table=stage_table)
+
+
+def _build_copy_select_sql(
+    *,
+    remote_cur: Any,
+    spec: TableSyncSpec,
+    cursor_values: tuple[Any, ...] | None,
+    batch_size: int,
+) -> str:
+    """Build a COPY SELECT statement with safely quoted cursor literals."""
+    predicate = ""
+    if cursor_values is not None:
+        tuple_expr = ", ".join(spec.order_columns)
+        placeholders = ", ".join(["%s"] * len(cursor_values))
+        predicate = remote_cur.mogrify(
+            f"WHERE ({tuple_expr}) > ({placeholders})",
+            cursor_values,
+        ).decode()
+
+    limit_literal = remote_cur.mogrify("%s", (batch_size,)).decode()
+    return (
+        "COPY ("
+        f"SELECT {spec.select_list} "
+        f"FROM {spec.from_clause} "
+        f"{predicate} "
+        f"ORDER BY {', '.join(spec.order_columns)} "
+        f"LIMIT {limit_literal}"
+        ") TO STDOUT WITH (FORMAT CSV, NULL '\\N')"
+    )
+
+
+def _build_copy_stage_from_stdin_sql(
+    *,
+    local_conn: Any,
+    spec: TableSyncSpec,
+    stage_table: str,
+) -> str:
+    """Build the local COPY FROM STDIN statement for a staging table."""
+    column_list = sql.SQL(", ").join(sql.Identifier(column) for column in spec.insert_columns)
+    statement = sql.SQL("COPY {} ({}) FROM STDIN WITH (FORMAT CSV, NULL '\\N')").format(
+        sql.Identifier(stage_table),
+        column_list,
+    )
+    return statement.as_string(local_conn)
+
+
+def _count_stage_rows(*, local_conn: Any, stage_table: str) -> int:
+    """Count rows in a staging table when COPY status does not expose a count."""
+    with local_conn.cursor() as cur:
+        cur.execute(sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(stage_table)))
+        row = cur.fetchone()
+    return int(row[0])
+
+
+def _merge_staging_rows(
+    *,
+    local_conn: Any,
+    spec: TableSyncSpec,
+    stage_table: str,
+) -> None:
+    """Merge staged rows into the target table using the spec's conflict action."""
+    statement = _build_insert_select_from_stage_statement(
+        spec=spec,
+        stage_table=stage_table,
+    )
+    with local_conn.cursor() as cur:
+        cur.execute(statement)
+
+
+def _build_insert_select_from_stage_statement(
+    *,
+    spec: TableSyncSpec,
+    stage_table: str,
+) -> str:
+    """Build an INSERT ... SELECT FROM stage merge statement."""
+    insert_columns = ", ".join(spec.insert_columns)
+    return (
+        f"INSERT INTO {spec.name} ({insert_columns}) "
+        f"SELECT {insert_columns} FROM {stage_table} "
+        f"{_build_conflict_action(spec)}"
+    )
+
+
+def _get_staging_cursor(
+    *,
+    local_conn: Any,
+    spec: TableSyncSpec,
+    stage_table: str,
+) -> tuple[Any, ...] | None:
+    """Return the furthest cursor represented by the current staging batch."""
+    order_columns = ", ".join(spec.order_columns)
+    with local_conn.cursor() as cur:
+        cur.execute(
+            f"SELECT {order_columns} FROM {stage_table} "
+            f"ORDER BY {order_columns} DESC LIMIT 1"
         )
-        FROM STDIN WITH (FORMAT CSV, NULL '\\N')
-    """
+        row = cur.fetchone()
 
-    with local_conn.cursor() as cur:
-        cur.execute(f"TRUNCATE TABLE {DAILY_OHLCV_STAGING_TABLE}")
-        cur.copy_expert(copy_sql, buffer)
-
-
-def _insert_daily_ohlcv_from_staging(local_conn: Any) -> None:
-    """Insert staged rows into an empty ``daily_ohlcv`` target."""
-    with local_conn.cursor() as cur:
-        cur.execute(f"""
-            INSERT INTO daily_ohlcv (
-                trade_date, ticker, market, open, high, low, close, volume, source, fetched_at
-            )
-            SELECT
-                trade_date, ticker, market, open, high, low, close, volume, source, fetched_at
-            FROM {DAILY_OHLCV_STAGING_TABLE}
-            """)
-
-
-def _merge_daily_ohlcv_from_staging(local_conn: Any) -> None:
-    """Merge staged ``daily_ohlcv`` rows into the target table."""
-    with local_conn.cursor() as cur:
-        cur.execute(f"""
-            INSERT INTO daily_ohlcv (
-                trade_date, ticker, market, open, high, low, close, volume, source, fetched_at
-            )
-            SELECT
-                trade_date, ticker, market, open, high, low, close, volume, source, fetched_at
-            FROM {DAILY_OHLCV_STAGING_TABLE}
-            ON CONFLICT (trade_date, ticker, market) DO UPDATE SET
-                open = EXCLUDED.open,
-                high = EXCLUDED.high,
-                low = EXCLUDED.low,
-                close = EXCLUDED.close,
-                volume = EXCLUDED.volume,
-                source = EXCLUDED.source,
-                fetched_at = EXCLUDED.fetched_at
-            WHERE daily_ohlcv.fetched_at <= EXCLUDED.fetched_at
-            """)
-
-
-def _serialize_copy_row(row: tuple[Any, ...]) -> list[Any]:
-    """Serialize a DB row into CSV-friendly values for ``COPY``."""
-    return [_serialize_copy_value(value) for value in row]
-
-
-def _serialize_copy_value(value: Any) -> Any:
-    """Serialize one value for ``COPY FROM STDIN``."""
-    if value is None:
-        return "\\N"
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    return value
+    if row is None:
+        return None
+    return tuple(row)
 
 
 def _format_cursor_for_log(cursor_values: tuple[Any, ...] | None) -> str:
@@ -2118,18 +2246,8 @@ def _prepare_local_full_refresh_session(local_conn: Any) -> None:
         cur.execute("SET synchronous_commit = OFF")
 
 
-def _effective_daily_ohlcv_batch_size(*, batch_size: int, full_refresh: bool) -> int:
-    """Return the effective batch size for ``daily_ohlcv`` sync."""
-    if full_refresh:
-        return max(batch_size, FULL_REFRESH_DAILY_OHLCV_BATCH_SIZE)
-    return batch_size
-
-
-def _upsert_rows(*, local_conn: Any, spec: TableSyncSpec, rows: list[tuple[Any, ...]]) -> None:
-    """Upsert a batch into the local table."""
-    insert_columns = ", ".join(spec.insert_columns)
-    values = [_adapt_insert_row(spec=spec, row=row) for row in rows]
-
+def _build_conflict_action(spec: TableSyncSpec) -> str:
+    """Build the ON CONFLICT action for a table sync spec."""
     if spec.conflict_constraint is not None:
         conflict_target = f"ON CONFLICT ON CONSTRAINT {spec.conflict_constraint}"
     else:
@@ -2140,19 +2258,25 @@ def _upsert_rows(*, local_conn: Any, spec: TableSyncSpec, rows: list[tuple[Any, 
         dict.fromkeys((*spec.preserve_remote_surrogate_columns, *spec.update_columns))
     )
     if assignment_columns:
-        assignments = ", ".join(
-            f"{column} = EXCLUDED.{column}" for column in assignment_columns
-        )
+        assignments = ", ".join(f"{column} = EXCLUDED.{column}" for column in assignment_columns)
         conflict_action = f"{conflict_target} DO UPDATE SET {assignments}"
+        if spec.conflict_update_where_sql:
+            conflict_action = f"{conflict_action} WHERE {spec.conflict_update_where_sql}"
     elif spec.do_nothing_when_no_update_columns:
         conflict_action = f"{conflict_target} DO NOTHING"
     else:
         raise ValueError(f"Sync spec {spec.name} has no update columns")
+    return conflict_action
 
+
+def _upsert_rows(*, local_conn: Any, spec: TableSyncSpec, rows: list[tuple[Any, ...]]) -> None:
+    """Upsert a batch into the local table."""
+    insert_columns = ", ".join(spec.insert_columns)
+    values = [_adapt_insert_row(spec=spec, row=row) for row in rows]
     statement = (
         f"INSERT INTO {spec.name} ({insert_columns}) "
         f"VALUES %s "
-        f"{conflict_action}"
+        f"{_build_conflict_action(spec)}"
     )
 
     try:
@@ -2235,8 +2359,7 @@ def _prune_missing_rows_for_specs(
 
     specs_by_name = {spec.name: spec for spec in specs}
     prune_tables = tuple(
-        DatabaseTable(schema=PUBLIC_SCHEMA, name=table_name)
-        for table_name in keys_by_table
+        DatabaseTable(schema=PUBLIC_SCHEMA, name=table_name) for table_name in keys_by_table
     )
     prune_order = reversed(
         _sort_tables_by_fk_dependencies(tables=prune_tables, dependencies=dependencies)
@@ -2272,6 +2395,7 @@ def _open_ssh_tunnel(
     ssh_host: str,
     remote_port: int,
     local_port: int | None,
+    compression: bool = False,
 ) -> int:
     """Open an SSH tunnel to the remote PostgreSQL host."""
     forwarded_port = local_port or _find_free_port()
@@ -2286,6 +2410,8 @@ def _open_ssh_tunnel(
         f"{forwarded_port}:127.0.0.1:{remote_port}",
         ssh_host,
     ]
+    if compression:
+        cmd.insert(1, "-C")
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,

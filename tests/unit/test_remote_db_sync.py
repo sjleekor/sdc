@@ -9,15 +9,19 @@ from krx_collector.infra.db_postgres.remote_sync import (
     SYNC_TABLE_SPECS,
     DatabaseTable,
     _adapt_insert_row,
+    _build_conflict_action,
+    _build_copy_select_sql,
+    _build_insert_select_from_stage_statement,
     _copy_status_row_count,
     _daily_ohlcv_checkpoint_payload,
-    _effective_daily_ohlcv_batch_size,
+    _open_ssh_tunnel,
     _prune_missing_rows,
     _row_conflict_key,
     _select_required_public_tables,
     _select_resume_cursor,
     _select_sync_specs,
     _sort_tables_by_fk_dependencies,
+    _sync_selected_public_tables_to_local,
     _upsert_rows,
     _validate_full_database_table_sets,
     _validate_no_external_fk_children,
@@ -172,12 +176,25 @@ def test_special_common_feature_specs_cover_conflict_edge_cases() -> None:
     assert input_spec.prune_missing_after_full_scan is True
 
 
-def test_small_catalog_specs_are_full_scan_pruned() -> None:
-    pruned_specs = {
-        spec.name
-        for spec in SYNC_TABLE_SPECS
-        if spec.prune_missing_after_full_scan
+def test_copy_merge_specs_are_limited_to_update_aware_tables() -> None:
+    copy_merge_specs = {spec.name for spec in SYNC_TABLE_SPECS if spec.copy_merge_enabled}
+
+    assert copy_merge_specs == {
+        "daily_ohlcv",
+        "krx_security_flow_raw",
+        "dart_financial_statement_raw",
+        "dart_share_count_raw",
+        "dart_shareholder_return_raw",
+        "dart_xbrl_document",
+        "dart_xbrl_fact_raw",
+        "stock_metric_fact",
+        "common_feature_observation_raw",
+        "common_feature_daily_fact",
     }
+
+
+def test_small_catalog_specs_are_full_scan_pruned() -> None:
+    pruned_specs = {spec.name for spec in SYNC_TABLE_SPECS if spec.prune_missing_after_full_scan}
 
     assert {
         "stock_master",
@@ -228,6 +245,44 @@ def test_raw_upsert_preserves_remote_surrogate_id(monkeypatch) -> None:
     assert spec.preserve_remote_surrogate_columns == ("raw_id",)
     assert "raw_id = EXCLUDED.raw_id" in captured["statement"]
     assert connection.commits == 1
+
+
+def test_daily_ohlcv_conflict_action_preserves_stale_update_guard() -> None:
+    spec = next(spec for spec in SYNC_TABLE_SPECS if spec.name == "daily_ohlcv")
+
+    conflict_action = _build_conflict_action(spec)
+    stage_statement = _build_insert_select_from_stage_statement(
+        spec=spec,
+        stage_table="remote_sync_stage_daily_ohlcv",
+    )
+
+    assert "ON CONFLICT (trade_date, ticker, market) DO UPDATE" in conflict_action
+    assert "WHERE daily_ohlcv.fetched_at <= EXCLUDED.fetched_at" in conflict_action
+    assert "WHERE daily_ohlcv.fetched_at <= EXCLUDED.fetched_at" in stage_statement
+
+
+def test_build_copy_select_sql_quotes_cursor_and_limit_with_mogrify() -> None:
+    spec = next(spec for spec in SYNC_TABLE_SPECS if spec.name == "krx_security_flow_raw")
+    cursor = _FakeMogrifyCursor()
+
+    statement = _build_copy_select_sql(
+        remote_cur=cursor,
+        spec=spec,
+        cursor_values=(datetime(2026, 4, 18, 0, 0, tzinfo=UTC), 10),
+        batch_size=50000,
+    )
+
+    assert statement.startswith("COPY (SELECT raw_id, trade_date")
+    assert "WHERE (fetched_at, raw_id) > ('quoted-cursor')" in statement
+    assert "LIMIT 50000" in statement
+    assert statement.endswith(") TO STDOUT WITH (FORMAT CSV, NULL '\\N')")
+    assert cursor.calls == [
+        (
+            "WHERE (fetched_at, raw_id) > (%s, %s)",
+            (datetime(2026, 4, 18, 0, 0, tzinfo=UTC), 10),
+        ),
+        ("%s", (50000,)),
+    ]
 
 
 def test_prune_missing_rows_uses_temp_key_table_for_large_key_sets(monkeypatch) -> None:
@@ -496,9 +551,7 @@ def test_reset_local_public_tables_drops_only_pipeline_tables(monkeypatch) -> No
         [table.name for table in PIPELINE_FULL_REFRESH_TABLES],
     )
 
-    drop_targets = [
-        _identifier_pairs(stmt) for stmt, _ in cursor.executed[1:]
-    ]
+    drop_targets = [_identifier_pairs(stmt) for stmt, _ in cursor.executed[1:]]
     assert drop_targets == [
         [("public", "stock_master"), ("public", "daily_ohlcv")],
     ]
@@ -514,7 +567,125 @@ def test_reset_local_public_tables_handles_empty_db(monkeypatch) -> None:
     assert len(cursor.executed) == 1
 
 
-def test_effective_daily_ohlcv_batch_size_is_boosted_for_full_refresh() -> None:
-    assert _effective_daily_ohlcv_batch_size(batch_size=50_000, full_refresh=False) == 50_000
-    assert _effective_daily_ohlcv_batch_size(batch_size=50_000, full_refresh=True) == 200_000
-    assert _effective_daily_ohlcv_batch_size(batch_size=300_000, full_refresh=True) == 300_000
+def test_selected_full_refresh_uses_no_commit_truncate(monkeypatch) -> None:
+    local_conn = _FakeConnection(_FakeCursor([]))
+    remote_conn = _FakeConnection(_FakeCursor([]))
+    copied_tables: list[str] = []
+    truncate_calls: list[dict[str, object]] = []
+    sequence_tables: list[str] = []
+    sequence_commit_counts: list[int] = []
+    checkpoint_resets = 0
+
+    def fake_truncate(*, local_conn, tables, commit=True) -> None:
+        truncate_calls.append(
+            {
+                "local_conn": local_conn,
+                "tables": tables,
+                "commit": commit,
+            }
+        )
+
+    def fake_copy_database_table(*, remote_conn, local_conn, table, columns) -> int:
+        del remote_conn, local_conn, columns
+        copied_tables.append(table.name)
+        return 7
+
+    def fake_sync_owned_sequences(*, remote_conn, local_conn, tables) -> int:
+        del remote_conn
+        sequence_commit_counts.append(local_conn.commits)
+        sequence_tables.extend(table.name for table in tables)
+        return 0
+
+    def fake_reset_checkpoint(local_conn) -> None:
+        nonlocal checkpoint_resets
+        del local_conn
+        checkpoint_resets += 1
+
+    monkeypatch.setattr(remote_sync, "_prepare_local_full_refresh_session", lambda _conn: None)
+    monkeypatch.setattr(remote_sync, "_list_foreign_key_dependencies", lambda _conn: ())
+    monkeypatch.setattr(remote_sync, "_validate_full_database_columns", lambda **_kwargs: None)
+    monkeypatch.setattr(remote_sync, "_truncate_database_tables", fake_truncate)
+    monkeypatch.setattr(remote_sync, "_list_table_columns", lambda _conn, _table: ("id",))
+    monkeypatch.setattr(remote_sync, "_copy_database_table", fake_copy_database_table)
+    monkeypatch.setattr(remote_sync, "_sync_owned_sequences", fake_sync_owned_sequences)
+    monkeypatch.setattr(
+        remote_sync,
+        "_reset_daily_ohlcv_checkpoint_from_local",
+        fake_reset_checkpoint,
+    )
+
+    specs = (next(spec for spec in SYNC_TABLE_SPECS if spec.name == "daily_ohlcv"),)
+
+    results = _sync_selected_public_tables_to_local(
+        remote_conn=remote_conn,
+        local_conn=local_conn,
+        specs=specs,
+    )
+
+    assert results == {"daily_ohlcv": 7}
+    assert copied_tables == ["daily_ohlcv"]
+    assert sequence_tables == ["daily_ohlcv"]
+    assert sequence_commit_counts == [1]
+    assert checkpoint_resets == 1
+    assert truncate_calls[0]["commit"] is False
+    assert local_conn.commits == 2
+    assert local_conn.rollbacks == 0
+
+
+def test_open_ssh_tunnel_can_enable_compression(monkeypatch) -> None:
+    commands: list[list[str]] = []
+
+    class FakeProcess:
+        stdout = None
+        stderr = None
+
+        def terminate(self) -> None:
+            return None
+
+        def wait(self, timeout=None) -> int:
+            del timeout
+            return 0
+
+        def kill(self) -> None:
+            return None
+
+    def fake_popen(cmd, **kwargs):
+        del kwargs
+        commands.append(cmd)
+        return FakeProcess()
+
+    monkeypatch.setattr(remote_sync, "_find_free_port", lambda: 15432)
+    monkeypatch.setattr(remote_sync, "_wait_for_local_port", lambda **_kwargs: None)
+    monkeypatch.setattr(remote_sync.subprocess, "Popen", fake_popen)
+
+    with _open_ssh_tunnel(
+        ssh_host="whi@sj2-server",
+        remote_port=5432,
+        local_port=None,
+        compression=True,
+    ) as forwarded_port:
+        assert forwarded_port == 15432
+
+    assert commands[0][:4] == ["ssh", "-C", "-o", "ExitOnForwardFailure=yes"]
+
+    with _open_ssh_tunnel(
+        ssh_host="whi@sj2-server",
+        remote_port=5432,
+        local_port=15433,
+        compression=False,
+    ):
+        pass
+
+    assert commands[1][:3] == ["ssh", "-o", "ExitOnForwardFailure=yes"]
+    assert "-C" not in commands[1]
+
+
+class _FakeMogrifyCursor:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def mogrify(self, query: str, params: tuple[object, ...]) -> bytes:
+        self.calls.append((query, params))
+        if query.startswith("WHERE"):
+            return b"WHERE (fetched_at, raw_id) > ('quoted-cursor')"
+        return str(params[0]).encode()

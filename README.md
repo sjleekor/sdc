@@ -222,7 +222,7 @@ catalog/link/snapshot 성격의 작은 mirror 테이블은 remote 전체를 scan
 
 #### 2. `--full-refresh`
 
-관리 대상 19개 테이블을 `TRUNCATE` 후 원격 데이터를 처음부터 다시 적재합니다. 로컬 복제본이 손상됐거나 첫 동기화일 때 사용합니다. `sync_checkpoints`와 로컬 `ingestion_runs`는 remote mirror 대상이 아니므로 유지됩니다.
+관리 대상 19개 테이블을 `TRUNCATE` 후 원격 데이터를 처음부터 다시 적재합니다. 로컬 복제본이 손상됐거나 첫 동기화일 때 사용합니다. `sync_checkpoints`와 로컬 `ingestion_runs`는 remote mirror 대상이 아니므로 유지됩니다. 이 경로는 선택된 managed table을 transaction 안에서 truncate한 뒤 PostgreSQL binary `COPY`로 적재합니다.
 
 ```bash
 uv run krx-collector db sync-remote --ssh-host whi@sj2-server --full-refresh
@@ -296,6 +296,7 @@ remote mirror에서 제외되는 로컬 운영 테이블:
 - `--remote-host`: `db_info`의 host 값을 다른 호스트명으로 덮어씁니다.
 - `--ssh-host`: 지정 시 SSH 로컬 포트 포워딩을 통해 원격 DB에 접속합니다.
 - `--ssh-local-port`: SSH 터널에 고정 로컬 포트를 사용합니다 (미지정 시 임의의 빈 포트).
+- `--ssh-compression` / `--no-ssh-compression`: SSH 터널 사용 시 압축을 켜거나 끕니다. 기본값은 `REMOTE_DB_SSH_COMPRESSION` 설정을 따릅니다.
 
 ## Docker로 실행하기
 

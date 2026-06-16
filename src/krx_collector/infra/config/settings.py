@@ -77,6 +77,7 @@ class Settings(BaseSettings):
         remote_db_host_override: Optional hostname override for the remote DB.
         remote_db_ssh_host: Optional SSH host for local port forwarding.
         remote_db_ssh_local_port: Optional fixed local port for SSH tunnel.
+        remote_db_ssh_compression: Enable SSH compression for DB tunnels.
         krx_mdc_timeout_seconds: HTTP timeout for KRX MDC requests.
         krx_logical_rate_limit_seconds: Delay between higher-level KRX flow
             requests.
@@ -158,6 +159,7 @@ class Settings(BaseSettings):
     remote_db_host_override: str | None = None
     remote_db_ssh_host: str | None = None
     remote_db_ssh_local_port: int | None = None
+    remote_db_ssh_compression: bool = False
 
     @property
     def opendart_api_keys(self) -> tuple[str, ...]:

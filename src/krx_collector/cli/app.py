@@ -146,6 +146,11 @@ def _handle_db_sync_remote(args: argparse.Namespace) -> None:
     remote_host_override = args.remote_host or settings.remote_db_host_override
     ssh_host = args.ssh_host or settings.remote_db_ssh_host
     ssh_local_port = args.ssh_local_port or settings.remote_db_ssh_local_port
+    ssh_compression = (
+        args.ssh_compression
+        if args.ssh_compression is not None
+        else settings.remote_db_ssh_compression
+    )
     tables = _parse_remote_sync_tables(args.tables)
 
     print(
@@ -153,7 +158,7 @@ def _handle_db_sync_remote(args: argparse.Namespace) -> None:
         f"batch_size={batch_size}, full_refresh={args.full_refresh}, "
         f"all_tables={args.all_tables}, tables={tables}, "
         f"remote_host_override={remote_host_override}, ssh_host={ssh_host}, "
-        f"ssh_local_port={ssh_local_port}"
+        f"ssh_local_port={ssh_local_port}, ssh_compression={ssh_compression}"
     )
 
     from krx_collector.service.sync_local_db import sync_remote_db_to_local
@@ -168,6 +173,7 @@ def _handle_db_sync_remote(args: argparse.Namespace) -> None:
         remote_host_override=remote_host_override,
         ssh_host=ssh_host,
         ssh_local_port=ssh_local_port,
+        ssh_compression=ssh_compression,
     )
 
     if result.error:
@@ -1817,6 +1823,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Optional fixed local port for the SSH tunnel (default: random free port).",
+    )
+    db_sync_remote.add_argument(
+        "--ssh-compression",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable SSH compression for the optional DB tunnel (default: from config).",
     )
     db_sync_remote.set_defaults(handler=_handle_db_sync_remote)
 

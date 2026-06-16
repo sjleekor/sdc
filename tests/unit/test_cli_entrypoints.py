@@ -48,6 +48,25 @@ def test_dart_main_uses_sys_argv_when_not_given(monkeypatch) -> None:
     assert captured["argv"] == ["dart", "sync-corp", "--force"]
 
 
+def test_db_sync_remote_parser_supports_ssh_compression_flags() -> None:
+    args = app.build_parser().parse_args(["db", "sync-remote", "--ssh-compression"])
+
+    assert args.command == "db"
+    assert args.db_command == "sync-remote"
+    assert args.ssh_compression is True
+    assert args.handler == app._handle_db_sync_remote
+
+    args = app.build_parser().parse_args(["db", "sync-remote", "--no-ssh-compression"])
+
+    assert args.ssh_compression is False
+
+
+def test_db_sync_remote_parser_leaves_ssh_compression_unset_by_default() -> None:
+    args = app.build_parser().parse_args(["db", "sync-remote"])
+
+    assert args.ssh_compression is None
+
+
 def test_common_seed_catalog_parser_supports_init_schema() -> None:
     args = app.build_parser().parse_args(["common", "seed-catalog", "--init-schema"])
 
