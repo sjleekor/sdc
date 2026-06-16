@@ -43,6 +43,17 @@ sdc_run_collector_with_lock() {
   sdc_with_source_lock "$domain" sdc_run_collector "$@"
 }
 
+sdc_run_daily_collector() {
+  local domain="$1"
+  shift
+  if [[ "${SDC_DAILY_USE_SOURCE_LOCK:-0}" == "1" ]]; then
+    sdc_use_daily_lock_defaults
+    sdc_run_collector_with_lock "$domain" "$@"
+  else
+    sdc_run_collector "$@"
+  fi
+}
+
 sdc_date_minus_days() {
   python3 - "$1" "$2" <<'PY'
 from datetime import date, timedelta

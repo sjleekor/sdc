@@ -18,5 +18,4 @@ args=(
   --max-auto-range-days "${SDC_COMMON_DAILY_MAX_AUTO_RANGE_DAYS:-90}"
 )
 
-sdc_use_daily_lock_defaults
-sdc_run_collector_with_lock krx_marketdata "${args[@]}"
+sdc_run_daily_collector krx_marketdata "${args[@]}"

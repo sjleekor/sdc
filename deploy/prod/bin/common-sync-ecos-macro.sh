@@ -20,5 +20,4 @@ args=(
   --max-auto-range-days "${SDC_COMMON_MACRO_MAX_AUTO_RANGE_DAYS:-730}"
 )
 
-sdc_use_daily_lock_defaults
-sdc_run_collector_with_lock ecos "${args[@]}"
+sdc_run_daily_collector ecos "${args[@]}"

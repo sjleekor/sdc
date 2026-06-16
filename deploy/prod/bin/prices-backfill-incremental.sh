@@ -24,5 +24,4 @@ if [[ "${PRICE_ALLOW_LARGE_RANGE:-0}" == "1" ]]; then
   args+=(--allow-large-range)
 fi
 
-sdc_use_daily_lock_defaults
-sdc_run_collector_with_lock krx_marketdata "${args[@]}"
+sdc_run_daily_collector krx_marketdata "${args[@]}"
