@@ -2,11 +2,11 @@
 
 이 디렉터리는 `sj2-server:/home/whi/apps/sdc`에 배포되는 SDC 운영 파일의 source of truth다.
 
-- 마지막 확인: 2026-06-17 07:42 KST
+- 마지막 확인: 2026-06-20 KST
 - 확인한 원천: Cronicle API `GET /api/app/get_schedule/v1`, `GET /api/app/get_event/v1`, 원격 파일 `whi@sj2-server:/home/whi/apps/sdc/{compose.yaml,bin/}`
 - Cronicle UI: `http://sj2-server:3012/#Schedule`
 - 배포 경로: `whi@sj2-server:/home/whi/apps/sdc`
-- 현재 compose image: `ghcr.io/sjleekor/sdc:v0.8.12`
+- 현재 compose image: `ghcr.io/sjleekor/sdc:v0.8.13`
 - 현재 상시 기동 서비스: `db`만 기동. `collector`는 Cronicle wrapper가 `docker compose run --rm collector ...`로 작업마다 실행한다.
 
 원격 `compose.yaml`과 `bin/*.sh` checksum은 현재 로컬 `deploy/prod`와 일치한다.

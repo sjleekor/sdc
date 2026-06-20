@@ -727,6 +727,17 @@ class DartXbrlSyncResult:
 
 
 @dataclass(slots=True)
+class KrxFlowPhaseCounts:
+    """Per-phase counters for KRX security-flow sync."""
+
+    requests_attempted: int = 0
+    requests_skipped: int = 0
+    rows_upserted: int = 0
+    no_data_requests: int = 0
+    error_count: int = 0
+
+
+@dataclass(slots=True)
 class KrxFlowSyncResult:
     """Outcome of syncing KRX security-flow raw rows."""
 
@@ -736,6 +747,7 @@ class KrxFlowSyncResult:
     requests_skipped: int = 0
     rows_upserted: int = 0
     no_data_requests: int = 0
+    phase_counts: dict[str, KrxFlowPhaseCounts] = field(default_factory=dict)
     pending_metrics: list[str] = field(default_factory=list)
     errors: dict[str, str] = field(default_factory=dict)
 

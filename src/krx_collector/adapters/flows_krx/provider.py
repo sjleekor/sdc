@@ -10,11 +10,17 @@ from krx_collector.adapters.flows_krx.codes import KrxStockCodeResolver
 from krx_collector.adapters.flows_krx.parsers import (
     FOREIGN_HOLDING_BLD,
     INVESTOR_BLD,
+    INVESTOR_BULK_BLD,
     SHORTING_BALANCE_BLD,
+    SHORTING_BALANCE_BULK_BLD,
     SHORTING_STATUS_BLD,
+    SHORTING_TRADING_BULK_BLD,
     parse_foreign_holding_rows,
+    parse_investor_net_volume_bulk_rows,
     parse_investor_net_volume_rows,
+    parse_shorting_balance_bulk_rows,
     parse_shorting_rows,
+    parse_shorting_trading_bulk_rows,
 )
 from krx_collector.adapters.krx_common.client import KrxMdcClient, KrxMdcResponseError
 from krx_collector.domain.enums import Market, Source
@@ -27,6 +33,15 @@ MARKET_TO_KRX_ID = {
     Market.KOSPI: "STK",
     Market.KOSDAQ: "KSQ",
 }
+MARKET_TO_KRX_SHORTING_BALANCE_ID = {
+    Market.KOSPI: "1",
+    Market.KOSDAQ: "2",
+}
+SHORTING_STOCK_SECURITY_GROUP = "STMFRTSCIFDRFS"
+INSTITUTION_INVESTOR_CODE = "7050"
+INDIVIDUAL_INVESTOR_CODE = "8000"
+FOREIGN_INVESTOR_CODE = "9000"
+OTHER_FOREIGN_INVESTOR_CODE = "9001"
 
 
 class KrxDirectFlowProvider:
@@ -80,6 +95,71 @@ class KrxDirectFlowProvider:
             logger.exception("Failed to fetch KRX investor net volume for %s", ticker)
             return SecurityFlowFetchResult(error=str(exc))
 
+    def fetch_investor_net_volume_bulk(
+        self,
+        trade_date: date,
+        market: Market,
+        tickers: list[str] | None = None,
+    ) -> SecurityFlowFetchResult:
+        try:
+            mkt_id = MARKET_TO_KRX_ID.get(market)
+            if mkt_id is None:
+                raise KrxMdcResponseError(
+                    f"Unsupported market for KRX MDC investor bulk: {market.value}"
+                )
+            common_params = {
+                "strtDd": trade_date.strftime("%Y%m%d"),
+                "endDd": trade_date.strftime("%Y%m%d"),
+                "mktId": mkt_id,
+            }
+            institution_rows = self._fetch_investor_bulk_rows(
+                common_params,
+                INSTITUTION_INVESTOR_CODE,
+            )
+            individual_rows = self._fetch_investor_bulk_rows(
+                common_params,
+                INDIVIDUAL_INVESTOR_CODE,
+            )
+            foreign_rows = self._fetch_investor_bulk_rows(
+                common_params,
+                FOREIGN_INVESTOR_CODE,
+            )
+            other_foreign_rows = self._fetch_investor_bulk_rows(
+                common_params,
+                OTHER_FOREIGN_INVESTOR_CODE,
+            )
+            records = parse_investor_net_volume_bulk_rows(
+                individual_rows=individual_rows,
+                institution_rows=institution_rows,
+                foreign_rows=foreign_rows,
+                other_foreign_rows=other_foreign_rows,
+                market=market,
+                trade_date=trade_date,
+                tickers=tickers,
+            )
+            return SecurityFlowFetchResult(records=records, no_data=not records)
+        except Exception as exc:
+            logger.exception(
+                "Failed to fetch KRX investor net volume bulk for %s:%s",
+                trade_date.isoformat(),
+                market.value,
+            )
+            return SecurityFlowFetchResult(error=str(exc))
+
+    def _fetch_investor_bulk_rows(
+        self,
+        common_params: dict[str, str],
+        investor_code: str,
+    ):
+        return self._client.post_rows(
+            INVESTOR_BULK_BLD,
+            {
+                **common_params,
+                "invstTpCd": investor_code,
+            },
+            output_key="output",
+        )
+
     def fetch_shorting_metrics(
         self,
         ticker: str,
@@ -108,6 +188,67 @@ class KrxDirectFlowProvider:
             return SecurityFlowFetchResult(records=records, no_data=not records)
         except Exception as exc:
             logger.exception("Failed to fetch KRX shorting metrics for %s", ticker)
+            return SecurityFlowFetchResult(error=str(exc))
+
+    def fetch_shorting_trading_bulk(
+        self,
+        trade_date: date,
+        market: Market,
+        tickers: list[str] | None = None,
+    ) -> SecurityFlowFetchResult:
+        try:
+            mkt_id = MARKET_TO_KRX_ID.get(market)
+            if mkt_id is None:
+                raise KrxMdcResponseError(
+                    f"Unsupported market for KRX MDC shorting trading: {market.value}"
+                )
+            rows = self._client.post_rows(
+                SHORTING_TRADING_BULK_BLD,
+                {
+                    "trdDd": trade_date.strftime("%Y%m%d"),
+                    "mktId": mkt_id,
+                    "inqCond": SHORTING_STOCK_SECURITY_GROUP,
+                },
+                output_key="OutBlock_1",
+            )
+            records = parse_shorting_trading_bulk_rows(rows, market, trade_date, tickers)
+            return SecurityFlowFetchResult(records=records, no_data=not records)
+        except Exception as exc:
+            logger.exception(
+                "Failed to fetch KRX shorting trading bulk for %s:%s",
+                trade_date.isoformat(),
+                market.value,
+            )
+            return SecurityFlowFetchResult(error=str(exc))
+
+    def fetch_shorting_balance_bulk(
+        self,
+        trade_date: date,
+        market: Market,
+        tickers: list[str] | None = None,
+    ) -> SecurityFlowFetchResult:
+        try:
+            market_type = MARKET_TO_KRX_SHORTING_BALANCE_ID.get(market)
+            if market_type is None:
+                raise KrxMdcResponseError(
+                    f"Unsupported market for KRX MDC shorting balance: {market.value}"
+                )
+            rows = self._client.post_rows(
+                SHORTING_BALANCE_BULK_BLD,
+                {
+                    "trdDd": trade_date.strftime("%Y%m%d"),
+                    "mktTpCd": market_type,
+                },
+                output_key="OutBlock_1",
+            )
+            records = parse_shorting_balance_bulk_rows(rows, market, trade_date, tickers)
+            return SecurityFlowFetchResult(records=records, no_data=not records)
+        except Exception as exc:
+            logger.exception(
+                "Failed to fetch KRX shorting balance bulk for %s:%s",
+                trade_date.isoformat(),
+                market.value,
+            )
             return SecurityFlowFetchResult(error=str(exc))
 
     def fetch_foreign_holding_shares(

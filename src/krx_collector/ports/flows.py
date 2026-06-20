@@ -27,6 +27,15 @@ class FlowProvider(Protocol):
         """Fetch investor net-buy volume metrics for one ticker/date range."""
         ...
 
+    def fetch_investor_net_volume_bulk(
+        self,
+        trade_date: date,
+        market: Market,
+        tickers: list[str] | None = None,
+    ) -> SecurityFlowFetchResult:
+        """Fetch all-ticker investor net-buy volume metrics for one market/date."""
+        ...
+
     def fetch_shorting_metrics(
         self,
         ticker: str,
@@ -35,6 +44,24 @@ class FlowProvider(Protocol):
         end: date,
     ) -> SecurityFlowFetchResult:
         """Fetch short-selling metrics for one ticker/date range."""
+        ...
+
+    def fetch_shorting_trading_bulk(
+        self,
+        trade_date: date,
+        market: Market,
+        tickers: list[str] | None = None,
+    ) -> SecurityFlowFetchResult:
+        """Fetch all-ticker short-selling trading metrics for one market/date."""
+        ...
+
+    def fetch_shorting_balance_bulk(
+        self,
+        trade_date: date,
+        market: Market,
+        tickers: list[str] | None = None,
+    ) -> SecurityFlowFetchResult:
+        """Fetch all-ticker short-selling balance metrics for one market/date."""
         ...
 
     def fetch_foreign_holding_shares(

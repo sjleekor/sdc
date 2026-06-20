@@ -8,8 +8,13 @@ import time
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from krx_collector.domain.enums import ListingStatus, RunStatus, RunType, Source
-from krx_collector.domain.models import IngestionRun, KrxFlowSyncResult, Stock
+from krx_collector.domain.enums import ListingStatus, Market, RunStatus, RunType, Source
+from krx_collector.domain.models import (
+    IngestionRun,
+    KrxFlowPhaseCounts,
+    KrxFlowSyncResult,
+    Stock,
+)
 from krx_collector.infra.calendar.trading_days import get_trading_days
 from krx_collector.ports.flows import FlowProvider
 from krx_collector.ports.storage import Storage
@@ -35,6 +40,11 @@ SHORTING_METRICS = [
     "short_selling_value",
     "short_selling_balance_quantity",
 ]
+SHORTING_TRADING_METRICS = [
+    "short_selling_volume",
+    "short_selling_value",
+]
+SHORTING_BALANCE_METRIC = "short_selling_balance_quantity"
 FLOW_METRIC_GROUPS: dict[str, tuple[str, ...]] = {
     "foreign_holding": (FOREIGN_HOLDING_METRIC,),
     "investor": tuple(INVESTOR_METRICS),
@@ -43,6 +53,8 @@ FLOW_METRIC_GROUPS: dict[str, tuple[str, ...]] = {
 DEFAULT_PROGRESS_LOG_INTERVAL_SECONDS = 30.0
 DEFAULT_PROGRESS_LOG_EVERY_ITEMS = 100
 SLOW_FLOW_REQUEST_WARNING_SECONDS = 30.0
+INVESTOR_BULK_COMPLETENESS_BPS = 9000
+FLOW_SYNC_PHASES = ("foreign_holding", "investor_bulk", "shorting_bulk")
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +219,52 @@ def _load_targets(storage: Storage, tickers: list[str] | None) -> list[Stock]:
     ]
 
 
+def _market_metrics_complete(
+    metric_counts: dict[str, dict[tuple[date, str], int]],
+    *,
+    metric_codes: list[str],
+    trade_date: date,
+    market: Market,
+    expected_tickers: int,
+    completeness_bps: int = 10000,
+) -> bool:
+    required_tickers = _minimum_complete_tickers(expected_tickers, completeness_bps)
+    return all(
+        metric_counts.get(metric_code, {}).get((trade_date, market.value), 0) >= required_tickers
+        for metric_code in metric_codes
+    )
+
+
+def _minimum_complete_tickers(expected_tickers: int, completeness_bps: int) -> int:
+    if expected_tickers <= 0:
+        return 0
+    if completeness_bps <= 0:
+        return 1
+    return max(1, (expected_tickers * completeness_bps + 9999) // 10000)
+
+
+def _flow_phase_counts(result: KrxFlowSyncResult, phase: str) -> KrxFlowPhaseCounts:
+    return result.phase_counts.setdefault(phase, KrxFlowPhaseCounts())
+
+
+def _flatten_flow_phase_counts(
+    phase_counts: dict[str, KrxFlowPhaseCounts],
+) -> dict[str, int]:
+    flattened: dict[str, int] = {}
+    for phase in FLOW_SYNC_PHASES:
+        counts = phase_counts.get(phase, KrxFlowPhaseCounts())
+        flattened.update(
+            {
+                f"{phase}_requests_attempted": counts.requests_attempted,
+                f"{phase}_requests_skipped": counts.requests_skipped,
+                f"{phase}_rows_upserted": counts.rows_upserted,
+                f"{phase}_no_data_requests": counts.no_data_requests,
+                f"{phase}_error_count": counts.error_count,
+            }
+        )
+    return flattened
+
+
 def resolve_incremental_flow_range(
     *,
     latest_price_date: date | None,
@@ -344,6 +402,8 @@ def sync_krx_security_flows(
     storage.record_run(run)
 
     result = KrxFlowSyncResult(pending_metrics=provider.unsupported_metric_codes())
+    for phase in FLOW_SYNC_PHASES:
+        result.phase_counts[phase] = KrxFlowPhaseCounts()
 
     try:
         targets = _load_targets(storage, tickers)
@@ -386,43 +446,51 @@ def sync_krx_security_flows(
             else {}
         )
         investor_metric_counts = (
-            storage.count_krx_security_flow_ticker_metric_dates(
-                start=start,
-                end=end,
-                tickers=target_tickers,
-                metric_codes=INVESTOR_METRICS,
-                source=provider_source,
-            )
+            {
+                metric_code: storage.count_krx_security_flow_daily_market_tickers(
+                    start=start,
+                    end=end,
+                    tickers=target_tickers,
+                    metric_code=metric_code,
+                    source=provider_source,
+                )
+                for metric_code in INVESTOR_METRICS
+            }
             if "investor" in enabled_groups
             else {}
         )
         shorting_metric_counts = (
-            storage.count_krx_security_flow_ticker_metric_dates(
-                start=start,
-                end=end,
-                tickers=target_tickers,
-                metric_codes=SHORTING_METRICS,
-                source=provider_source,
-            )
+            {
+                metric_code: storage.count_krx_security_flow_daily_market_tickers(
+                    start=start,
+                    end=end,
+                    tickers=target_tickers,
+                    metric_code=metric_code,
+                    source=provider_source,
+                )
+                for metric_code in SHORTING_METRICS
+            }
             if "shorting" in enabled_groups
             else {}
         )
-        investor_expected_count = len(trading_days) * len(INVESTOR_METRICS)
-        shorting_expected_count = len(trading_days) * len(SHORTING_METRICS)
-        completed_investor_tickers = {
-            ticker
-            for ticker, count in investor_metric_counts.items()
-            if count >= investor_expected_count
-        }
-        completed_shorting_tickers = {
-            ticker
-            for ticker, count in shorting_metric_counts.items()
-            if count >= shorting_expected_count
-        }
+        investor_total_market_days = (
+            len(trading_days) * len(stocks_by_market) if "investor" in enabled_groups else 0
+        )
+        investor_completed_market_days = 0
+        if "investor" in enabled_groups:
+            for trade_date in trading_days:
+                for market_stocks in stocks_by_market.values():
+                    if _market_metrics_complete(
+                        investor_metric_counts,
+                        metric_codes=INVESTOR_METRICS,
+                        trade_date=trade_date,
+                        market=market_stocks[0].market,
+                        expected_tickers=len(market_stocks),
+                        completeness_bps=INVESTOR_BULK_COMPLETENESS_BPS,
+                    ):
+                        investor_completed_market_days += 1
         foreign_total_market_days = (
-            len(trading_days) * len(stocks_by_market)
-            if "foreign_holding" in enabled_groups
-            else 0
+            len(trading_days) * len(stocks_by_market) if "foreign_holding" in enabled_groups else 0
         )
         foreign_completed_market_days = sum(
             1
@@ -431,16 +499,41 @@ def sync_krx_security_flows(
             if foreign_ticker_counts.get((trade_date, market_stocks[0].market.value), 0)
             >= len(market_stocks)
         )
+        shorting_total_endpoint_market_days = (
+            len(trading_days) * len(stocks_by_market) * 2 if "shorting" in enabled_groups else 0
+        )
+        shorting_completed_endpoint_market_days = 0
+        if "shorting" in enabled_groups:
+            for trade_date in trading_days:
+                for market_stocks in stocks_by_market.values():
+                    market = market_stocks[0].market
+                    expected_tickers = len(market_stocks)
+                    if _market_metrics_complete(
+                        shorting_metric_counts,
+                        metric_codes=SHORTING_TRADING_METRICS,
+                        trade_date=trade_date,
+                        market=market,
+                        expected_tickers=expected_tickers,
+                    ):
+                        shorting_completed_endpoint_market_days += 1
+                    if _market_metrics_complete(
+                        shorting_metric_counts,
+                        metric_codes=[SHORTING_BALANCE_METRIC],
+                        trade_date=trade_date,
+                        market=market,
+                        expected_tickers=expected_tickers,
+                    ):
+                        shorting_completed_endpoint_market_days += 1
 
         logger.info(
             "Flow sync existing coverage loaded: foreign_complete_market_days=%d/%d "
-            "investor_complete_tickers=%d/%d shorting_complete_tickers=%d/%d",
+            "investor_complete_market_days=%d/%d shorting_complete_endpoint_market_days=%d/%d",
             foreign_completed_market_days,
             foreign_total_market_days,
-            len(completed_investor_tickers),
-            len(targets),
-            len(completed_shorting_tickers),
-            len(targets),
+            investor_completed_market_days,
+            investor_total_market_days,
+            shorting_completed_endpoint_market_days,
+            shorting_total_endpoint_market_days,
         )
 
         progress = _FlowProgressLogger(
@@ -467,6 +560,7 @@ def sync_krx_security_flows(
             details=f"trading_days={len(trading_days)} markets={len(stocks_by_market)}",
         )
         for trade_date, market_stocks in foreign_work:
+            phase_counts = _flow_phase_counts(result, "foreign_holding")
             market = market_stocks[0].market
             market_tickers = [stock.ticker for stock in market_stocks]
             current = f"{trade_date.isoformat()}:{market.value}"
@@ -477,6 +571,7 @@ def sync_krx_security_flows(
                     market.value,
                 )
                 result.requests_skipped += 1
+                phase_counts.requests_skipped += 1
                 foreign_processed += 1
                 progress.tick(
                     processed=foreign_processed,
@@ -490,6 +585,7 @@ def sync_krx_security_flows(
                 continue
 
             result.requests_attempted += 1
+            phase_counts.requests_attempted += 1
             request_key = f"foreign:{trade_date.isoformat()}:{market.value}"
             logger.debug("Fetching flow request: request=%s", request_key)
             request_started_at = time.monotonic()
@@ -514,13 +610,16 @@ def sync_krx_security_flows(
                     foreign_result.error,
                 )
                 result.errors[request_key] = foreign_result.error
+                phase_counts.error_count += 1
             elif foreign_result.no_data:
                 result.no_data_requests += 1
+                phase_counts.no_data_requests += 1
             elif foreign_result.records:
                 upsert = storage.upsert_krx_security_flow_raw(foreign_result.records)
                 result.upsert.updated += upsert.updated
                 result.upsert.errors += upsert.errors
                 result.rows_upserted += upsert.updated
+                phase_counts.rows_upserted += upsert.updated
             sleep_with_jitter(rate_limit_seconds, jitter_ratio=0.4)
             foreign_processed += 1
             progress.tick(
@@ -533,66 +632,166 @@ def sync_krx_security_flows(
                 current=current,
             )
 
-        ticker_metric_groups = [
-            group for group in ("investor", "shorting") if group in enabled_groups
-        ]
-        ticker_metric_total = len(targets) * len(ticker_metric_groups)
-        ticker_metric_processed = 0
-        ticker_metric_work = []
-        if "investor" in enabled_groups:
-            ticker_metric_work.extend(
-                (stock, "investor", provider.fetch_investor_net_volume) for stock in targets
-            )
-        if "shorting" in enabled_groups:
-            ticker_metric_work.extend(
-                (stock, "shorting", provider.fetch_shorting_metrics) for stock in targets
-            )
-        if randomize_request_order and len(ticker_metric_work) > 1:
-            rng.shuffle(ticker_metric_work)
-        progress.start_phase(
-            "ticker_metrics",
-            ticker_metric_total,
-            details=f"targets={len(targets)} metric_groups=2",
+        investor_processed = 0
+        investor_work = (
+            [
+                (trade_date, market_stocks)
+                for trade_date in trading_days
+                for market_stocks in stocks_by_market.values()
+            ]
+            if "investor" in enabled_groups
+            else []
         )
-        for stock, fetch_kind, fetch_fn in ticker_metric_work:
-            if fetch_kind == "investor" and stock.ticker in completed_investor_tickers:
-                logger.debug("Skipping existing investor flow request %s", stock.ticker)
+        if randomize_request_order and len(investor_work) > 1:
+            rng.shuffle(investor_work)
+        progress.start_phase(
+            "investor_bulk",
+            investor_total_market_days,
+            details=f"trading_days={len(trading_days)} markets={len(stocks_by_market)}",
+        )
+        for trade_date, market_stocks in investor_work:
+            phase_counts = _flow_phase_counts(result, "investor_bulk")
+            market = market_stocks[0].market
+            market_tickers = [stock.ticker for stock in market_stocks]
+            current = f"investor:{trade_date.isoformat()}:{market.value}"
+            if _market_metrics_complete(
+                investor_metric_counts,
+                metric_codes=INVESTOR_METRICS,
+                trade_date=trade_date,
+                market=market,
+                expected_tickers=len(market_tickers),
+                completeness_bps=INVESTOR_BULK_COMPLETENESS_BPS,
+            ):
+                logger.debug("Skipping existing investor flow request %s", current)
                 result.requests_skipped += 1
-                ticker_metric_processed += 1
+                phase_counts.requests_skipped += 1
+                investor_processed += 1
                 progress.tick(
-                    processed=ticker_metric_processed,
+                    processed=investor_processed,
                     attempted=result.requests_attempted,
                     skipped=result.requests_skipped,
                     rows_upserted=result.rows_upserted,
                     no_data=result.no_data_requests,
                     errors=len(result.errors),
-                    current=f"{fetch_kind}:{stock.ticker}",
-                )
-                continue
-            if fetch_kind == "shorting" and stock.ticker in completed_shorting_tickers:
-                logger.debug("Skipping existing shorting flow request %s", stock.ticker)
-                result.requests_skipped += 1
-                ticker_metric_processed += 1
-                progress.tick(
-                    processed=ticker_metric_processed,
-                    attempted=result.requests_attempted,
-                    skipped=result.requests_skipped,
-                    rows_upserted=result.rows_upserted,
-                    no_data=result.no_data_requests,
-                    errors=len(result.errors),
-                    current=f"{fetch_kind}:{stock.ticker}",
+                    current=current,
                 )
                 continue
 
             result.requests_attempted += 1
-            request_key = f"{fetch_kind}:{stock.ticker}:{start.isoformat()}:{end.isoformat()}"
+            phase_counts.requests_attempted += 1
+            request_key = current
             logger.debug("Fetching flow request: request=%s", request_key)
             request_started_at = time.monotonic()
-            fetch_result = call_with_retry(
-                lambda: fetch_fn(stock.ticker, stock.market, start, end),
+            investor_result = call_with_retry(
+                lambda: provider.fetch_investor_net_volume_bulk(
+                    trade_date=trade_date,
+                    market=market,
+                    tickers=market_tickers,
+                ),
                 request_label=request_key,
                 logger_instance=logger,
             )
+            _log_flow_request_result(
+                request_key,
+                time.monotonic() - request_started_at,
+                investor_result,
+            )
+            if investor_result.error:
+                logger.warning("Flow sync failed for %s: %s", request_key, investor_result.error)
+                result.errors[request_key] = investor_result.error
+                phase_counts.error_count += 1
+            elif investor_result.no_data:
+                result.no_data_requests += 1
+                phase_counts.no_data_requests += 1
+            elif investor_result.records:
+                upsert = storage.upsert_krx_security_flow_raw(investor_result.records)
+                result.upsert.updated += upsert.updated
+                result.upsert.errors += upsert.errors
+                result.rows_upserted += upsert.updated
+                phase_counts.rows_upserted += upsert.updated
+            sleep_with_jitter(rate_limit_seconds, jitter_ratio=0.4)
+            investor_processed += 1
+            progress.tick(
+                processed=investor_processed,
+                attempted=result.requests_attempted,
+                skipped=result.requests_skipped,
+                rows_upserted=result.rows_upserted,
+                no_data=result.no_data_requests,
+                errors=len(result.errors),
+                current=current,
+            )
+
+        shorting_processed = 0
+        shorting_work = []
+        if "shorting" in enabled_groups:
+            for trade_date in trading_days:
+                for market_stocks in stocks_by_market.values():
+                    shorting_work.append((trade_date, market_stocks, "shorting_trading"))
+                    shorting_work.append((trade_date, market_stocks, "shorting_balance"))
+        if randomize_request_order and len(shorting_work) > 1:
+            rng.shuffle(shorting_work)
+        progress.start_phase(
+            "shorting_bulk",
+            len(shorting_work),
+            details=f"trading_days={len(trading_days)} markets={len(stocks_by_market)}",
+        )
+        for trade_date, market_stocks, fetch_kind in shorting_work:
+            phase_counts = _flow_phase_counts(result, "shorting_bulk")
+            market = market_stocks[0].market
+            market_tickers = [stock.ticker for stock in market_stocks]
+            metric_codes = (
+                SHORTING_TRADING_METRICS
+                if fetch_kind == "shorting_trading"
+                else [SHORTING_BALANCE_METRIC]
+            )
+            current = f"{fetch_kind}:{trade_date.isoformat()}:{market.value}"
+            if _market_metrics_complete(
+                shorting_metric_counts,
+                metric_codes=metric_codes,
+                trade_date=trade_date,
+                market=market,
+                expected_tickers=len(market_tickers),
+            ):
+                logger.debug("Skipping existing %s flow request", current)
+                result.requests_skipped += 1
+                phase_counts.requests_skipped += 1
+                shorting_processed += 1
+                progress.tick(
+                    processed=shorting_processed,
+                    attempted=result.requests_attempted,
+                    skipped=result.requests_skipped,
+                    rows_upserted=result.rows_upserted,
+                    no_data=result.no_data_requests,
+                    errors=len(result.errors),
+                    current=current,
+                )
+                continue
+
+            result.requests_attempted += 1
+            phase_counts.requests_attempted += 1
+            request_key = current
+            logger.debug("Fetching flow request: request=%s", request_key)
+            request_started_at = time.monotonic()
+            if fetch_kind == "shorting_trading":
+                fetch_result = call_with_retry(
+                    lambda: provider.fetch_shorting_trading_bulk(
+                        trade_date=trade_date,
+                        market=market,
+                        tickers=market_tickers,
+                    ),
+                    request_label=request_key,
+                    logger_instance=logger,
+                )
+            else:
+                fetch_result = call_with_retry(
+                    lambda: provider.fetch_shorting_balance_bulk(
+                        trade_date=trade_date,
+                        market=market,
+                        tickers=market_tickers,
+                    ),
+                    request_label=request_key,
+                    logger_instance=logger,
+                )
             _log_flow_request_result(
                 request_key,
                 time.monotonic() - request_started_at,
@@ -601,23 +800,26 @@ def sync_krx_security_flows(
             if fetch_result.error:
                 logger.warning("Flow sync failed for %s: %s", request_key, fetch_result.error)
                 result.errors[request_key] = fetch_result.error
+                phase_counts.error_count += 1
             elif fetch_result.no_data:
                 result.no_data_requests += 1
+                phase_counts.no_data_requests += 1
             elif fetch_result.records:
                 upsert = storage.upsert_krx_security_flow_raw(fetch_result.records)
                 result.upsert.updated += upsert.updated
                 result.upsert.errors += upsert.errors
                 result.rows_upserted += upsert.updated
+                phase_counts.rows_upserted += upsert.updated
             sleep_with_jitter(rate_limit_seconds, jitter_ratio=0.4)
-            ticker_metric_processed += 1
+            shorting_processed += 1
             progress.tick(
-                processed=ticker_metric_processed,
+                processed=shorting_processed,
                 attempted=result.requests_attempted,
                 skipped=result.requests_skipped,
                 rows_upserted=result.rows_upserted,
                 no_data=result.no_data_requests,
                 errors=len(result.errors),
-                current=f"{fetch_kind}:{stock.ticker}",
+                current=current,
             )
 
         complete_run(
@@ -630,6 +832,7 @@ def sync_krx_security_flows(
                 rows_upserted=result.rows_upserted,
                 no_data_requests=result.no_data_requests,
                 pending_metric_count=len(result.pending_metrics),
+                **_flatten_flow_phase_counts(result.phase_counts),
             ),
             errors=result.errors,
             partial_subject="flow sync requests",

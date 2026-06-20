@@ -1444,6 +1444,15 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
     print(f"   - Requests skipped: {result.requests_skipped}")
     print(f"   - Rows upserted: {result.rows_upserted}")
     print(f"   - No-data requests: {result.no_data_requests}")
+    phase_counts = getattr(result, "phase_counts", {})
+    if phase_counts:
+        print("   - Phase counts:")
+        for phase, counts in sorted(phase_counts.items()):
+            print(
+                f"     {phase}: attempted={counts.requests_attempted}, "
+                f"skipped={counts.requests_skipped}, rows={counts.rows_upserted}, "
+                f"no_data={counts.no_data_requests}, errors={counts.error_count}"
+            )
     if result.pending_metrics:
         print(f"   - Pending metrics: {', '.join(result.pending_metrics)}")
     if result.errors:

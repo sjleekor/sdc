@@ -27,7 +27,10 @@ class MockFlowProvider:
     def __init__(self, source: Source = Source.KRX) -> None:
         self._source = source
         self.investor_calls = 0
+        self.investor_bulk_calls = 0
         self.shorting_calls = 0
+        self.shorting_trading_bulk_calls = 0
+        self.shorting_balance_bulk_calls = 0
         self.foreign_calls = 0
 
     def source(self) -> Source:
@@ -59,6 +62,55 @@ class MockFlowProvider:
             ]
         )
 
+    def fetch_investor_net_volume_bulk(
+        self,
+        trade_date: date,
+        market: Market,
+        tickers: list[str] | None = None,
+    ) -> SecurityFlowFetchResult:
+        self.investor_bulk_calls += 1
+        ticker = tickers[0] if tickers else "005930"
+        return SecurityFlowFetchResult(
+            records=[
+                SecurityFlowLine(
+                    trade_date=trade_date,
+                    ticker=ticker,
+                    market=market,
+                    metric_code="institution_net_buy_volume",
+                    metric_name="기관 순매수 수량",
+                    value=Decimal("10"),
+                    unit="shares",
+                    source=self._source,
+                    fetched_at=datetime(2026, 4, 19, tzinfo=KST),
+                    raw_payload={},
+                ),
+                SecurityFlowLine(
+                    trade_date=trade_date,
+                    ticker=ticker,
+                    market=market,
+                    metric_code="individual_net_buy_volume",
+                    metric_name="개인 순매수 수량",
+                    value=Decimal("20"),
+                    unit="shares",
+                    source=self._source,
+                    fetched_at=datetime(2026, 4, 19, tzinfo=KST),
+                    raw_payload={},
+                ),
+                SecurityFlowLine(
+                    trade_date=trade_date,
+                    ticker=ticker,
+                    market=market,
+                    metric_code="foreign_net_buy_volume",
+                    metric_name="외국인 순매수 수량",
+                    value=Decimal("30"),
+                    unit="shares",
+                    source=self._source,
+                    fetched_at=datetime(2026, 4, 19, tzinfo=KST),
+                    raw_payload={},
+                ),
+            ]
+        )
+
     def fetch_shorting_metrics(
         self,
         ticker: str,
@@ -77,6 +129,68 @@ class MockFlowProvider:
                     metric_code="short_selling_volume",
                     metric_name="공매도 거래량",
                     value=Decimal("20"),
+                    unit="shares",
+                    source=self._source,
+                    fetched_at=datetime(2026, 4, 19, tzinfo=KST),
+                    raw_payload={},
+                )
+            ]
+        )
+
+    def fetch_shorting_trading_bulk(
+        self,
+        trade_date: date,
+        market: Market,
+        tickers: list[str] | None = None,
+    ) -> SecurityFlowFetchResult:
+        self.shorting_trading_bulk_calls += 1
+        ticker = tickers[0] if tickers else "005930"
+        return SecurityFlowFetchResult(
+            records=[
+                SecurityFlowLine(
+                    trade_date=trade_date,
+                    ticker=ticker,
+                    market=market,
+                    metric_code="short_selling_volume",
+                    metric_name="공매도 거래량",
+                    value=Decimal("20"),
+                    unit="shares",
+                    source=self._source,
+                    fetched_at=datetime(2026, 4, 19, tzinfo=KST),
+                    raw_payload={},
+                ),
+                SecurityFlowLine(
+                    trade_date=trade_date,
+                    ticker=ticker,
+                    market=market,
+                    metric_code="short_selling_value",
+                    metric_name="공매도 거래대금",
+                    value=Decimal("2000"),
+                    unit="KRW",
+                    source=self._source,
+                    fetched_at=datetime(2026, 4, 19, tzinfo=KST),
+                    raw_payload={},
+                ),
+            ]
+        )
+
+    def fetch_shorting_balance_bulk(
+        self,
+        trade_date: date,
+        market: Market,
+        tickers: list[str] | None = None,
+    ) -> SecurityFlowFetchResult:
+        self.shorting_balance_bulk_calls += 1
+        ticker = tickers[0] if tickers else "005930"
+        return SecurityFlowFetchResult(
+            records=[
+                SecurityFlowLine(
+                    trade_date=trade_date,
+                    ticker=ticker,
+                    market=market,
+                    metric_code="short_selling_balance_quantity",
+                    metric_name="공매도 잔고 수량",
+                    value=Decimal("30"),
                     unit="shares",
                     source=self._source,
                     fetched_at=datetime(2026, 4, 19, tzinfo=KST),
@@ -119,7 +233,7 @@ class MockFlowStorage:
         self.runs: list[IngestionRun] = []
         self.records: list[SecurityFlowLine] = []
         self.foreign_counts: dict[tuple[date, str], int] = {}
-        self.investor_counts: dict[str, int] = {}
+        self.daily_market_counts: dict[str, dict[tuple[date, str], int]] = {}
         self.shorting_counts: dict[str, int] = {}
         self.count_sources: list[Source] = []
         self.latest_price_date: date | None = date(2026, 4, 17)
@@ -163,8 +277,10 @@ class MockFlowStorage:
         metric_code: str,
         source: Source,
     ) -> dict[tuple[date, str], int]:
-        del start, end, tickers, metric_code
+        del start, end, tickers
         self.count_sources.append(source)
+        if metric_code != "foreign_holding_shares":
+            return self.daily_market_counts.get(metric_code, {})
         return self.foreign_counts
 
     def count_krx_security_flow_ticker_metric_dates(
@@ -177,8 +293,6 @@ class MockFlowStorage:
     ) -> dict[str, int]:
         del start, end, tickers
         self.count_sources.append(source)
-        if "institution_net_buy_volume" in metric_codes:
-            return self.investor_counts
         return self.shorting_counts
 
     def get_daily_price_date_range(
@@ -282,9 +396,10 @@ def test_resolve_incremental_flow_range_excludes_groups() -> None:
 
 def test_sync_krx_security_flows_writes_rows_and_pending_metrics() -> None:
     storage = MockFlowStorage()
+    provider = MockFlowProvider()
 
     result = sync_krx_security_flows(
-        provider=MockFlowProvider(),  # type: ignore[arg-type]
+        provider=provider,  # type: ignore[arg-type]
         storage=storage,  # type: ignore[arg-type]
         start=date(2026, 4, 17),
         end=date(2026, 4, 17),
@@ -294,12 +409,29 @@ def test_sync_krx_security_flows_writes_rows_and_pending_metrics() -> None:
 
     assert result.errors == {}
     assert result.targets_processed == 1
-    assert result.requests_attempted == 3
-    assert result.rows_upserted == 3
+    assert result.requests_attempted == 4
+    assert result.rows_upserted == 7
     assert result.pending_metrics == ["borrow_balance_quantity"]
-    assert len(storage.records) == 3
+    assert len(storage.records) == 7
+    assert provider.investor_calls == 0
+    assert provider.investor_bulk_calls == 1
+    assert provider.shorting_calls == 0
+    assert provider.shorting_trading_bulk_calls == 1
+    assert provider.shorting_balance_bulk_calls == 1
     assert storage.runs[0].run_type == RunType.KRX_FLOW_SYNC
     assert storage.runs[-1].status == RunStatus.SUCCESS
+    assert result.phase_counts["foreign_holding"].requests_attempted == 1
+    assert result.phase_counts["foreign_holding"].rows_upserted == 1
+    assert result.phase_counts["investor_bulk"].requests_attempted == 1
+    assert result.phase_counts["investor_bulk"].rows_upserted == 3
+    assert result.phase_counts["shorting_bulk"].requests_attempted == 2
+    assert result.phase_counts["shorting_bulk"].rows_upserted == 3
+    assert storage.runs[-1].counts["foreign_holding_requests_attempted"] == 1
+    assert storage.runs[-1].counts["foreign_holding_rows_upserted"] == 1
+    assert storage.runs[-1].counts["investor_bulk_requests_attempted"] == 1
+    assert storage.runs[-1].counts["investor_bulk_rows_upserted"] == 3
+    assert storage.runs[-1].counts["shorting_bulk_requests_attempted"] == 2
+    assert storage.runs[-1].counts["shorting_bulk_rows_upserted"] == 3
 
 
 def test_sync_krx_security_flows_logs_progress(caplog: pytest.LogCaptureFixture) -> None:
@@ -325,17 +457,28 @@ def test_sync_krx_security_flows_logs_progress(caplog: pytest.LogCaptureFixture)
     assert any(
         "Flow sync progress: phase=foreign_holding processed=1/1" in message for message in messages
     )
-    assert any("Flow sync phase started: phase=ticker_metrics" in message for message in messages)
+    assert any("Flow sync phase started: phase=investor_bulk" in message for message in messages)
     assert any(
-        "Flow sync progress: phase=ticker_metrics processed=2/2" in message for message in messages
+        "Flow sync progress: phase=investor_bulk processed=1/1" in message for message in messages
+    )
+    assert any("Flow sync phase started: phase=shorting_bulk" in message for message in messages)
+    assert any(
+        "Flow sync progress: phase=shorting_bulk processed=2/2" in message for message in messages
     )
 
 
 def test_sync_krx_security_flows_skips_complete_existing_requests() -> None:
     storage = MockFlowStorage()
     storage.foreign_counts[(date(2026, 4, 17), Market.KOSPI.value)] = 1
-    storage.investor_counts["005930"] = 3
-    storage.shorting_counts["005930"] = 3
+    for metric_code in [
+        "institution_net_buy_volume",
+        "individual_net_buy_volume",
+        "foreign_net_buy_volume",
+        "short_selling_volume",
+        "short_selling_value",
+        "short_selling_balance_quantity",
+    ]:
+        storage.daily_market_counts[metric_code] = {(date(2026, 4, 17), Market.KOSPI.value): 1}
     provider = MockFlowProvider()
 
     result = sync_krx_security_flows(
@@ -349,13 +492,22 @@ def test_sync_krx_security_flows_skips_complete_existing_requests() -> None:
 
     assert result.errors == {}
     assert result.requests_attempted == 0
-    assert result.requests_skipped == 3
+    assert result.requests_skipped == 4
     assert result.rows_upserted == 0
     assert len(storage.records) == 0
     assert provider.foreign_calls == 0
     assert provider.investor_calls == 0
+    assert provider.investor_bulk_calls == 0
     assert provider.shorting_calls == 0
+    assert provider.shorting_trading_bulk_calls == 0
+    assert provider.shorting_balance_bulk_calls == 0
     assert storage.runs[-1].status == RunStatus.SUCCESS
+    assert result.phase_counts["foreign_holding"].requests_skipped == 1
+    assert result.phase_counts["investor_bulk"].requests_skipped == 1
+    assert result.phase_counts["shorting_bulk"].requests_skipped == 2
+    assert storage.runs[-1].counts["foreign_holding_requests_skipped"] == 1
+    assert storage.runs[-1].counts["investor_bulk_requests_skipped"] == 1
+    assert storage.runs[-1].counts["shorting_bulk_requests_skipped"] == 2
 
 
 def test_sync_krx_security_flows_uses_provider_source_for_existing_counts() -> None:
@@ -372,7 +524,15 @@ def test_sync_krx_security_flows_uses_provider_source_for_existing_counts() -> N
     )
 
     assert result.errors == {}
-    assert storage.count_sources == [Source.KRX, Source.KRX, Source.KRX]
+    assert storage.count_sources == [
+        Source.KRX,
+        Source.KRX,
+        Source.KRX,
+        Source.KRX,
+        Source.KRX,
+        Source.KRX,
+        Source.KRX,
+    ]
     assert storage.records
     assert {record.source for record in storage.records} == {Source.KRX}
     assert storage.runs[0].params["provider_source"] == Source.KRX.value
@@ -424,9 +584,15 @@ def test_sync_krx_security_flows_honors_enabled_flow_groups() -> None:
     assert result.requests_attempted == 1
     assert provider.foreign_calls == 1
     assert provider.investor_calls == 0
+    assert provider.investor_bulk_calls == 0
     assert provider.shorting_calls == 0
+    assert provider.shorting_trading_bulk_calls == 0
+    assert provider.shorting_balance_bulk_calls == 0
     assert storage.count_sources == [Source.KRX]
     assert storage.runs[0].params["enabled_flow_groups"] == ["foreign_holding"]
+    assert result.phase_counts["foreign_holding"].requests_attempted == 1
+    assert result.phase_counts["investor_bulk"].requests_attempted == 0
+    assert result.phase_counts["shorting_bulk"].requests_attempted == 0
 
 
 def test_flows_sync_parser_supports_price_range_mode_without_provider_selection() -> None:

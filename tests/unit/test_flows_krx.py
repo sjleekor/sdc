@@ -20,11 +20,17 @@ from krx_collector.adapters.flows_krx.codes import KrxStockCodeResolver
 from krx_collector.adapters.flows_krx.parsers import (
     FOREIGN_HOLDING_BLD,
     INVESTOR_BLD,
+    INVESTOR_BULK_BLD,
     SHORTING_BALANCE_BLD,
+    SHORTING_BALANCE_BULK_BLD,
     SHORTING_STATUS_BLD,
+    SHORTING_TRADING_BULK_BLD,
     parse_foreign_holding_rows,
+    parse_investor_net_volume_bulk_rows,
     parse_investor_net_volume_rows,
+    parse_shorting_balance_bulk_rows,
     parse_shorting_rows,
+    parse_shorting_trading_bulk_rows,
 )
 from krx_collector.adapters.flows_krx.provider import KrxDirectFlowProvider
 from krx_collector.domain.enums import Market, Source
@@ -128,6 +134,78 @@ def test_parse_foreign_holding_rows_filters_requested_tickers() -> None:
     assert records[0].raw_payload["source_bld"] == FOREIGN_HOLDING_BLD
 
 
+def test_parse_investor_net_volume_bulk_rows_sums_foreign_and_fills_missing_zero() -> None:
+    individual_request = {
+        "strtDd": "20260417",
+        "endDd": "20260417",
+        "mktId": "STK",
+        "invstTpCd": "8000",
+    }
+    institution_request = {
+        "strtDd": "20260417",
+        "endDd": "20260417",
+        "mktId": "STK",
+        "invstTpCd": "7050",
+    }
+    foreign_request = {
+        "strtDd": "20260417",
+        "endDd": "20260417",
+        "mktId": "STK",
+        "invstTpCd": "9000",
+    }
+    other_foreign_request = {
+        "strtDd": "20260417",
+        "endDd": "20260417",
+        "mktId": "STK",
+        "invstTpCd": "9001",
+    }
+
+    records = parse_investor_net_volume_bulk_rows(
+        individual_rows=_rows(
+            "investor_bulk_individual_kospi_20260417.json",
+            "output",
+            individual_request,
+            INVESTOR_BULK_BLD,
+        ),
+        institution_rows=_rows(
+            "investor_bulk_institution_kospi_20260417.json",
+            "output",
+            institution_request,
+            INVESTOR_BULK_BLD,
+        ),
+        foreign_rows=_rows(
+            "investor_bulk_foreign_kospi_20260417.json",
+            "output",
+            foreign_request,
+            INVESTOR_BULK_BLD,
+        ),
+        other_foreign_rows=_rows(
+            "investor_bulk_other_foreign_kospi_20260417.json",
+            "output",
+            other_foreign_request,
+            INVESTOR_BULK_BLD,
+        ),
+        market=Market.KOSPI,
+        trade_date=date(2026, 4, 17),
+    )
+    facts = {(record.ticker, record.metric_code): record for record in records}
+
+    assert facts[("005930", "institution_net_buy_volume")].value == Decimal("-1000")
+    assert facts[("005930", "individual_net_buy_volume")].value == Decimal("250")
+    assert facts[("005930", "foreign_net_buy_volume")].value == Decimal("750")
+    assert facts[("000660", "institution_net_buy_volume")].value == Decimal("0")
+    assert facts[("000660", "foreign_net_buy_volume")].value == Decimal("5")
+    assert (
+        "institution"
+        in facts[("000660", "institution_net_buy_volume")].raw_payload["row"][
+            "filled_missing_components_as_zero"
+        ]
+    )
+    assert facts[("005930", "foreign_net_buy_volume")].raw_payload["source_bld"] == (
+        INVESTOR_BULK_BLD
+    )
+
+
 def test_parse_shorting_rows_prefers_balance_endpoint_and_falls_back_to_status() -> None:
     request = {"strtDd": "20260417", "endDd": "20260417", "isuCd": "KR7005930003"}
     status_rows = _rows(
@@ -158,6 +236,60 @@ def test_parse_shorting_rows_prefers_balance_endpoint_and_falls_back_to_status()
         fallback_facts["short_selling_balance_quantity"].raw_payload["source_bld"]
         == SHORTING_STATUS_BLD
     )
+
+
+def test_parse_shorting_trading_bulk_rows_filters_requested_tickers() -> None:
+    request = {"trdDd": "20260417", "mktId": "STK", "inqCond": "STMFRTSCIFDRFS"}
+    rows = _rows(
+        "shorting_trading_all_kospi_20260417.json",
+        "OutBlock_1",
+        request,
+        SHORTING_TRADING_BULK_BLD,
+    )
+
+    records = parse_shorting_trading_bulk_rows(
+        rows,
+        Market.KOSPI,
+        date(2026, 4, 17),
+        ["005930"],
+    )
+    facts = {record.metric_code: record for record in records}
+
+    assert set(facts) == {"short_selling_volume", "short_selling_value"}
+    assert facts["short_selling_volume"].value == Decimal("1234")
+    assert facts["short_selling_value"].value == Decimal("5678000")
+    assert facts["short_selling_volume"].ticker == "005930"
+    assert facts["short_selling_volume"].raw_payload["source_bld"] == SHORTING_TRADING_BULK_BLD
+
+
+def test_parse_shorting_balance_bulk_rows_filters_requested_tickers() -> None:
+    request = {"trdDd": "20260417", "mktTpCd": "1"}
+    rows = _rows(
+        "shorting_balance_all_kospi_20260417.json",
+        "OutBlock_1",
+        request,
+        SHORTING_BALANCE_BULK_BLD,
+    )
+
+    records = parse_shorting_balance_bulk_rows(
+        rows,
+        Market.KOSPI,
+        date(2026, 4, 17),
+        ["005930"],
+    )
+
+    assert len(records) == 1
+    assert _core(records[0]) == (
+        "short_selling_balance_quantity",
+        "공매도 잔고 수량",
+        Decimal("1111"),
+        "shares",
+        date(2026, 4, 17),
+        "005930",
+        Market.KOSPI,
+        Source.KRX,
+    )
+    assert records[0].raw_payload["source_bld"] == SHORTING_BALANCE_BULK_BLD
 
 
 class FakeResponse:
@@ -368,12 +500,36 @@ class FakeProviderClient:
         if bld == INVESTOR_BLD:
             assert output_key == "output"
             return _rows("investor_ticker_005930_20260417.json", output_key, params, bld)
+        if bld == INVESTOR_BULK_BLD:
+            assert output_key == "output"
+            assert params["strtDd"] == "20260417"
+            assert params["endDd"] == "20260417"
+            assert params["mktId"] == "STK"
+            fixture_by_investor = {
+                "7050": "investor_bulk_institution_kospi_20260417.json",
+                "8000": "investor_bulk_individual_kospi_20260417.json",
+                "9000": "investor_bulk_foreign_kospi_20260417.json",
+                "9001": "investor_bulk_other_foreign_kospi_20260417.json",
+            }
+            return _rows(fixture_by_investor[params["invstTpCd"]], output_key, params, bld)
         if bld == SHORTING_STATUS_BLD:
             assert output_key == "OutBlock_1"
             return _rows("shorting_status_005930_20260417.json", output_key, params, bld)
         if bld == SHORTING_BALANCE_BLD:
             assert output_key == "OutBlock_1"
             return _rows("shorting_balance_005930_20260417.json", output_key, params, bld)
+        if bld == SHORTING_TRADING_BULK_BLD:
+            assert output_key == "OutBlock_1"
+            assert params == {
+                "trdDd": "20260417",
+                "mktId": "STK",
+                "inqCond": "STMFRTSCIFDRFS",
+            }
+            return _rows("shorting_trading_all_kospi_20260417.json", output_key, params, bld)
+        if bld == SHORTING_BALANCE_BULK_BLD:
+            assert output_key == "OutBlock_1"
+            assert params == {"trdDd": "20260417", "mktTpCd": "1"}
+            return _rows("shorting_balance_all_kospi_20260417.json", output_key, params, bld)
         if bld == FOREIGN_HOLDING_BLD:
             assert output_key == "output"
             return _rows("foreign_holding_all_kospi_20260417.json", output_key, params, bld)
@@ -396,21 +552,44 @@ def test_direct_provider_fetches_krx_records_with_krx_source() -> None:
     investor = provider.fetch_investor_net_volume(
         "005930", Market.KOSPI, date(2026, 4, 17), date(2026, 4, 17)
     )
+    investor_bulk = provider.fetch_investor_net_volume_bulk(
+        date(2026, 4, 17), Market.KOSPI, ["005930"]
+    )
     shorting = provider.fetch_shorting_metrics(
         "005930", Market.KOSPI, date(2026, 4, 17), date(2026, 4, 17)
+    )
+    shorting_trading = provider.fetch_shorting_trading_bulk(
+        date(2026, 4, 17), Market.KOSPI, ["005930"]
+    )
+    shorting_balance = provider.fetch_shorting_balance_bulk(
+        date(2026, 4, 17), Market.KOSPI, ["005930"]
     )
     foreign = provider.fetch_foreign_holding_shares(date(2026, 4, 17), Market.KOSPI, ["005930"])
 
     assert provider.source() == Source.KRX
     assert investor.error is None
+    assert investor_bulk.error is None
     assert shorting.error is None
+    assert shorting_trading.error is None
+    assert shorting_balance.error is None
     assert foreign.error is None
     assert len(investor.records) == 3
+    assert len(investor_bulk.records) == 3
     assert len(shorting.records) == 3
+    assert len(shorting_trading.records) == 2
+    assert len(shorting_balance.records) == 1
     assert len(foreign.records) == 1
-    assert {record.source for record in investor.records + shorting.records + foreign.records} == {
-        Source.KRX
-    }
+    assert {
+        record.source
+        for record in (
+            investor.records
+            + investor_bulk.records
+            + shorting.records
+            + shorting_trading.records
+            + shorting_balance.records
+            + foreign.records
+        )
+    } == {Source.KRX}
 
 
 def test_client_maps_authish_error_message_to_authentication_error() -> None:
