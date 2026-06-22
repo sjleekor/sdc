@@ -40,3 +40,16 @@ logs/
 
 # Database
 *.sqlite3
+
+# Profiling run outputs (raw artifacts; only reviewed summaries are published to docs/)
+reports/
+
+# Rust
+target/
+
+# Local Parquet/data lake outputs
+data_lake/
+# Per-model ETL datasets (L2b artifacts; etl_01 §7)
+data/datasets/
+# Model prediction outputs (top-k buy lists)
+data/predictions/

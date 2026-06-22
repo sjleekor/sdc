@@ -1,0 +1,115 @@
+[defaults]
+compression = "zstd"
+row_group_rows = 131072
+target_file_bytes = 536870912
+db_read_connections = 2
+writer_workers = 4
+
+[[tables]]
+name = "dart_xbrl_fact_raw"
+priority = "P0"
+extract_strategy = "raw_id_range"
+extract_key = "raw_id"
+chunk_rows = 1000000
+output_partitions = ["bsns_year", "reprt_code"]
+order_by = ["raw_id"]
+jsonb_columns = ["dimensions", "raw_payload"]
+
+[[tables]]
+name = "krx_security_flow_raw"
+priority = "P0"
+extract_strategy = "date_month"
+date_column = "trade_date"
+output_partitions = ["year(trade_date)", "month(trade_date)"]
+order_by = ["trade_date", "ticker", "market", "metric_code", "source"]
+jsonb_columns = ["raw_payload"]
+
+[[tables]]
+name = "dart_financial_statement_raw"
+priority = "P0"
+extract_strategy = "raw_id_range"
+extract_key = "raw_id"
+chunk_rows = 1000000
+output_partitions = ["bsns_year", "reprt_code"]
+order_by = ["raw_id"]
+jsonb_columns = ["raw_payload"]
+
+[[tables]]
+name = "dart_shareholder_return_raw"
+priority = "P0"
+extract_strategy = "raw_id_range"
+extract_key = "raw_id"
+chunk_rows = 1000000
+output_partitions = ["bsns_year", "reprt_code"]
+order_by = ["raw_id"]
+jsonb_columns = ["raw_payload"]
+
+[[tables]]
+name = "daily_ohlcv"
+priority = "P0"
+extract_strategy = "date_month"
+date_column = "trade_date"
+output_partitions = ["year(trade_date)", "month(trade_date)"]
+order_by = ["trade_date", "ticker", "market"]
+
+[[tables]]
+name = "dart_share_count_raw"
+priority = "P1"
+extract_strategy = "raw_id_range"
+extract_key = "raw_id"
+chunk_rows = 500000
+output_partitions = ["bsns_year", "reprt_code"]
+order_by = ["raw_id"]
+jsonb_columns = ["raw_payload"]
+
+[[tables]]
+name = "dart_xbrl_document"
+priority = "P1"
+extract_strategy = "full_table"
+output_partitions = ["bsns_year", "reprt_code"]
+order_by = ["corp_code", "rcept_no"]
+jsonb_columns = ["raw_payload"]
+
+[[tables]]
+name = "dart_corp_master"
+priority = "P1"
+extract_strategy = "full_table"
+output_partitions = []
+order_by = ["ticker", "corp_code", "modify_date"]
+
+[[tables]]
+name = "stock_master"
+priority = "P1"
+extract_strategy = "full_table"
+output_partitions = []
+order_by = ["market", "ticker"]
+
+[[tables]]
+name = "stock_master_snapshot"
+priority = "P1"
+extract_strategy = "full_table"
+output_partitions = []
+order_by = ["as_of_date", "snapshot_id"]
+
+[[tables]]
+name = "stock_master_snapshot_items"
+priority = "P1"
+extract_strategy = "snapshot_items"
+output_partitions = ["snapshot_date(as_of_date)"]
+order_by = ["snapshot_id", "market", "ticker"]
+
+[[tables]]
+name = "common_feature_observation_raw"
+priority = "P2"
+extract_strategy = "full_table"
+output_partitions = ["source"]
+order_by = ["series_id", "observation_date", "vintage"]
+jsonb_columns = ["raw_payload"]
+
+[[tables]]
+name = "operating_source_document"
+priority = "P2"
+extract_strategy = "empty_table"
+output_partitions = ["source_system"]
+order_by = ["ticker", "document_date", "document_key"]
+jsonb_columns = ["raw_payload"]

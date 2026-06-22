@@ -180,9 +180,7 @@ def test_assert_common_freshness_uses_daily_lag_for_daily_fred_and_ecos_series()
     )
 
     latest_observation_violations = [
-        item
-        for item in result.violations
-        if item.check == "latest_observation"
+        item for item in result.violations if item.check == "latest_observation"
     ]
     assert [item.series_id for item in latest_observation_violations] == [
         "rate_us10y",

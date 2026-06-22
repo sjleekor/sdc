@@ -67,15 +67,11 @@ def test_default_common_feature_series_policies_match_pit_contract() -> None:
     assert series_by_id["market_kospi"].source_timezone == "Asia/Seoul"
     assert series_by_id["market_kospi_krx"].availability_policy == "next_krx_session"
     assert series_by_id["market_kospi_krx"].source_timezone == "Asia/Seoul"
-    assert series_by_id["market_kospi_advancers_krx"].availability_policy == (
-        "next_krx_session"
-    )
+    assert series_by_id["market_kospi_advancers_krx"].availability_policy == ("next_krx_session")
     assert series_by_id["market_kospi_advancers_krx"].source_timezone == "Asia/Seoul"
     assert series_by_id["market_kosdaq"].availability_policy == "next_krx_session"
     assert series_by_id["market_kosdaq_krx"].availability_policy == "next_krx_session"
-    assert series_by_id["market_kosdaq_advancers_krx"].availability_policy == (
-        "next_krx_session"
-    )
+    assert series_by_id["market_kosdaq_advancers_krx"].availability_policy == ("next_krx_session")
     assert series_by_id["global_sp500"].availability_policy == "same_krx_session_morning"
     assert series_by_id["global_sp500"].source_timezone == "America/New_York"
     assert series_by_id["global_nasdaq"].source_timezone == "America/New_York"
@@ -185,9 +181,7 @@ def test_default_common_feature_krx_direct_market_indexes_are_active_after_valid
     assert catalog_by_code["market_kosdaq_ret_1d"].active is True
     assert catalog_by_code["market_kosdaq_ret_1d"].input_series_ids == ("market_kosdaq_krx",)
     assert catalog_by_code["market_kospi200_ret_1d"].active is True
-    assert catalog_by_code["market_kospi200_ret_1d"].input_series_ids == (
-        "market_kospi200_krx",
-    )
+    assert catalog_by_code["market_kospi200_ret_1d"].input_series_ids == ("market_kospi200_krx",)
 
     assert catalog_by_code["market_kospi_krx_close"].active is False
     assert catalog_by_code["market_kospi_krx_close"].input_series_ids == ("market_kospi_krx",)
@@ -196,9 +190,7 @@ def test_default_common_feature_krx_direct_market_indexes_are_active_after_valid
     assert catalog_by_code["market_kospi_krx_ret_5d"].active is False
     assert catalog_by_code["market_kospi_krx_ret_20d"].active is False
     assert catalog_by_code["market_kosdaq_krx_ret_1d"].active is False
-    assert catalog_by_code["market_kosdaq_krx_ret_1d"].input_series_ids == (
-        "market_kosdaq_krx",
-    )
+    assert catalog_by_code["market_kosdaq_krx_ret_1d"].input_series_ids == ("market_kosdaq_krx",)
     assert catalog_by_code["market_kospi200_krx_ret_1d"].active is False
     assert catalog_by_code["market_kospi200_krx_ret_1d"].input_series_ids == (
         "market_kospi200_krx",
@@ -426,13 +418,9 @@ def test_default_common_feature_fred_wti_spot_is_active_as_parallel_feature() ->
     assert catalog_by_code["commodity_wti_ret_20d"].active is True
     assert catalog_by_code["commodity_wti_ret_20d"].input_series_ids == ("commodity_wti",)
     assert catalog_by_code["commodity_wti_spot_ret_20d"].active is True
-    assert catalog_by_code["commodity_wti_spot_ret_20d"].input_series_ids == (
-        "commodity_wti_fred",
-    )
+    assert catalog_by_code["commodity_wti_spot_ret_20d"].input_series_ids == ("commodity_wti_fred",)
     assert catalog_by_code["commodity_wti_fred_ret_20d"].active is False
-    assert catalog_by_code["commodity_wti_fred_ret_20d"].input_series_ids == (
-        "commodity_wti_fred",
-    )
+    assert catalog_by_code["commodity_wti_fred_ret_20d"].input_series_ids == ("commodity_wti_fred",)
 
 
 def test_default_common_feature_rate_kr_gov3y_is_active_after_pr4j() -> None:

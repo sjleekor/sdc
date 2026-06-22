@@ -223,9 +223,7 @@ def _handle_ops_freshness_report(args: argparse.Namespace) -> None:
 
     print("   - DART/metric year ranges:")
     for row in report.dart_year_ranges:
-        year_range = (
-            f"{row.min_year}..{row.max_year}" if row.min_year is not None else "-"
-        )
+        year_range = f"{row.min_year}..{row.max_year}" if row.min_year is not None else "-"
         print(f"     {row.table_name}: years={year_range} rows={row.rows}")
 
     print("   - running ingestion runs:")
@@ -277,8 +275,7 @@ def _handle_ops_assert_common_freshness(args: argparse.Namespace) -> None:
     for violation in result.violations:
         series = f" series={violation.series_id}" if violation.series_id else ""
         print(
-            f"   - {violation.source.value} {violation.check}{series}: "
-            f"{violation.message}",
+            f"   - {violation.source.value} {violation.check}{series}: " f"{violation.message}",
             file=sys.stderr,
         )
     sys.exit(2)
@@ -1714,6 +1711,283 @@ def _handle_validate(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Profiling helpers + handlers
+# ---------------------------------------------------------------------------
+
+
+def _resolve_profile_dsn(target: str) -> str:
+    """Resolve the DSN for a profiling target (``local`` / ``sj2``).
+
+    ``local`` uses the ``.env`` ``DB_DSN``; ``sj2`` reads the same remote
+    ``db_info`` secret used by ``db sync-remote`` (the ``dbq.sh`` source).
+    """
+    settings = get_settings()
+    if target == "local":
+        return settings.db_dsn
+    if target == "sj2":
+        from krx_collector.infra.db_postgres.remote_sync import load_remote_db_info
+
+        info = load_remote_db_info(settings.remote_db_info_path)
+        host_override = settings.remote_db_host_override
+        return info.to_dsn(host_override=host_override)
+    raise ValueError(f"Unknown profile target: {target!r} (expected local or sj2)")
+
+
+def _git_sha() -> str:
+    """Return the current git commit SHA (best-effort; empty on failure)."""
+    import subprocess
+
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:  # noqa: BLE001 — provenance is best-effort
+        return ""
+
+
+def _analysis_lib_versions() -> dict[str, str]:
+    """Return installed versions of the analysis libs (for the manifest)."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    out: dict[str, str] = {}
+    for pkg in ("matplotlib", "plotly", "nbformat", "nbclient", "nbconvert", "pyarrow"):
+        try:
+            out[pkg] = version(pkg)
+        except PackageNotFoundError:
+            continue
+    return out
+
+
+def _parse_sample_policy(value: str):  # noqa: ANN202
+    """Parse the ``--sample-policy`` flag into a ``SamplePolicy``."""
+    from krx_collector.domain.profiling import SamplePolicy
+
+    try:
+        return SamplePolicy(value)
+    except ValueError as exc:
+        choices = ", ".join(p.value for p in SamplePolicy)
+        raise argparse.ArgumentTypeError(
+            f"Invalid sample policy {value!r} (expected one of: {choices})"
+        ) from exc
+
+
+def _build_profile_components(args: argparse.Namespace):  # noqa: ANN202
+    """Construct the query runner + renderers for a profiling run."""
+    from krx_collector.adapters.profiling_render.composite import CompositeProfileRenderer
+    from krx_collector.adapters.profiling_render.index_renderer import IndexRenderer
+    from krx_collector.infra.db_postgres.profiling_query_runner import (
+        PostgresProfileQueryRunner,
+    )
+
+    dsn = _resolve_profile_dsn(args.target)
+    runner = PostgresProfileQueryRunner(
+        dsn,
+        target=args.target,
+        sample_policy=args.sample_policy,
+        sample_pct_override=args.sample_pct,
+        query_timeout_sec=args.query_timeout_sec,
+    )
+    renderer = CompositeProfileRenderer(execute_notebooks=not args.no_execute)
+    return runner, renderer, IndexRenderer()
+
+
+def _run_profile_specs(args: argparse.Namespace, specs: list) -> None:
+    """Shared driver for ``profile table`` / ``profile all``."""
+    from krx_collector.service.profiling.orchestrate import run_profile
+    from krx_collector.util.time import now_kst
+
+    runner, renderer, index_renderer = _build_profile_components(args)
+    formats = _split_csv(args.formats) or ["ipynb", "md", "html", "json", "parquet"]
+
+    generated_at = now_kst()
+    run_date = args.run_date or generated_at.date().isoformat()
+    run_id = args.run_id or f"{generated_at.strftime('%Y%m%d_%H%M%S')}_{args.target}"
+    out_root = Path(args.out_dir)
+    out_dir = out_root / args.target / run_date
+
+    print(
+        f"→ profile: tables={[s.table for s in specs]}, target={args.target}, "
+        f"formats={formats}, out={out_dir}, sample_policy={args.sample_policy.value}"
+    )
+
+    try:
+        manifest, _ = run_profile(
+            specs,
+            runner,
+            renderer,
+            index_renderer,
+            target=args.target,
+            run_id=run_id,
+            run_date=run_date,
+            out_dir=out_dir,
+            formats=formats,
+            generated_at=generated_at,
+            include_drilldown=getattr(args, "drilldown", False),
+            sample_policy=args.sample_policy.value,
+            git_sha=_git_sha(),
+            lib_versions=_analysis_lib_versions(),
+        )
+    except Exception as exc:  # noqa: BLE001 — connection/setup failures
+        print(f"❌ Profiling failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    _update_latest_symlink(out_root / args.target, run_date)
+    print(
+        f"✅ Profiled {len(manifest.tables)} table(s): "
+        f"{manifest.query_ok} check(s) ok, {manifest.query_failed} failed. "
+        f"Output: {out_dir}"
+    )
+    if manifest.query_failed:
+        print("⚠  Some checks degraded to warnings — see run_summary.md.", file=sys.stderr)
+
+
+def _update_latest_symlink(target_dir: Path, run_date: str) -> None:
+    """Point ``<target>/latest`` at the newest run (best-effort)."""
+    link = target_dir / "latest"
+    try:
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(run_date, target_is_directory=True)
+    except OSError as exc:
+        logger.warning("Could not update latest symlink: %s", exc)
+
+
+def _handle_profile_table(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector profile table <name>``."""
+    from krx_collector.service.profiling.catalog import get_spec
+
+    try:
+        spec = get_spec(args.table)
+    except KeyError as exc:
+        print(f"❌ {exc}", file=sys.stderr)
+        sys.exit(1)
+    _run_profile_specs(args, [spec])
+
+
+def _handle_profile_all(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector profile all``."""
+    from krx_collector.service.profiling import catalog
+
+    weights = _split_csv(args.weight) or ["full", "light"]
+    specs = catalog.specs_for_weights(weights)
+    if not specs:
+        print(f"❌ No catalog tables match weights: {weights}", file=sys.stderr)
+        sys.exit(1)
+    _run_profile_specs(args, specs)
+
+
+def _resolve_manifest_path(out_root: Path, target: str, selector: str) -> Path:
+    """Resolve a run selector to its ``_run_manifest.json`` path.
+
+    ``selector`` is either ``latest`` (follow the ``<target>/latest`` symlink),
+    a run-date directory name, or a direct path to a manifest JSON.
+    """
+    direct = Path(selector)
+    if direct.is_file():
+        return direct
+    run_dir = out_root / target / selector
+    return run_dir / "_run_manifest.json"
+
+
+def _handle_profile_diff(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector profile diff``."""
+    import json
+
+    from krx_collector.adapters.profiling_render.diff_renderer import DiffRenderer
+    from krx_collector.service.profiling.diff import compare_manifests
+    from krx_collector.util.time import now_kst
+
+    out_root = Path(args.out_dir)
+    candidate_path = _resolve_manifest_path(out_root, args.target, args.candidate or "latest")
+    if args.baseline:
+        baseline_path = Path(args.baseline)
+    else:
+        baseline_path = _resolve_manifest_path(out_root, args.target, args.against)
+
+    for label, path in (("baseline", baseline_path), ("candidate", candidate_path)):
+        if not path.is_file():
+            print(f"❌ {label} manifest not found: {path}", file=sys.stderr)
+            sys.exit(1)
+
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+    report = compare_manifests(baseline, candidate, generated_at=now_kst())
+
+    written = DiffRenderer().render(report, out_dir=candidate_path.parent)
+    print(
+        f"✅ Drift report: {len(report.changed)}/{len(report.tables)} table(s) changed. "
+        f"{', '.join(p.name for p in written)} in {candidate_path.parent}"
+    )
+    for drift in report.changed:
+        bits = []
+        if drift.row_delta:
+            bits.append(f"rows {drift.row_delta:+,}")
+        if drift.max_time_moved in ("forward", "backward"):
+            bits.append(f"max_time {drift.max_time_moved}")
+        if drift.failed_delta:
+            bits.append(f"failed {drift.failed_delta:+}")
+        if drift.new_warnings:
+            bits.append(f"{len(drift.new_warnings)} new warning(s)")
+        print(f"   - {drift.table} [{drift.status}]: {', '.join(bits) or 'changed'}")
+
+
+_PUBLISH_DOCS_DIR = Path("docs/features/table_stat_20260528/generated")
+
+
+def _handle_profile_publish(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector profile publish`` — copy reviewed summaries to docs.
+
+    Copies only the lightweight, reviewed artifacts (run summary, manifest,
+    per-table + drilldown Markdown) into the docs tree; large HTML / ipynb /
+    Parquet outputs stay under ``reports/`` (PLAN §2.2).
+    """
+    import shutil
+
+    out_root = Path(args.out_dir)
+    run_dir = _resolve_run_dir(out_root, args.target, args.run_id)
+    if not run_dir.is_dir():
+        print(f"❌ Run directory not found: {run_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    dest_root = Path(args.docs_dir) if args.docs_dir else _PUBLISH_DOCS_DIR
+    dest = dest_root / args.target / run_dir.name
+    dest.mkdir(parents=True, exist_ok=True)
+
+    copied: list[str] = []
+    for name in ("run_summary.md", "_run_manifest.json", "drift_report.md"):
+        src = run_dir / name
+        if src.is_file():
+            shutil.copy2(src, dest / name)
+            copied.append(name)
+
+    # Per-table + drilldown Markdown only (skip html/ipynb/parquet/data).
+    src_tables = run_dir / "tables"
+    if src_tables.is_dir():
+        dest_tables = dest / "tables"
+        for md_file in src_tables.rglob("*.md"):
+            target_file = dest_tables / md_file.relative_to(src_tables)
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(md_file, target_file)
+            copied.append(str(md_file.relative_to(run_dir)))
+
+    print(f"✅ Published {len(copied)} reviewed artifact(s) to {dest}")
+    for name in copied[:8]:
+        print(f"   - {name}")
+    if len(copied) > 8:
+        print(f"   … and {len(copied) - 8} more")
+
+
+def _resolve_run_dir(out_root: Path, target: str, run_id: str | None) -> Path:
+    """Resolve a run directory by run-date name (default: the latest symlink)."""
+    base = out_root / target
+    if run_id:
+        return base / run_id
+    return base / "latest"
+
+
+# ---------------------------------------------------------------------------
 # Parser construction
 # ---------------------------------------------------------------------------
 
@@ -2439,8 +2713,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=14,
         help=(
-            "Recent calendar-day window to always rescan in --incremental mode "
-            "(default: 14)."
+            "Recent calendar-day window to always rescan in --incremental mode " "(default: 14)."
         ),
     )
     flows_sync.add_argument(
@@ -2736,6 +3009,150 @@ def build_parser() -> argparse.ArgumentParser:
         help="Allow resolved incremental price ranges larger than the safety guard.",
     )
     prices_backfill.set_defaults(handler=_handle_prices_backfill)
+
+    # -- profile --------------------------------------------------------------
+    profile_parser = subparsers.add_parser(
+        "profile", help="Generate reproducible table/feature statistical profiles."
+    )
+    profile_sub = profile_parser.add_subparsers(dest="profile_command", required=True)
+
+    def _add_common_profile_args(sub: argparse.ArgumentParser) -> None:
+        sub.add_argument(
+            "--target",
+            choices=["local", "sj2"],
+            default="local",
+            help="DB target: local mirror (.env DB_DSN) or sj2 origin (db_info).",
+        )
+        sub.add_argument(
+            "--formats",
+            default=None,
+            help=(
+                "Comma-separated output formats from ipynb,md,html,json,parquet "
+                "(default: ipynb,md,html,json,parquet)."
+            ),
+        )
+        sub.add_argument(
+            "--out-dir",
+            default="reports/feature_profiles",
+            help="Output root (default: reports/feature_profiles).",
+        )
+        sub.add_argument(
+            "--run-id",
+            default=None,
+            help="Override run id (default: <timestamp>_<target>).",
+        )
+        sub.add_argument(
+            "--run-date",
+            default=None,
+            help="Override run date directory (default: today KST).",
+        )
+        sub.add_argument(
+            "--sample-policy",
+            type=_parse_sample_policy,
+            default=_parse_sample_policy("auto"),
+            help="Sampling policy: auto (default), full, or sample.",
+        )
+        sub.add_argument(
+            "--sample-pct",
+            type=float,
+            default=None,
+            help="Override TABLESAMPLE percentage for expensive checks.",
+        )
+        sub.add_argument(
+            "--query-timeout-sec",
+            type=float,
+            default=180.0,
+            help="Per-query statement timeout in seconds (default: 180).",
+        )
+        sub.add_argument(
+            "--no-execute",
+            action="store_true",
+            default=False,
+            help="Skip notebook execution (write unexecuted .ipynb only).",
+        )
+
+    profile_table = profile_sub.add_parser("table", help="Profile a single catalog table.")
+    profile_table.add_argument("table", help="Table name (must exist in the profile catalog).")
+    profile_table.add_argument(
+        "--drilldown",
+        action="store_true",
+        default=False,
+        help="Split long-format drilldown dimension into per-value sub-profiles.",
+    )
+    _add_common_profile_args(profile_table)
+    profile_table.set_defaults(handler=_handle_profile_table)
+
+    profile_all = profile_sub.add_parser("all", help="Profile the whole catalog by weight.")
+    profile_all.add_argument(
+        "--weight",
+        default="full,light",
+        help="Comma-separated weights to include (default: full,light).",
+    )
+    profile_all.add_argument(
+        "--drilldown",
+        action="store_true",
+        default=False,
+        help="Split long-format drilldown dimensions into per-value sub-profiles.",
+    )
+    _add_common_profile_args(profile_all)
+    profile_all.set_defaults(handler=_handle_profile_all)
+
+    profile_diff = profile_sub.add_parser(
+        "diff", help="Report statistical drift between two profiling runs."
+    )
+    profile_diff.add_argument(
+        "--target",
+        choices=["local", "sj2"],
+        default="local",
+        help="DB target whose run directory holds the manifests (default: local).",
+    )
+    profile_diff.add_argument(
+        "--out-dir",
+        default="reports/feature_profiles",
+        help="Output root holding run directories (default: reports/feature_profiles).",
+    )
+    profile_diff.add_argument(
+        "--against",
+        default="latest",
+        help="Baseline run selector: 'latest', a run-date dir, or a manifest path.",
+    )
+    profile_diff.add_argument(
+        "--candidate",
+        default="latest",
+        help="Candidate run selector (default: latest). Drift output is written here.",
+    )
+    profile_diff.add_argument(
+        "--baseline",
+        default=None,
+        help="Explicit baseline manifest path (overrides --against/--target).",
+    )
+    profile_diff.set_defaults(handler=_handle_profile_diff)
+
+    profile_publish = profile_sub.add_parser(
+        "publish", help="Copy reviewed summary artifacts from a run into docs/."
+    )
+    profile_publish.add_argument(
+        "--target",
+        choices=["local", "sj2"],
+        default="local",
+        help="DB target whose run to publish (default: local).",
+    )
+    profile_publish.add_argument(
+        "--out-dir",
+        default="reports/feature_profiles",
+        help="Output root holding run directories (default: reports/feature_profiles).",
+    )
+    profile_publish.add_argument(
+        "--run-id",
+        default=None,
+        help="Run-date directory to publish (default: the latest symlink).",
+    )
+    profile_publish.add_argument(
+        "--docs-dir",
+        default=None,
+        help="Override the docs destination root.",
+    )
+    profile_publish.set_defaults(handler=_handle_profile_publish)
 
     # -- validate -------------------------------------------------------------
     validate_parser = subparsers.add_parser("validate", help="Run data-quality validations.")

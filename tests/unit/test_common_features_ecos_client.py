@@ -64,9 +64,7 @@ def test_ecos_statistic_search_client_builds_url_and_parses_rows() -> None:
 
     assert result.error is None
     assert result.no_data is False
-    assert result.rows == [
-        {"STAT_CODE": "722Y001", "TIME": "20240102", "DATA_VALUE": "3.50"}
-    ]
+    assert result.rows == [{"STAT_CODE": "722Y001", "TIME": "20240102", "DATA_VALUE": "3.50"}]
     assert urls == [
         (
             "https://ecos.bok.or.kr/api/StatisticSearch/"

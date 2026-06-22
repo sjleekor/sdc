@@ -107,13 +107,16 @@ class MockCommonFeatureBuildStorage:
         self.observations = observations
         self.facts: list[CommonFeatureDailyFact] = []
         self.runs: list[IngestionRun] = []
-        self.observation_query: tuple[
-            list[str] | None,
-            date | None,
-            date | None,
-            Source | None,
-            date | None,
-        ] | None = None
+        self.observation_query: (
+            tuple[
+                list[str] | None,
+                date | None,
+                date | None,
+                Source | None,
+                date | None,
+            ]
+            | None
+        ) = None
         self.catalog_query: tuple[list[str] | None, bool] | None = None
         self.series_query: tuple[list[Source] | None, list[str] | None, bool] | None = None
 
@@ -274,9 +277,7 @@ def test_build_daily_facts_writes_null_when_stale_limit_exceeded() -> None:
     storage = MockCommonFeatureBuildStorage(
         series=[_series("market_kospi", max_stale_business_days=1)],
         catalog=[_feature("market_kospi_close", series_id="market_kospi")],
-        observations=[
-            _obs(1, "market_kospi", date(2026, 6, 8), date(2026, 6, 8), "100")
-        ],
+        observations=[_obs(1, "market_kospi", date(2026, 6, 8), date(2026, 6, 8), "100")],
     )
 
     build_common_feature_daily_facts(
@@ -331,8 +332,7 @@ def test_build_daily_facts_selects_latest_vintage_asof_feature_date() -> None:
     )
 
     assert [
-        (fact.feature_date, fact.value_numeric, fact.selected_vintage)
-        for fact in storage.facts
+        (fact.feature_date, fact.value_numeric, fact.selected_vintage) for fact in storage.facts
     ] == [
         (date(2024, 2, 6), Decimal("100"), "v1"),
         (date(2024, 2, 7), Decimal("110"), "v2"),

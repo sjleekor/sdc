@@ -474,9 +474,7 @@ def test_handle_ops_assert_common_freshness_exits_on_failure(monkeypatch) -> Non
         fake_assert_common_freshness,
     )
 
-    args = app.build_parser().parse_args(
-        ["ops", "assert-common-freshness", "--sources", "krx"]
-    )
+    args = app.build_parser().parse_args(["ops", "assert-common-freshness", "--sources", "krx"])
 
     with pytest.raises(SystemExit) as exc_info:
         app._handle_ops_assert_common_freshness(args)

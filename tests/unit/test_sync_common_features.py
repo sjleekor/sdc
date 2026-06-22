@@ -130,8 +130,7 @@ class MockCommonFeatureStorage:
         self.count_queries.append((series_ids, start, end, source))
         if series_ids:
             return {
-                series_id: self.observation_counts.get(series_id, 0)
-                for series_id in series_ids
+                series_id: self.observation_counts.get(series_id, 0) for series_id in series_ids
             }
         return dict(self.observation_counts)
 
@@ -182,11 +181,7 @@ def test_sync_common_features_writes_observations_with_service_availability() ->
     storage = MockCommonFeatureStorage([_series("market_kospi")])
     provider = MockCommonFeatureProvider(
         Source.PYKRX,
-        {
-            "market_kospi": CommonFeatureFetchResult(
-                records=[_observation("market_kospi")]
-            )
-        },
+        {"market_kospi": CommonFeatureFetchResult(records=[_observation("market_kospi")])},
     )
 
     result = sync_common_features(
@@ -214,9 +209,7 @@ def test_sync_common_features_records_partial_run_for_series_error() -> None:
     provider = MockCommonFeatureProvider(
         Source.PYKRX,
         {
-            "market_kospi": CommonFeatureFetchResult(
-                records=[_observation("market_kospi")]
-            ),
+            "market_kospi": CommonFeatureFetchResult(records=[_observation("market_kospi")]),
             "market_kosdaq": CommonFeatureFetchResult(error="provider failed"),
         },
     )
@@ -340,11 +333,7 @@ def test_sync_common_features_skips_series_with_existing_coverage() -> None:
     )
     provider = MockCommonFeatureProvider(
         Source.PYKRX,
-        {
-            "market_kospi": CommonFeatureFetchResult(
-                records=[_observation("market_kospi")]
-            )
-        },
+        {"market_kospi": CommonFeatureFetchResult(records=[_observation("market_kospi")])},
     )
 
     result = sync_common_features(
@@ -427,11 +416,7 @@ def test_sync_common_features_force_fetches_even_with_existing_coverage() -> Non
     )
     provider = MockCommonFeatureProvider(
         Source.PYKRX,
-        {
-            "market_kospi": CommonFeatureFetchResult(
-                records=[_observation("market_kospi")]
-            )
-        },
+        {"market_kospi": CommonFeatureFetchResult(records=[_observation("market_kospi")])},
     )
 
     result = sync_common_features(
@@ -456,18 +441,14 @@ def test_sync_common_features_incremental_lookback_bypasses_existing_coverage() 
         [_series("market_kospi")],
         observation_counts={"market_kospi": 3},
         observation_rows={
-            "market_kospi": [
-                _observation("market_kospi", observation_date=date(2026, 6, 9))
-            ]
+            "market_kospi": [_observation("market_kospi", observation_date=date(2026, 6, 9))]
         },
     )
     provider = MockCommonFeatureProvider(
         Source.PYKRX,
         {
             "market_kospi": CommonFeatureFetchResult(
-                records=[
-                    _observation("market_kospi", observation_date=date(2026, 6, 10))
-                ]
+                records=[_observation("market_kospi", observation_date=date(2026, 6, 10))]
             )
         },
     )

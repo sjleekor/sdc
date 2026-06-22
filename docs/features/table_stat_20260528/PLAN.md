@@ -282,3 +282,9 @@
 - 본 시리즈 문서가 누적되면 모델링 피처 카탈로그 작성(`docs/features/feature_catalog.md`) 의 1차 입력으로 사용한다.
 - 결측/중복/이상치 패턴은 데이터 품질 모니터링 SQL 로 재활용한다.
 - `common_feature_*` 프로파일 결과는 종목별 패널과 결합할 때 look-ahead bias 방지, stale feature 제한, 공통 피처 coverage gate의 기준으로 사용한다.
+
+## 9. 자동화 프로그램 작성 계획
+
+피처 수집이 계속되면서 본 문서의 SQL과 실행 결과를 수동으로 갱신하기 어렵다.
+반복 실행 가능한 프로파일링 프로그램 작성 계획은
+[`AUTOMATED_FEATURE_PROFILING_PLAN.md`](../automated_feature_profiling_plans/AUTOMATED_FEATURE_PROFILING_PLAN_B.md)에 별도 정리한다.

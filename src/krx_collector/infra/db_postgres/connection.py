@@ -30,10 +30,11 @@ _POOLS: dict[str, psycopg2.pool.ThreadedConnectionPool] = {}
 
 def _mask_dsn(dsn: str) -> str:
     """Return a log-safe representation of a DSN."""
+    scheme_index = dsn.find("://")
     at_index = dsn.rfind("@")
-    if at_index == -1:
+    if scheme_index == -1 or at_index == -1:
         return "***"
-    return dsn[: at_index + 1] + "***"
+    return dsn[: scheme_index + 3] + "***" + dsn[at_index:]
 
 
 def _get_pool(dsn: str) -> psycopg2.pool.ThreadedConnectionPool:

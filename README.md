@@ -10,6 +10,7 @@
 6. 공시 원문 기반 **섹터별 사업 KPI extractor 프레임워크**를 제공합니다 (파일럿: 조선/방산 수주).
 7. raw 테이블과 별도로 `metric_catalog` / `metric_mapping_rule` / `stock_metric_fact` 기반 **canonical metric 정규화 계층**을 운영합니다.
 8. 깔끔한 포트/어댑터(Ports & Adapters) 아키텍처를 적용하여 **PostgreSQL에 모든 데이터를 저장**합니다. 핵심 로직의 리팩토링 없이 향후 파일 기반 저장소(CSV / Parquet)로 확장할 수 있도록 설계되었습니다.
+9. Rust 기반 **raw PostgreSQL → Parquet exporter**로 대형 raw/reference 테이블을 `data_lake/raw_postgres` 레이아웃에 manifest/checkpoint와 함께 내보낼 수 있습니다.
 
 ## 목표 제외 범위 (현재 스코프)
 
@@ -23,6 +24,7 @@
 - Python ≥ 3.12
 - [uv](https://docs.astral.sh/uv/) 패키지 매니저
 - PostgreSQL (실제 운영 환경용)
+- Rust toolchain / Cargo (raw Parquet exporter 실행 또는 개발 시)
 
 ### 설정 (Setup)
 
@@ -298,6 +300,146 @@ remote mirror에서 제외되는 로컬 운영 테이블:
 - `--ssh-local-port`: SSH 터널에 고정 로컬 포트를 사용합니다 (미지정 시 임의의 빈 포트).
 - `--ssh-compression` / `--no-ssh-compression`: SSH 터널 사용 시 압축을 켜거나 끕니다. 기본값은 `REMOTE_DB_SSH_COMPRESSION` 설정을 따릅니다.
 
+## Feature / table profiling
+
+수집된 raw/reference/canonical feature 테이블의 통계 프로파일은 `profile` CLI로 생성합니다.
+프로파일링은 행수, 시간 범위, 결측률, 자연키 중복, 카테고리 분포, 수치 분위수, FK/PIT 정합성, freshness, 테이블별 domain check를 실행하고 실행별 manifest를 남깁니다.
+
+기본 DB 대상:
+
+- `local`: 루트 `.env`의 `DB_DSN`을 사용합니다.
+- `sj2`: `db sync-remote`와 같은 `db_info` 기반 원격 DB 정보를 사용합니다.
+
+Notebook/HTML/Parquet 산출물까지 만들려면 분석용 optional dependency를 설치합니다.
+Markdown/JSON만 볼 때는 `--formats md,json --no-execute`로 가볍게 실행할 수 있습니다.
+
+```bash
+# 분석용 의존성 설치
+uv sync --extra analysis
+
+# 단일 테이블 프로파일
+uv run krx-collector profile table daily_ohlcv --target local
+
+# 전체 카탈로그 프로파일(full + light)
+uv run krx-collector profile all --target local --weight full,light
+
+# long-format 테이블을 metric_code / feature_code 별로 분리
+uv run krx-collector profile table krx_security_flow_raw --target local --drilldown
+
+# 빠른 리뷰용 Markdown + JSON만 생성
+uv run krx-collector profile table common_feature_daily_fact \
+  --target local \
+  --formats md,json \
+  --no-execute
+
+# 특정 실행끼리 drift 비교
+uv run krx-collector profile diff \
+  --target local \
+  --baseline reports/feature_profiles/local/2026-06-18/_run_manifest.json \
+  --candidate reports/feature_profiles/local/2026-06-19/_run_manifest.json
+
+# 검토한 Markdown/manifest만 docs 아래로 publish
+uv run krx-collector profile publish --target local --run-id 2026-06-19
+```
+
+기본 출력 위치는 다음과 같습니다.
+
+```text
+reports/feature_profiles/<target>/<run-date>/
+  _run_manifest.json
+  run_summary.md
+  index.html
+  tables/
+  artifacts/
+```
+
+주요 옵션:
+
+- `--target {local,sj2}`: 프로파일링 대상 DB를 선택합니다.
+- `--formats ipynb,md,html,json,parquet`: 생성할 산출물 포맷을 선택합니다.
+- `--drilldown`: `metric_code`, `feature_code`, `series_id` 같은 long-format 축을 값별 Markdown으로 분리합니다.
+- `--sample-policy {auto,full,sample}` / `--sample-pct`: 대형 테이블의 분위수/Top-N 샘플링 정책을 조절합니다.
+- `--query-timeout-sec`: 체크별 PostgreSQL `statement_timeout`을 지정합니다.
+- `--out-dir`: 기본 `reports/feature_profiles` 대신 다른 출력 루트를 사용합니다.
+- `--run-date`: 출력 run-date 디렉터리를 직접 지정합니다.
+
+## Raw PostgreSQL → Parquet export
+
+대형 raw/reference 테이블을 PostgreSQL에서 Parquet lake로 내보내는 Rust exporter는 [`tools/raw-parquet-exporter`](tools/raw-parquet-exporter)에 있습니다.
+개발 기본 출력은 `data_lake/raw_postgres/snapshot_date=<YYYY-MM-DD>/source=<SOURCE>/...` 아래에 생성되며, table manifest와 checkpoint를 함께 기록합니다.
+DB 접속 정보는 루트 `.env`의 `DB_DSN` 또는 `DB_*` 환경 변수를 사용합니다.
+
+지원 전략:
+
+- `raw_id_range`: `dart_xbrl_fact_raw`, `dart_financial_statement_raw`, `dart_shareholder_return_raw`, `dart_share_count_raw`
+- `date_month`: `krx_security_flow_raw`, `daily_ohlcv`
+- `full_table`: `dart_xbrl_document`, `dart_corp_master`, `stock_master`, `stock_master_snapshot`, `common_feature_observation_raw`
+- `snapshot_items`: `stock_master_snapshot_items`
+- `empty_table`: `operating_source_document`
+
+전체 테이블 export는 [`bin/raw-parquet-export-all.sh`](bin/raw-parquet-export-all.sh)를 사용합니다.
+아래 명령은 release binary를 빌드한 뒤 configured table 전체를 순차 export하고, 각 table manifest를 검증합니다.
+
+```bash
+bin/raw-parquet-export-all.sh --snapshot-date 2026-06-19 --force
+```
+
+이 명령의 기본 출력 위치는 다음과 같습니다.
+
+```text
+data_lake/raw_postgres/snapshot_date=2026-06-19/source=local_mydb/
+```
+
+테이블별 Parquet 파일은 `<table>/schema_version=1/...` 아래에 생성되고, manifest/checkpoint는 `_manifests/` 아래에 기록됩니다.
+`--force`는 같은 snapshot/source/table 출력 디렉터리가 이미 있을 때 해당 table output을 지우고 다시 씁니다. 전체 `data_lake/raw_postgres` 디렉터리를 통째로 삭제하지는 않습니다.
+임시 파일은 `data_lake/_tmp/raw_export/<run_id>/...` 아래에 생성됩니다.
+
+주요 옵션:
+
+- `--snapshot-date YYYY-MM-DD`: 출력 snapshot partition을 지정합니다.
+- `--force`: 기존 table output을 덮어씁니다.
+- `--no-build`: release build를 생략합니다.
+- `--no-validate`: export 후 manifest 검증을 생략합니다.
+- `--validate-samples`: `raw_id` 테이블에 대해 PostgreSQL 원본 샘플과 Parquet 값을 비교합니다.
+- `--dry-run`: Parquet 파일을 쓰지 않고 export plan만 확인합니다.
+
+대표 실행:
+
+```bash
+# 전체 configured table export
+bin/raw-parquet-export-all.sh
+
+# 기존 snapshot/table 출력 덮어쓰기
+bin/raw-parquet-export-all.sh --snapshot-date 2026-06-19 --force
+
+# export plan 확인
+cargo run --manifest-path tools/raw-parquet-exporter/Cargo.toml -- \
+  plan \
+  --tables dart_xbrl_fact_raw
+
+# raw_id 범위 export
+cargo run --manifest-path tools/raw-parquet-exporter/Cargo.toml -- \
+  export \
+  --tables dart_xbrl_fact_raw \
+  --start-raw-id 1 \
+  --chunk-rows 1000000 \
+  --batch-rows 65536 \
+  --max-rows-per-file 5000000 \
+  --force
+
+# manifest row count와 Parquet metadata 검증
+cargo run --manifest-path tools/raw-parquet-exporter/Cargo.toml -- \
+  validate \
+  --manifest data_lake/raw_postgres/snapshot_date=2026-06-19/source=local_mydb/_manifests/table_manifests/dart_xbrl_fact_raw.json
+
+# raw_id 샘플을 PostgreSQL 원본과 Parquet 값으로 비교
+cargo run --manifest-path tools/raw-parquet-exporter/Cargo.toml -- \
+  validate-samples \
+  --manifest data_lake/raw_postgres/snapshot_date=2026-06-19/source=local_mydb/_manifests/table_manifests/dart_xbrl_fact_raw.json
+```
+
+세부 사용법은 [`tools/raw-parquet-exporter/README.md`](tools/raw-parquet-exporter/README.md)를, 설계와 진행 중인 benchmark는 [`docs/dev/20260619_rust_exporter/raw_parquet_exporter_rust_plan.md`](docs/dev/20260619_rust_exporter/raw_parquet_exporter_rust_plan.md)와 [`docs/dev/20260619_rust_exporter/raw_parquet_exporter_benchmark_20260619.md`](docs/dev/20260619_rust_exporter/raw_parquet_exporter_benchmark_20260619.md)를 참고하세요.
+
 ## Docker로 실행하기
 
 ### 필수 조건
@@ -394,6 +536,8 @@ krx-data-pipeline/
 │   ├── operations.md                 # 운영 가이드(Runbook), cron, partial run 해석
 │   ├── holidays_krx.csv              # KRX 휴장일 데이터 (trading calendar에서 사용)
 │   └── dev/                          # 설계/구현 계획 및 세부 구현 추적표
+├── tools/
+│   └── raw-parquet-exporter/         # Rust 기반 PostgreSQL raw/reference table → Parquet exporter
 ├── src/krx_collector/
 │   ├── __main__.py                   # `python -m krx_collector` 진입점
 │   ├── main.py                       # main() 어댑터 shim
@@ -441,6 +585,8 @@ krx-data-pipeline/
 - [docs/architecture.md](docs/architecture.md) — 포트/어댑터 설계, 전체 데이터 흐름.
 - [docs/database.md](docs/database.md) — raw 테이블, canonical 테이블, 인덱스/제약 설명.
 - [docs/operations.md](docs/operations.md) — cron 스케줄, `ingestion_runs.status` 해석(`running` / `success` / `partial` / `failed`), 실패 복구 절차.
+- [tools/raw-parquet-exporter/README.md](tools/raw-parquet-exporter/README.md) — Rust raw Parquet exporter 사용법.
+- [docs/dev/20260619_rust_exporter/raw_parquet_exporter_benchmark_20260619.md](docs/dev/20260619_rust_exporter/raw_parquet_exporter_benchmark_20260619.md) — exporter benchmark 기록.
 
 ## 라이선스
 
