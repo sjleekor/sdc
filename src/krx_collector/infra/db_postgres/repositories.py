@@ -2027,6 +2027,32 @@ class PostgresStorage:
                 result.updated = cur.rowcount
         return result
 
+    def delete_stock_metric_facts_for_inactive_rules(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str],
+    ) -> int:
+        """Delete normalized facts in scope whose mapping rule is no longer active."""
+        if not bsns_years or not reprt_codes or not tickers:
+            return 0
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM stock_metric_fact f
+                    USING metric_mapping_rule r
+                    WHERE f.mapping_rule_code = r.rule_code
+                      AND r.is_active = FALSE
+                      AND f.bsns_year = ANY(%s)
+                      AND f.reprt_code = ANY(%s)
+                      AND f.ticker = ANY(%s)
+                    """,
+                    (bsns_years, reprt_codes, tickers),
+                )
+                return cur.rowcount
+
     def get_metric_catalog_entries(self) -> list[MetricCatalogEntry]:
         """Return active canonical metric catalog entries."""
         records: list[MetricCatalogEntry] = []
@@ -2280,9 +2306,7 @@ class PostgresStorage:
         if not records:
             return UpsertResult()
         missing_availability = [
-            record.series_id
-            for record in records
-            if record.available_from_date is None
+            record.series_id for record in records if record.available_from_date is None
         ]
         if missing_availability:
             raise ValueError(
@@ -2619,10 +2643,7 @@ class PostgresStorage:
             return UpsertResult()
 
         result = UpsertResult()
-        deduped_records = {
-            (record.feature_date, record.feature_code): record
-            for record in records
-        }
+        deduped_records = {(record.feature_date, record.feature_code): record for record in records}
         with get_connection(self._dsn) as conn:
             with conn.cursor() as cur:
                 args = [

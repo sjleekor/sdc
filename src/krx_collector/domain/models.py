@@ -807,6 +807,7 @@ class MetricNormalizationResult:
     fact_upsert: UpsertResult = field(default_factory=UpsertResult)
     targets_processed: int = 0
     facts_written: int = 0
+    stale_facts_deleted: int = 0
     errors: dict[str, str] = field(default_factory=dict)
 
 

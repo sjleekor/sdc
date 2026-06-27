@@ -210,8 +210,6 @@ def _default_metric_mapping_rules() -> list[MetricMappingRule]:
         ("gross_profit", "ifrs-full_GrossProfit", "IS"),
         ("sga", "dart_TotalSellingGeneralAdministrativeExpenses", "IS"),
         ("operating_income", "dart_OperatingIncomeLoss", "IS"),
-        ("net_income", "ifrs-full_ProfitLoss", "IS"),
-        ("controlling_net_income", "ifrs-full_ProfitLossAttributableToOwnersOfParent", "IS"),
         ("total_assets", "ifrs-full_Assets", "BS"),
         ("total_liabilities", "ifrs-full_Liabilities", "BS"),
         ("total_equity", "ifrs-full_Equity", "BS"),
@@ -263,6 +261,47 @@ def _default_metric_mapping_rules() -> list[MetricMappingRule]:
     for metric_code, account_id, sj_div in financial_specs:
         rules.append(_financial_rule(metric_code, account_id, sj_div, 10, "CFS"))
         rules.append(_financial_rule(metric_code, account_id, sj_div, 20, "OFS"))
+
+    income_specs = [
+        ("net_income", "ifrs-full_ProfitLoss", "CFS", "CIS", 10),
+        ("net_income", "ifrs_ProfitLoss", "CFS", "CIS", 11),
+        ("net_income", "ifrs-full_ProfitLoss", "CFS", "IS", 20),
+        ("net_income", "ifrs_ProfitLoss", "CFS", "IS", 21),
+        ("net_income", "ifrs-full_ProfitLoss", "OFS", "CIS", 30),
+        ("net_income", "ifrs_ProfitLoss", "OFS", "CIS", 31),
+        ("net_income", "ifrs-full_ProfitLoss", "OFS", "IS", 40),
+        ("net_income", "ifrs_ProfitLoss", "OFS", "IS", 41),
+        (
+            "controlling_net_income",
+            "ifrs-full_ProfitLossAttributableToOwnersOfParent",
+            "CFS",
+            "CIS",
+            10,
+        ),
+        (
+            "controlling_net_income",
+            "ifrs_ProfitLossAttributableToOwnersOfParent",
+            "CFS",
+            "CIS",
+            11,
+        ),
+        (
+            "controlling_net_income",
+            "ifrs-full_ProfitLossAttributableToOwnersOfParent",
+            "CFS",
+            "IS",
+            20,
+        ),
+        (
+            "controlling_net_income",
+            "ifrs_ProfitLossAttributableToOwnersOfParent",
+            "CFS",
+            "IS",
+            21,
+        ),
+    ]
+    for metric_code, account_id, fs_div, sj_div, priority in income_specs:
+        rules.append(_financial_rule(metric_code, account_id, sj_div, priority, fs_div))
 
     rules.extend(
         [
@@ -718,6 +757,13 @@ def normalize_stock_metrics(
             processed_tickers += len(ticker_batch)
             chunk_end = processed_tickers
 
+            stale_deleted = storage.delete_stock_metric_facts_for_inactive_rules(
+                bsns_years=bsns_years,
+                reprt_codes=reprt_codes,
+                tickers=ticker_batch,
+            )
+            result.stale_facts_deleted += stale_deleted
+
             chunk_facts = _normalize_chunk(
                 storage=storage,
                 bsns_years=bsns_years,
@@ -735,11 +781,12 @@ def normalize_stock_metrics(
             elapsed = time.monotonic() - chunk_started_at
             logger.info(
                 "metric normalize chunk start=%s end=%s years=%s reports=%s "
-                "candidates=%s facts=%s elapsed=%.2fs rss_mb=%.0f",
+                "stale_deleted=%s candidates=%s facts=%s elapsed=%.2fs rss_mb=%.0f",
                 chunk_start,
                 chunk_end,
                 bsns_years,
                 reprt_codes,
+                stale_deleted,
                 len(chunk_facts),
                 upsert_result.updated,
                 elapsed,
@@ -752,6 +799,7 @@ def normalize_stock_metrics(
             "targets_processed": result.targets_processed,
             "catalog_upserted": result.catalog_upsert.updated,
             "rules_upserted": result.rule_upsert.updated,
+            "stale_facts_deleted": result.stale_facts_deleted,
             "facts_written": result.facts_written,
             "error_count": len(result.errors),
         }

@@ -43,6 +43,41 @@ def _fact_signature(facts: list[StockMetricFact]) -> set[tuple[str, str, int, st
     }
 
 
+def _financial_row(
+    template: DartFinancialStatementLine,
+    *,
+    account_id: str,
+    amount: str,
+    fs_div: str = "CFS",
+    sj_div: str = "CIS",
+    ticker: str = "005930",
+    corp_code: str = "00126380",
+    rcept_no: str = "ni1",
+    ord: int = 1,
+) -> DartFinancialStatementLine:
+    sj_names = {
+        "BS": "재무상태표",
+        "CF": "현금흐름표",
+        "CIS": "포괄손익계산서",
+        "IS": "손익계산서",
+        "SCE": "자본변동표",
+    }
+    return replace(
+        template,
+        corp_code=corp_code,
+        ticker=ticker,
+        fs_div=fs_div,
+        sj_div=sj_div,
+        sj_nm=sj_names.get(sj_div, sj_div),
+        account_id=account_id,
+        account_nm=account_id,
+        thstrm_amount=Decimal(amount),
+        thstrm_add_amount=Decimal(amount),
+        rcept_no=rcept_no,
+        ord=ord,
+    )
+
+
 class MockMetricStorage:
     def __init__(self) -> None:
         self.runs: list[IngestionRun] = []
@@ -51,6 +86,7 @@ class MockMetricStorage:
         self.facts: list[StockMetricFact] = []
         self.fact_by_key: dict[tuple[str, str, int, str], StockMetricFact] = {}
         self.extra_financial_rows: list[DartFinancialStatementLine] = []
+        self.inactive_rule_codes: set[str] = set()
 
     def record_run(self, run: IngestionRun) -> None:
         self.runs.append(run)
@@ -394,6 +430,26 @@ class MockMetricStorage:
         self.facts = list(self.fact_by_key.values())
         return UpsertResult(updated=len(records))
 
+    def delete_stock_metric_facts_for_inactive_rules(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str],
+    ) -> int:
+        before = len(self.fact_by_key)
+        self.fact_by_key = {
+            key: fact
+            for key, fact in self.fact_by_key.items()
+            if not (
+                fact.bsns_year in bsns_years
+                and fact.reprt_code in reprt_codes
+                and fact.ticker in tickers
+                and fact.mapping_rule_code in self.inactive_rule_codes
+            )
+        }
+        self.facts = list(self.fact_by_key.values())
+        return before - len(self.fact_by_key)
+
 
 def test_normalize_stock_metrics_prefers_cfs_and_writes_share_metrics() -> None:
     storage = MockMetricStorage()
@@ -471,3 +527,220 @@ def test_normalize_stock_metrics_uses_source_key_tiebreaker() -> None:
     revenue = next(fact for fact in storage.facts if fact.metric_code == "revenue")
     assert revenue.value_numeric == Decimal("175")
     assert revenue.source_key == "r0:ifrs-full_Revenue:1"
+
+
+def test_normalize_stock_metrics_maps_cis_profit_loss_to_net_income() -> None:
+    storage = MockMetricStorage()
+    template = storage.get_dart_financial_statement_raw([2025], ["11011"], ["005930"])[1]
+    storage.extra_financial_rows.append(
+        _financial_row(
+            template,
+            account_id="ifrs-full_ProfitLoss",
+            amount="1000",
+            rcept_no="ni-cis-full",
+        )
+    )
+
+    result = normalize_stock_metrics(
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        tickers=["005930"],
+    )
+
+    assert result.errors == {}
+    net_income = next(fact for fact in storage.facts if fact.metric_code == "net_income")
+    assert net_income.value_numeric == Decimal("1000")
+    assert net_income.fs_div == "CFS"
+    assert net_income.mapping_rule_code == "fin.net_income.cfs.cis.ifrs-full_ProfitLoss"
+
+
+def test_normalize_stock_metrics_maps_legacy_cis_profit_loss_to_net_income() -> None:
+    storage = MockMetricStorage()
+    template = storage.get_dart_financial_statement_raw([2025], ["11011"], ["000660"])[0]
+    storage.extra_financial_rows.append(
+        _financial_row(
+            template,
+            account_id="ifrs_ProfitLoss",
+            amount="900",
+            ticker="000660",
+            corp_code="00164779",
+            rcept_no="ni-cis-legacy",
+        )
+    )
+
+    result = normalize_stock_metrics(
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        tickers=["000660"],
+    )
+
+    assert result.errors == {}
+    net_income = next(fact for fact in storage.facts if fact.metric_code == "net_income")
+    assert net_income.value_numeric == Decimal("900")
+    assert net_income.mapping_rule_code == "fin.net_income.cfs.cis.ifrs_ProfitLoss"
+
+
+def test_normalize_stock_metrics_prefers_cfs_cis_for_net_income() -> None:
+    storage = MockMetricStorage()
+    template = storage.get_dart_financial_statement_raw([2025], ["11011"], ["005930"])[1]
+    storage.extra_financial_rows.extend(
+        [
+            _financial_row(
+                template,
+                account_id="ifrs-full_ProfitLoss",
+                amount="1000",
+                fs_div="CFS",
+                sj_div="CIS",
+                rcept_no="ni-cfs-cis",
+            ),
+            _financial_row(
+                template,
+                account_id="ifrs-full_ProfitLoss",
+                amount="800",
+                fs_div="CFS",
+                sj_div="IS",
+                rcept_no="ni-cfs-is",
+            ),
+            _financial_row(
+                template,
+                account_id="ifrs-full_ProfitLoss",
+                amount="600",
+                fs_div="OFS",
+                sj_div="CIS",
+                rcept_no="ni-ofs-cis",
+            ),
+        ]
+    )
+
+    result = normalize_stock_metrics(
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        tickers=["005930"],
+    )
+
+    assert result.errors == {}
+    net_income = next(fact for fact in storage.facts if fact.metric_code == "net_income")
+    assert net_income.value_numeric == Decimal("1000")
+    assert net_income.source_key == "ni-cfs-cis:ifrs-full_ProfitLoss:1"
+
+
+def test_normalize_stock_metrics_maps_parent_profit_loss_from_cfs_only() -> None:
+    storage = MockMetricStorage()
+    template = storage.get_dart_financial_statement_raw([2025], ["11011"], ["005930"])[1]
+    storage.extra_financial_rows.extend(
+        [
+            _financial_row(
+                template,
+                account_id="ifrs-full_ProfitLossAttributableToOwnersOfParent",
+                amount="700",
+                fs_div="CFS",
+                sj_div="CIS",
+                rcept_no="parent-cfs-cis",
+            ),
+            _financial_row(
+                template,
+                account_id="ifrs-full_ProfitLossAttributableToOwnersOfParent",
+                amount="999",
+                fs_div="OFS",
+                sj_div="CIS",
+                ticker="000660",
+                corp_code="00164779",
+                rcept_no="parent-ofs-cis",
+            ),
+        ]
+    )
+
+    result = normalize_stock_metrics(
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        tickers=["005930", "000660"],
+    )
+
+    assert result.errors == {}
+    controlling_by_ticker = {
+        fact.ticker: fact for fact in storage.facts if fact.metric_code == "controlling_net_income"
+    }
+    assert controlling_by_ticker["005930"].value_numeric == Decimal("700")
+    assert controlling_by_ticker["005930"].mapping_rule_code == (
+        "fin.controlling_net_income.cfs.cis." "ifrs-full_ProfitLossAttributableToOwnersOfParent"
+    )
+    assert "000660" not in controlling_by_ticker
+
+
+def test_normalize_stock_metrics_excludes_non_income_statement_profit_loss_rows() -> None:
+    storage = MockMetricStorage()
+    template = storage.get_dart_financial_statement_raw([2025], ["11011"], ["000660"])[0]
+    invalid_rows = [
+        ("ifrs-full_ProfitLoss", "SCE", "bad-sce"),
+        ("ifrs-full_ProfitLoss", "CF", "bad-cf"),
+        ("ifrs-full_ProfitLossBeforeTax", "CIS", "bad-before-tax"),
+        ("ifrs-full_BasicEarningsLossPerShare", "CIS", "bad-eps"),
+        ("dart_ProfitLossForStatementOfCashFlows", "CF", "bad-cf-recon"),
+    ]
+    storage.extra_financial_rows.extend(
+        [
+            _financial_row(
+                template,
+                account_id=account_id,
+                amount="111",
+                sj_div=sj_div,
+                ticker="000660",
+                corp_code="00164779",
+                rcept_no=rcept_no,
+            )
+            for account_id, sj_div, rcept_no in invalid_rows
+        ]
+    )
+
+    result = normalize_stock_metrics(
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        tickers=["000660"],
+    )
+
+    assert result.errors == {}
+    assert all(fact.metric_code != "net_income" for fact in storage.facts)
+
+
+def test_normalize_stock_metrics_deletes_stale_facts_for_inactive_rules() -> None:
+    storage = MockMetricStorage()
+    inactive_rule = (
+        "fin.controlling_net_income.ofs.is." "ifrs-full_ProfitLossAttributableToOwnersOfParent"
+    )
+    storage.inactive_rule_codes.add(inactive_rule)
+    storage.fact_by_key[("000660", "controlling_net_income", 2025, "11011")] = StockMetricFact(
+        ticker="000660",
+        market=Market.KOSPI,
+        corp_code="00164779",
+        metric_code="controlling_net_income",
+        period_type="annual",
+        period_end=date(2025, 12, 31),
+        bsns_year=2025,
+        reprt_code="11011",
+        fs_div="OFS",
+        value_numeric=Decimal("123"),
+        value_text="123",
+        unit="KRW",
+        source_table="dart_financial_statement_raw",
+        source_key="stale:parent:1",
+        mapping_rule_code=inactive_rule,
+        fetched_at=now_kst(),
+    )
+    storage.facts = list(storage.fact_by_key.values())
+
+    result = normalize_stock_metrics(
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        tickers=["000660"],
+    )
+
+    assert result.errors == {}
+    assert result.stale_facts_deleted == 1
+    assert all(fact.metric_code != "controlling_net_income" for fact in storage.facts)
+    assert storage.runs[-1].counts["stale_facts_deleted"] == 1

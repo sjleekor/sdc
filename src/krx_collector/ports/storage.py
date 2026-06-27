@@ -327,6 +327,15 @@ class Storage(Protocol):
         """Upsert normalized canonical metric facts."""
         ...
 
+    def delete_stock_metric_facts_for_inactive_rules(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        tickers: list[str],
+    ) -> int:
+        """Delete normalized facts in scope whose mapping rule is no longer active."""
+        ...
+
     def get_metric_catalog_entries(self) -> list[MetricCatalogEntry]:
         """Return active metric catalog entries."""
         ...
