@@ -1871,9 +1871,22 @@ def _handle_profile_all(args: argparse.Namespace) -> None:
     from krx_collector.service.profiling import catalog
 
     weights = _split_csv(args.weight) or ["full", "light"]
-    specs = catalog.specs_for_weights(weights)
+    roles = _split_csv(args.role)
+    if roles:
+        known_roles = catalog.known_roles()
+        unknown_roles = sorted({role.lower() for role in roles} - known_roles)
+        if unknown_roles:
+            print(
+                f"❌ Unknown profile role(s): {', '.join(unknown_roles)}. "
+                f"Known roles: {', '.join(sorted(known_roles))}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    specs = catalog.specs_for_weights_and_roles(weights, roles)
     if not specs:
-        print(f"❌ No catalog tables match weights: {weights}", file=sys.stderr)
+        role_text = roles if roles else "all"
+        print(f"❌ No catalog tables match weights={weights}, roles={role_text}", file=sys.stderr)
         sys.exit(1)
     _run_profile_specs(args, specs)
 
@@ -3082,11 +3095,19 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_profile_args(profile_table)
     profile_table.set_defaults(handler=_handle_profile_table)
 
-    profile_all = profile_sub.add_parser("all", help="Profile the whole catalog by weight.")
+    profile_all = profile_sub.add_parser("all", help="Profile the catalog by weight and role.")
     profile_all.add_argument(
         "--weight",
         default="full,light",
         help="Comma-separated weights to include (default: full,light).",
+    )
+    profile_all.add_argument(
+        "--role",
+        default=None,
+        help=(
+            "Comma-separated table roles to include: raw, derived, reference, operational "
+            "(default: all roles)."
+        ),
     )
     profile_all.add_argument(
         "--drilldown",

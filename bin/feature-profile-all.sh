@@ -25,6 +25,9 @@ Options:
   --out-dir DIR                Output root. Defaults to reports/feature_profiles.
   --run-key KEY                Run directory/id. Defaults to YYYYMMDD_HHMMSS_<target>.
   --weight full,light          Catalog weights to include. Defaults to full,light.
+  --role LIST                  Table roles to include (raw,derived,reference,operational).
+                               Defaults to raw: profiling inspects collected data, so
+                               only externally-sourced raw tables are profiled here.
   --formats LIST               Output formats. Defaults to ipynb,md,html,json,parquet.
   --sample-policy POLICY       auto, full, or sample. Defaults to auto.
   --sample-pct FLOAT           Override TABLESAMPLE percentage for expensive checks.
@@ -46,6 +49,7 @@ Environment overrides:
   SDC_FEATURE_PROFILE_OUT_DIR
   SDC_FEATURE_PROFILE_RUN_KEY
   SDC_FEATURE_PROFILE_WEIGHT
+  SDC_FEATURE_PROFILE_ROLE
   SDC_FEATURE_PROFILE_FORMATS
   SDC_FEATURE_PROFILE_SAMPLE_POLICY
   SDC_FEATURE_PROFILE_SAMPLE_PCT
@@ -87,6 +91,12 @@ target="${SDC_FEATURE_PROFILE_TARGET:-local}"
 out_dir="${SDC_FEATURE_PROFILE_OUT_DIR:-reports/feature_profiles}"
 run_key="${SDC_FEATURE_PROFILE_RUN_KEY:-}"
 weight="${SDC_FEATURE_PROFILE_WEIGHT:-full,light}"
+# Default to raw-only: profiling is for inspecting the data we *collect*, so the
+# automated wrapper scopes to externally-sourced raw tables. derived/reference/
+# operational tables (stock_metric_fact, *_catalog, ingestion_runs, ...) are
+# pipeline outputs, not collected data, so they are intentionally excluded here.
+# Pass --role / SDC_FEATURE_PROFILE_ROLE to widen (e.g. raw,derived) when needed.
+role="${SDC_FEATURE_PROFILE_ROLE:-raw}"
 formats="${SDC_FEATURE_PROFILE_FORMATS:-ipynb,md,html,json,parquet}"
 sample_policy="${SDC_FEATURE_PROFILE_SAMPLE_POLICY:-auto}"
 sample_pct="${SDC_FEATURE_PROFILE_SAMPLE_PCT:-}"
@@ -132,6 +142,14 @@ while (($#)); do
         exit 2
       fi
       weight="$2"
+      shift 2
+      ;;
+    --role)
+      if (($# < 2)); then
+        printf 'Missing value for --role\n' >&2
+        exit 2
+      fi
+      role="$2"
       shift 2
       ;;
     --formats)
@@ -248,6 +266,11 @@ if [[ -z "$weight" ]]; then
   exit 2
 fi
 
+if [[ -z "$role" ]]; then
+  printf 'Invalid role: must not be empty\n' >&2
+  exit 2
+fi
+
 if [[ -z "$formats" ]]; then
   printf 'Invalid formats: must not be empty\n' >&2
   exit 2
@@ -300,6 +323,7 @@ profile_all_args=(
   profile all
   --target "$target"
   --weight "$weight"
+  --role "$role"
   --formats "$formats"
   --out-dir "$out_dir"
   --run-id "$run_key"
@@ -322,7 +346,7 @@ if [[ -n "$sample_pct" ]]; then
 fi
 
 log "Full feature profiling starting in $app_dir"
-log "target=${target} run_key=${run_key} out_dir=${out_dir} formats=${formats}"
+log "target=${target} run_key=${run_key} out_dir=${out_dir} role=${role} formats=${formats}"
 
 run_command "${collector_cmd[@]}" "${profile_all_args[@]}"
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 from krx_collector.domain.profiling import (
     CostClass,
     ForeignKeyProfileSpec,
+    ProfileTableRole,
     ProfileWeight,
     SamplingPolicy,
     TableProfileSpec,
@@ -26,6 +27,7 @@ from krx_collector.domain.profiling import (
 DAILY_OHLCV = TableProfileSpec(
     table="daily_ohlcv",
     weight=ProfileWeight.FULL,
+    role=ProfileTableRole.RAW,
     entity_key="ticker",
     time_col="trade_date",
     natural_key=("trade_date", "ticker", "market"),
@@ -56,6 +58,7 @@ DAILY_OHLCV = TableProfileSpec(
 KRX_SECURITY_FLOW_RAW = TableProfileSpec(
     table="krx_security_flow_raw",
     weight=ProfileWeight.FULL,
+    role=ProfileTableRole.RAW,
     entity_key="ticker",
     time_col="trade_date",
     natural_key=("trade_date", "ticker", "market", "metric_code", "source"),
@@ -84,6 +87,7 @@ KRX_SECURITY_FLOW_RAW = TableProfileSpec(
 DART_XBRL_FACT_RAW = TableProfileSpec(
     table="dart_xbrl_fact_raw",
     weight=ProfileWeight.FULL,
+    role=ProfileTableRole.RAW,
     entity_key="corp_code",
     time_col="bsns_year",  # INT business-year axis (type-aware checks)
     natural_key=(
@@ -108,6 +112,7 @@ DART_XBRL_FACT_RAW = TableProfileSpec(
 DART_FINANCIAL_STATEMENT_RAW = TableProfileSpec(
     table="dart_financial_statement_raw",
     weight=ProfileWeight.FULL,
+    role=ProfileTableRole.RAW,
     entity_key="corp_code",
     time_col="bsns_year",
     natural_key=(
@@ -140,6 +145,7 @@ DART_FINANCIAL_STATEMENT_RAW = TableProfileSpec(
 STOCK_METRIC_FACT = TableProfileSpec(
     table="stock_metric_fact",
     weight=ProfileWeight.FULL,
+    role=ProfileTableRole.DERIVED,
     entity_key="ticker",
     time_col="bsns_year",
     natural_key=("ticker", "metric_code", "bsns_year", "reprt_code"),
@@ -168,6 +174,7 @@ STOCK_METRIC_FACT = TableProfileSpec(
 COMMON_FEATURE_DAILY_FACT = TableProfileSpec(
     table="common_feature_daily_fact",
     weight=ProfileWeight.FULL,
+    role=ProfileTableRole.DERIVED,
     entity_key="feature_code",
     time_col="feature_date",
     natural_key=("feature_date", "feature_code"),
@@ -193,6 +200,7 @@ COMMON_FEATURE_DAILY_FACT = TableProfileSpec(
 COMMON_FEATURE_OBSERVATION_RAW = TableProfileSpec(
     table="common_feature_observation_raw",
     weight=ProfileWeight.FULL,
+    role=ProfileTableRole.RAW,
     entity_key="series_id",
     time_col="observation_date",
     natural_key=(
@@ -231,6 +239,7 @@ COMMON_FEATURE_OBSERVATION_RAW = TableProfileSpec(
 COMMON_FEATURE_SERIES = TableProfileSpec(
     table="common_feature_series",
     weight=ProfileWeight.LIGHT,
+    role=ProfileTableRole.REFERENCE,
     natural_key=("series_id",),
     category_cols=("source", "category", "frequency", "active", "availability_policy"),
     null_cols=("history_start_date", "default_transform", "unit"),
@@ -243,6 +252,7 @@ COMMON_FEATURE_SERIES = TableProfileSpec(
 COMMON_FEATURE_CATALOG = TableProfileSpec(
     table="common_feature_catalog",
     weight=ProfileWeight.LIGHT,
+    role=ProfileTableRole.REFERENCE,
     natural_key=("feature_code",),
     category_cols=("category", "frequency", "active"),
     ingest_col="updated_at",
@@ -254,6 +264,7 @@ COMMON_FEATURE_CATALOG = TableProfileSpec(
 COMMON_FEATURE_CATALOG_INPUT = TableProfileSpec(
     table="common_feature_catalog_input",
     weight=ProfileWeight.LIGHT,
+    role=ProfileTableRole.REFERENCE,
     entity_key="feature_code",
     natural_key=("feature_code", "series_id", "role"),
     category_cols=("role",),
@@ -280,6 +291,7 @@ COMMON_FEATURE_CATALOG_INPUT = TableProfileSpec(
 DART_SHAREHOLDER_RETURN_RAW = TableProfileSpec(
     table="dart_shareholder_return_raw",
     weight=ProfileWeight.FULL,
+    role=ProfileTableRole.RAW,
     entity_key="corp_code",
     time_col="bsns_year",
     natural_key=(
@@ -309,6 +321,7 @@ DART_SHAREHOLDER_RETURN_RAW = TableProfileSpec(
 DART_SHARE_COUNT_RAW = TableProfileSpec(
     table="dart_share_count_raw",
     weight=ProfileWeight.FULL,
+    role=ProfileTableRole.RAW,
     entity_key="corp_code",
     time_col="bsns_year",
     natural_key=("corp_code", "bsns_year", "reprt_code", "se", "rcept_no"),
@@ -325,6 +338,7 @@ DART_SHARE_COUNT_RAW = TableProfileSpec(
 DART_XBRL_DOCUMENT = TableProfileSpec(
     table="dart_xbrl_document",
     weight=ProfileWeight.FULL,
+    role=ProfileTableRole.RAW,
     entity_key="corp_code",
     time_col="bsns_year",
     natural_key=("corp_code", "bsns_year", "reprt_code", "rcept_no"),
@@ -340,6 +354,7 @@ DART_XBRL_DOCUMENT = TableProfileSpec(
 DART_CORP_MASTER = TableProfileSpec(
     table="dart_corp_master",
     weight=ProfileWeight.LIGHT,
+    role=ProfileTableRole.RAW,
     natural_key=("corp_code",),
     category_cols=("market", "is_active", "source"),
     null_cols=("ticker", "market", "stock_name", "modify_date"),
@@ -352,6 +367,7 @@ DART_CORP_MASTER = TableProfileSpec(
 STOCK_MASTER = TableProfileSpec(
     table="stock_master",
     weight=ProfileWeight.LIGHT,
+    role=ProfileTableRole.RAW,
     entity_key="ticker",
     natural_key=("ticker", "market"),
     category_cols=("market", "status", "source"),
@@ -365,6 +381,7 @@ STOCK_MASTER = TableProfileSpec(
 STOCK_MASTER_SNAPSHOT = TableProfileSpec(
     table="stock_master_snapshot",
     weight=ProfileWeight.LIGHT,
+    role=ProfileTableRole.RAW,
     time_col="as_of_date",
     natural_key=("snapshot_id",),
     numeric_cols=("record_count",),
@@ -378,6 +395,7 @@ STOCK_MASTER_SNAPSHOT = TableProfileSpec(
 STOCK_MASTER_SNAPSHOT_ITEMS = TableProfileSpec(
     table="stock_master_snapshot_items",
     weight=ProfileWeight.LIGHT,
+    role=ProfileTableRole.RAW,
     entity_key="ticker",
     natural_key=("snapshot_id", "ticker", "market"),
     category_cols=("market", "status"),
@@ -390,6 +408,7 @@ STOCK_MASTER_SNAPSHOT_ITEMS = TableProfileSpec(
 METRIC_CATALOG = TableProfileSpec(
     table="metric_catalog",
     weight=ProfileWeight.LIGHT,
+    role=ProfileTableRole.REFERENCE,
     natural_key=("metric_code",),
     category_cols=("category", "unit", "is_active"),
     ingest_col="updated_at",
@@ -401,6 +420,7 @@ METRIC_CATALOG = TableProfileSpec(
 METRIC_MAPPING_RULE = TableProfileSpec(
     table="metric_mapping_rule",
     weight=ProfileWeight.LIGHT,
+    role=ProfileTableRole.REFERENCE,
     natural_key=("rule_code",),
     category_cols=("source_table", "statement_type", "fs_div", "sj_div", "is_active"),
     top_n_cols=("metric_code",),
@@ -419,6 +439,7 @@ METRIC_MAPPING_RULE = TableProfileSpec(
 INGESTION_RUNS = TableProfileSpec(
     table="ingestion_runs",
     weight=ProfileWeight.LIGHT,
+    role=ProfileTableRole.OPERATIONAL,
     time_col="started_at",
     natural_key=("run_id",),
     category_cols=("run_type", "status"),
@@ -431,6 +452,7 @@ INGESTION_RUNS = TableProfileSpec(
 SYNC_CHECKPOINTS = TableProfileSpec(
     table="sync_checkpoints",
     weight=ProfileWeight.LIGHT,
+    role=ProfileTableRole.OPERATIONAL,
     natural_key=("sync_name",),
     null_cols=("cursor_payload",),
     ingest_col="updated_at",
@@ -444,6 +466,7 @@ SYNC_CHECKPOINTS = TableProfileSpec(
 OPERATING_METRIC_FACT = TableProfileSpec(
     table="operating_metric_fact",
     weight=ProfileWeight.LIGHT,
+    role=ProfileTableRole.OPERATIONAL,
     entity_key="ticker",
     time_col="period_end",
     natural_key=("ticker", "metric_code", "period_end", "document_key", "extractor_code"),
@@ -465,6 +488,7 @@ OPERATING_METRIC_FACT = TableProfileSpec(
 OPERATING_SOURCE_DOCUMENT = TableProfileSpec(
     table="operating_source_document",
     weight=ProfileWeight.LIGHT,
+    role=ProfileTableRole.OPERATIONAL,
     entity_key="ticker",
     time_col="document_date",
     natural_key=("document_key",),
@@ -530,6 +554,32 @@ def specs_for_weights(weights: list[str]) -> list[TableProfileSpec]:
     """Return specs whose weight is in ``weights`` (catalog order preserved)."""
     wanted = {w.strip().lower() for w in weights if w.strip()}
     return [spec for spec in _CATALOG if spec.weight.value in wanted]
+
+
+def specs_for_roles(roles: list[str]) -> list[TableProfileSpec]:
+    """Return specs whose logical role is in ``roles`` (catalog order preserved)."""
+    wanted = {r.strip().lower() for r in roles if r.strip()}
+    return [spec for spec in _CATALOG if spec.role.value in wanted]
+
+
+def specs_for_weights_and_roles(
+    weights: list[str],
+    roles: list[str] | None = None,
+) -> list[TableProfileSpec]:
+    """Return specs matching both weight and optional role filters."""
+    wanted_weights = {w.strip().lower() for w in weights if w.strip()}
+    wanted_roles = None if roles is None else {r.strip().lower() for r in roles if r.strip()}
+    return [
+        spec
+        for spec in _CATALOG
+        if spec.weight.value in wanted_weights
+        and (wanted_roles is None or spec.role.value in wanted_roles)
+    ]
+
+
+def known_roles() -> frozenset[str]:
+    """Return supported table-role labels."""
+    return frozenset(role.value for role in ProfileTableRole)
 
 
 def known_tables() -> frozenset[str]:

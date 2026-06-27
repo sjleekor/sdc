@@ -50,6 +50,15 @@ class ProfileWeight(StrEnum):
     LIGHT = "light"
 
 
+class ProfileTableRole(StrEnum):
+    """Logical table role used to scope profiling runs by data provenance."""
+
+    RAW = "raw"
+    DERIVED = "derived"
+    REFERENCE = "reference"
+    OPERATIONAL = "operational"
+
+
 class CostClass(StrEnum):
     """Query cost class — drives the sampling/timeout policy."""
 
@@ -104,6 +113,10 @@ class TableProfileSpec:
     Attributes:
         table: Physical table name (must exist in the schema whitelist).
         weight: ``full`` or ``light`` — scopes ``profile all`` runs.
+        role: Logical table role. ``raw`` means externally collected/source
+            rows, ``derived`` means processed model-facing facts, ``reference``
+            means catalogs/metadata, and ``operational`` means run-control or
+            operational-domain tables.
         entity_key: Entity column (e.g. ``ticker``) or ``None``.
         time_col: Primary time axis column or ``None``.
         natural_key: Columns forming the natural key, for duplicate checks.
@@ -125,6 +138,7 @@ class TableProfileSpec:
 
     table: str
     weight: ProfileWeight = ProfileWeight.FULL
+    role: ProfileTableRole = ProfileTableRole.RAW
     entity_key: str | None = None
     time_col: str | None = None
     natural_key: tuple[str, ...] = ()

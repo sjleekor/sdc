@@ -17,6 +17,7 @@ from krx_collector.domain.profiling import (
     CheckResult,
     ColumnInfo,
     ProfileResult,
+    ProfileTableRole,
     RunManifest,
     SamplePolicy,
     TablePreflight,
@@ -95,6 +96,38 @@ def test_catalog_specs_for_weights_filters():
     full = catalog.specs_for_weights(["full"])
     assert all(s.weight.value == "full" for s in full)
     assert catalog.specs_for_weights(["nonsense"]) == []
+
+
+def test_catalog_specs_for_roles_filters_raw_source_tables():
+    raw = {s.table for s in catalog.specs_for_roles(["raw"])}
+
+    assert "daily_ohlcv" in raw
+    assert "krx_security_flow_raw" in raw
+    assert "common_feature_observation_raw" in raw
+    assert "dart_financial_statement_raw" in raw
+    assert "stock_metric_fact" not in raw
+    assert "common_feature_daily_fact" not in raw
+    assert "ingestion_runs" not in raw
+
+
+def test_catalog_roles_cover_raw_derived_reference_operational():
+    roles = {spec.role for spec in catalog.all_specs()}
+
+    assert roles == {
+        ProfileTableRole.RAW,
+        ProfileTableRole.DERIVED,
+        ProfileTableRole.REFERENCE,
+        ProfileTableRole.OPERATIONAL,
+    }
+
+
+def test_catalog_weight_and_role_filter_combines_predicates():
+    raw_light = {s.table for s in catalog.specs_for_weights_and_roles(["light"], ["raw"])}
+
+    assert "stock_master" in raw_light
+    assert "dart_corp_master" in raw_light
+    assert "metric_catalog" not in raw_light
+    assert "daily_ohlcv" not in raw_light
 
 
 # ---------------------------------------------------------------------------

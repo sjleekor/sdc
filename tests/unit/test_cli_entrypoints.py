@@ -67,6 +67,46 @@ def test_db_sync_remote_parser_leaves_ssh_compression_unset_by_default() -> None
     assert args.ssh_compression is None
 
 
+def test_profile_all_parser_supports_role_filter() -> None:
+    args = app.build_parser().parse_args(
+        ["profile", "all", "--role", "raw", "--weight", "full,light"]
+    )
+
+    assert args.command == "profile"
+    assert args.profile_command == "all"
+    assert args.role == "raw"
+    assert args.weight == "full,light"
+    assert args.handler == app._handle_profile_all
+
+
+def test_profile_all_handler_filters_by_raw_role(monkeypatch) -> None:
+    captured = {}
+
+    def fake_run_profile_specs(args, specs):
+        captured["tables"] = [spec.table for spec in specs]
+
+    monkeypatch.setattr(app, "_run_profile_specs", fake_run_profile_specs)
+    args = app.build_parser().parse_args(["profile", "all", "--role", "raw"])
+
+    args.handler(args)
+
+    assert "daily_ohlcv" in captured["tables"]
+    assert "krx_security_flow_raw" in captured["tables"]
+    assert "common_feature_observation_raw" in captured["tables"]
+    assert "stock_metric_fact" not in captured["tables"]
+    assert "common_feature_daily_fact" not in captured["tables"]
+    assert "ingestion_runs" not in captured["tables"]
+
+
+def test_profile_all_handler_rejects_unknown_role() -> None:
+    args = app.build_parser().parse_args(["profile", "all", "--role", "mystery"])
+
+    with pytest.raises(SystemExit) as exc:
+        args.handler(args)
+
+    assert exc.value.code == 1
+
+
 def test_common_seed_catalog_parser_supports_init_schema() -> None:
     args = app.build_parser().parse_args(["common", "seed-catalog", "--init-schema"])
 
