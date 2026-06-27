@@ -53,3 +53,6 @@ data_lake/
 data/datasets/
 # Model prediction outputs (top-k buy lists)
 data/predictions/
+
+# Research / analysis code & artifacts (local-only, not part of the deployed pipeline)
+research/
