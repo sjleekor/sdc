@@ -14,19 +14,31 @@ import polars as pl
 import pytest
 from research.etl.config import EngineOptions, LakeConfig
 from research.etl.features import fin_pit
-from research.etl.lake import connect, register_views
+from research.etl.lake import connect, register_derived_marts, register_views
 from research.etl.universe import UniverseFilter, build_universe_sql
 from research.models._01_20_access_return_rank import build_dataset as bd
 from research.models._01_20_access_return_rank.spec import ModelSpec
+
+# Raw inputs the stock_metric_fact mart needs (refactor §3.3): the fact is now
+# recomputed from raw, not read from the canonical lake.
+_SMF_RAW_INPUTS = [
+    "daily_ohlcv",
+    "dart_financial_statement_raw",
+    "dart_share_count_raw",
+    "dart_shareholder_return_raw",
+    "dart_xbrl_fact_raw",
+    "dart_corp_master",
+]
 
 
 @pytest.fixture()
 def fin_con():
     cfg = LakeConfig(engine=EngineOptions(threads=4, memory_limit="4GB"))
-    if not cfg.canonical_root.exists():
-        pytest.skip(f"canonical lake not present at {cfg.canonical_root}")
+    if not cfg.raw_root.exists():
+        pytest.skip(f"raw lake not present at {cfg.raw_root}")
     con = connect(cfg)
-    register_views(con, cfg, tables=["daily_ohlcv", "stock_metric_fact"])
+    register_views(con, cfg, tables=_SMF_RAW_INPUTS)
+    register_derived_marts(con, cfg, which=["stock_metric_fact"])
     con.execute(f"CREATE VIEW dim_universe_daily AS {build_universe_sql(UniverseFilter())}")
     con.execute(f"CREATE VIEW feat_fin_pit AS {fin_pit.build_fin_pit_sql()}")
     return con
@@ -64,8 +76,8 @@ def test_no_lookahead_available_from(fin_con) -> None:
 @pytest.fixture()
 def fin_built(tmp_path: Path):
     cfg = LakeConfig(datasets_root=tmp_path, engine=EngineOptions(threads=4, memory_limit="4GB"))
-    if not cfg.canonical_root.exists():
-        pytest.skip("canonical lake not present")
+    if not cfg.raw_root.exists():
+        pytest.skip("raw lake not present")
     base = ModelSpec(period_start="2024-01-01", period_end="2024-12-31", n_folds=2)
     spec = dataclasses.replace(base, feature_groups=("px", "flow", "fin"))
     res = bd.build_dataset(spec, cfg, created_at="x", write=True)

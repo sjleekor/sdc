@@ -110,12 +110,13 @@ def test_catalog_specs_for_roles_filters_raw_source_tables():
     assert "ingestion_runs" not in raw
 
 
-def test_catalog_roles_cover_raw_derived_reference_operational():
+def test_catalog_roles_cover_raw_reference_operational():
+    # Derived/operating tables were decommissioned (refactor §5); the profiler
+    # now covers only raw + reference (config) + operational (audit) roles.
     roles = {spec.role for spec in catalog.all_specs()}
 
     assert roles == {
         ProfileTableRole.RAW,
-        ProfileTableRole.DERIVED,
         ProfileTableRole.REFERENCE,
         ProfileTableRole.OPERATIONAL,
     }
@@ -411,11 +412,12 @@ def test_catalog_includes_all_m1_tables():
     for table in (
         "daily_ohlcv",
         "krx_security_flow_raw",
-        "stock_metric_fact",
         "dart_financial_statement_raw",
         "dart_xbrl_fact_raw",
     ):
         assert table in known, table
+    # decommissioned (recomputed by the DuckDB marts).
+    assert "stock_metric_fact" not in known
 
 
 def test_catalog_domain_checks_are_all_registered():
@@ -437,7 +439,7 @@ def test_large_specs_are_expensive_and_sampled():
 
 def test_long_format_specs_declare_drilldown():
     assert catalog.get_spec("krx_security_flow_raw").drilldown_dim == "metric_code"
-    assert catalog.get_spec("stock_metric_fact").drilldown_dim == "metric_code"
+    assert catalog.get_spec("dart_shareholder_return_raw").drilldown_dim == "metric_code"
 
 
 def test_year_int_columns_detected_as_year_axis():
@@ -455,7 +457,7 @@ def test_year_int_columns_detected_as_year_axis():
 
 
 def test_dart_specs_use_year_int_time_axis():
-    for table in ("dart_xbrl_fact_raw", "dart_financial_statement_raw", "stock_metric_fact"):
+    for table in ("dart_xbrl_fact_raw", "dart_financial_statement_raw"):
         assert catalog.get_spec(table).time_col == "bsns_year"
 
 
@@ -464,23 +466,18 @@ def test_dart_specs_use_year_int_time_axis():
 # ---------------------------------------------------------------------------
 
 
-def test_catalog_includes_all_common_feature_tables():
+def test_catalog_includes_kept_common_feature_tables():
+    # Decision 7: only the raw observations + the shared series config remain
+    # Postgres tables; the daily fact + catalog(_input) moved to marts/code.
     known = catalog.known_tables()
-    for table in (
+    for table in ("common_feature_observation_raw", "common_feature_series"):
+        assert table in known, table
+    for dropped in (
         "common_feature_daily_fact",
-        "common_feature_observation_raw",
-        "common_feature_series",
         "common_feature_catalog",
         "common_feature_catalog_input",
     ):
-        assert table in known, table
-
-
-def test_daily_fact_pit_pair_guards_lookahead():
-    spec = catalog.get_spec("common_feature_daily_fact")
-    assert spec.pit_pairs == (("asof_available_date", "feature_date"),)
-    assert CheckKind.PIT_VALIDITY in applicable_checks(spec)
-    assert spec.drilldown_dim == "feature_code"
+        assert dropped not in known, dropped
 
 
 def test_observation_raw_pit_pair_guards_vintage():
@@ -495,17 +492,13 @@ def test_pit_validity_skipped_without_pairs():
 
 
 def test_common_feature_master_tables_are_light():
-    for table in (
-        "common_feature_series",
-        "common_feature_catalog",
-        "common_feature_catalog_input",
-    ):
-        assert catalog.get_spec(table).weight.value == "light"
+    # Only the kept series config remains a light reference table.
+    assert catalog.get_spec("common_feature_series").weight.value == "light"
 
 
 def test_light_weight_filter_selects_master_tables():
     light = {s.table for s in catalog.specs_for_weights(["light"])}
-    assert "common_feature_catalog" in light
+    assert "common_feature_series" in light
     assert "daily_ohlcv" not in light  # full-weight
 
 
@@ -526,9 +519,10 @@ def test_catalog_covers_all_pipeline_tables():
         assert table in known, f"{table} missing from profile catalog"
 
 
-def test_operating_tables_present_for_skip_empty():
+def test_operating_tables_decommissioned():
+    # operating pilot dropped (refactor §5, decision 5) — no longer profiled.
     for table in ("operating_metric_fact", "operating_source_document"):
-        assert table in catalog.known_tables()
+        assert table not in catalog.known_tables()
 
 
 def _drift(baseline_tables: dict, candidate_tables: dict):

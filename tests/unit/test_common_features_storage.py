@@ -25,14 +25,15 @@ def _normalized_ddl() -> str:
 def test_common_feature_tables_are_declared_in_postgres_ddl() -> None:
     ddl = _normalized_ddl()
 
+    # Decision 7 / refactor §5: only the raw observations + the shared series
+    # config remain Postgres tables. The catalog(_input) + daily fact were
+    # decommissioned (catalog -> code, daily fact -> DuckDB mart).
     assert "CREATE TABLE IF NOT EXISTS common_feature_series" in ddl
     assert "CREATE TABLE IF NOT EXISTS common_feature_observation_raw" in ddl
-    assert "CREATE TABLE IF NOT EXISTS common_feature_catalog" in ddl
-    assert "CREATE TABLE IF NOT EXISTS common_feature_catalog_input" in ddl
-    assert "CREATE TABLE IF NOT EXISTS common_feature_daily_fact" in ddl
+    assert "CREATE TABLE IF NOT EXISTS common_feature_catalog" not in ddl
+    assert "CREATE TABLE IF NOT EXISTS common_feature_daily_fact" not in ddl
     assert "UNIQUE NULLS NOT DISTINCT" in ddl
     assert "REFERENCES common_feature_series(series_id)" in ddl
-    assert "PRIMARY KEY (feature_date, feature_code)" in ddl
 
 
 def test_common_feature_empty_upserts_do_not_connect() -> None:

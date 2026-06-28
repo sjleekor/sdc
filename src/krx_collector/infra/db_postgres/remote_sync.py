@@ -108,31 +108,21 @@ PIPELINE_FULL_REFRESH_TABLE_NAMES: tuple[str, ...] = (
     "dart_shareholder_return_raw",
     "dart_xbrl_document",
     "dart_xbrl_fact_raw",
-    "metric_catalog",
-    "metric_mapping_rule",
-    "stock_metric_fact",
-    # model-facing common feature layer
+    # model-facing common feature layer. Only the raw observations + the shared
+    # series config are mirrored; the derived facts (stock_metric_fact,
+    # common_feature_daily_fact) and the compute-only catalog/rule tables are no
+    # longer mirrored — the DuckDB marts recompute them from raw (refactor §5.2,
+    # decision 7). common_feature_series is kept (collector + compute share it).
     "common_feature_series",
     "common_feature_observation_raw",
-    "common_feature_catalog",
-    "common_feature_catalog_input",
-    "common_feature_daily_fact",
 )
 PIPELINE_FULL_REFRESH_TABLES: tuple[DatabaseTable, ...] = tuple(
-    DatabaseTable(schema=PUBLIC_SCHEMA, name=name)
-    for name in PIPELINE_FULL_REFRESH_TABLE_NAMES
+    DatabaseTable(schema=PUBLIC_SCHEMA, name=name) for name in PIPELINE_FULL_REFRESH_TABLE_NAMES
 )
 
 SYNC_TABLE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "stock_master_snapshot_items": ("stock_master_snapshot",),
-    "metric_mapping_rule": ("metric_catalog",),
-    "stock_metric_fact": ("metric_catalog", "metric_mapping_rule"),
     "common_feature_observation_raw": ("common_feature_series",),
-    "common_feature_catalog_input": (
-        "common_feature_catalog",
-        "common_feature_series",
-    ),
-    "common_feature_daily_fact": ("common_feature_catalog",),
 }
 
 
@@ -1049,9 +1039,7 @@ def reset_local_public_tables(
             )
             existing_names = {row[0] for row in cur.fetchall()}
 
-            tables_to_drop = tuple(
-                table for table in target_tables if table.name in existing_names
-            )
+            tables_to_drop = tuple(table for table in target_tables if table.name in existing_names)
             if tables_to_drop:
                 table_list = sql.SQL(", ").join(
                     _table_identifier(table) for table in tables_to_drop
@@ -1239,10 +1227,15 @@ def validate_remote_sync_options(
 
 
 def _select_sync_specs(table_names: tuple[str, ...] | None) -> tuple[TableSyncSpec, ...]:
-    """Resolve requested table names to ordered sync specs with FK parents included."""
+    """Resolve requested table names to ordered sync specs with FK parents included.
+
+    The default ("all") set is the mirror list ``PIPELINE_FULL_REFRESH_TABLE_NAMES``,
+    not every spec: the specs for the decommissioned derived/catalog tables remain
+    defined (harmless) but are no longer mirrored (refactor §5.2, decision 7).
+    """
     specs_by_name = {spec.name: spec for spec in SYNC_TABLE_SPECS}
     if table_names is None:
-        selected_names = set(specs_by_name)
+        selected_names = set(PIPELINE_FULL_REFRESH_TABLE_NAMES)
     else:
         requested = tuple(dict.fromkeys(name.strip() for name in table_names if name.strip()))
         unknown = sorted(name for name in requested if name not in specs_by_name)
@@ -1285,9 +1278,7 @@ def _database_tables_for_specs(specs: tuple[TableSyncSpec, ...]) -> tuple[Databa
     return tuple(DatabaseTable(schema=PUBLIC_SCHEMA, name=spec.name) for spec in specs)
 
 
-def _sync_pipeline_public_tables_to_local(
-    *, remote_conn: Any, local_conn: Any
-) -> dict[str, int]:
+def _sync_pipeline_public_tables_to_local(*, remote_conn: Any, local_conn: Any) -> dict[str, int]:
     """Replace selected local pipeline tables with the matching remote table data."""
     _prepare_local_full_refresh_session(local_conn)
 
@@ -1554,9 +1545,7 @@ def _sort_tables_by_fk_dependencies(
         ready.sort(key=_table_sort_key)
 
     if len(ordered) != len(tables):
-        cyclic_tables = sorted(
-            table.display_name for table in tables if table not in set(ordered)
-        )
+        cyclic_tables = sorted(table.display_name for table in tables if table not in set(ordered))
         raise ValueError(
             "Cannot determine full database copy order due to cyclic foreign keys: "
             + ", ".join(cyclic_tables)
@@ -2223,8 +2212,7 @@ def _get_staging_cursor(
     order_columns = ", ".join(spec.order_columns)
     with local_conn.cursor() as cur:
         cur.execute(
-            f"SELECT {order_columns} FROM {stage_table} "
-            f"ORDER BY {order_columns} DESC LIMIT 1"
+            f"SELECT {order_columns} FROM {stage_table} " f"ORDER BY {order_columns} DESC LIMIT 1"
         )
         row = cur.fetchone()
 

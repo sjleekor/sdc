@@ -106,6 +106,17 @@ output_partitions = ["source"]
 order_by = ["series_id", "observation_date", "vintage"]
 jsonb_columns = ["raw_payload"]
 
+# Decision 7 (refactor §3.3 step 0): the one config table both the collector and
+# the DuckDB common-build mart read. Exported to the raw lake so compute reads the
+# same rows sj2 seeded — no series/catalog drift branch.
+[[tables]]
+name = "common_feature_series"
+priority = "P2"
+extract_strategy = "full_table"
+output_partitions = []
+order_by = ["series_id"]
+jsonb_columns = ["endpoint_params"]
+
 [[tables]]
 name = "operating_source_document"
 priority = "P2"

@@ -44,6 +44,7 @@ read -r -a compose <<< "$compose_cmd"
 
 log "OpenDART backfill starting in $app_dir"
 log "Range: ${end_year} down to ${start_year}; reprt_codes=${reprt_codes}; fs_divs=${fs_divs}"
+log "This script collects OpenDART raw only; derived metric marts are recomputed by bin/parquet-compute-all.sh"
 
 if [[ "$pull_image" == "1" ]]; then
   log "Pulling collector image"
@@ -70,10 +71,6 @@ for year in $(seq "$end_year" -1 "$start_year"); do
     --bsns-years "$year" \
     --reprt-codes "$reprt_codes"
 
-  log "Normalizing metrics for ${year}"
-  "${compose[@]}" run --rm "$collector_service" metrics normalize \
-    --bsns-years "$year" \
-    --reprt-codes "$reprt_codes"
 done
 
-log "OpenDART backfill completed"
+log "OpenDART backfill completed; run bin/parquet-compute-all.sh when derived marts are needed"

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from research.etl.config import (
     CANONICAL_TABLES,
+    CONFIG_TABLES,
     RAW_TABLES,
     EngineOptions,
     LakeConfig,
@@ -23,6 +24,9 @@ def test_lake_roots_follow_exporter_layout() -> None:
     assert cfg.canonical_root == Path(
         "/lake/canonical_postgres/snapshot_date=2026-06-19/source=local_mydb"
     )
+    assert cfg.derived_mart_root == Path(
+        "/lake/derived_mart/snapshot_date=2026-06-19/source=local_mydb"
+    )
 
 
 def test_table_glob_routes_raw_vs_canonical() -> None:
@@ -30,6 +34,12 @@ def test_table_glob_routes_raw_vs_canonical() -> None:
     assert cfg.table_glob("daily_ohlcv").startswith(str(cfg.raw_root))
     assert cfg.table_glob("stock_metric_fact").startswith(str(cfg.canonical_root))
     assert cfg.table_glob("daily_ohlcv").endswith("/daily_ohlcv/**/*.parquet")
+
+
+def test_table_glob_routes_config_to_raw_root() -> None:
+    # Decision 7: common_feature_series lives under the raw lake root.
+    cfg = LakeConfig(data_lake_root=Path("/lake"))
+    assert cfg.table_glob("common_feature_series").startswith(str(cfg.raw_root))
 
 
 def test_table_glob_unknown_raises() -> None:
@@ -40,7 +50,9 @@ def test_table_glob_unknown_raises() -> None:
 
 def test_table_sets_disjoint_and_expected_counts() -> None:
     assert set(RAW_TABLES).isdisjoint(CANONICAL_TABLES)
+    assert set(RAW_TABLES).isdisjoint(CONFIG_TABLES)
     assert len(RAW_TABLES) == 12  # 13th (operating_source_document) is schema-only
+    assert CONFIG_TABLES == ("common_feature_series",)
     assert len(CANONICAL_TABLES) == 5
 
 

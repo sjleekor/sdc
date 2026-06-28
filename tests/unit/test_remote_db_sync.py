@@ -121,14 +121,20 @@ def test_service_validates_before_full_refresh_reset(monkeypatch, tmp_path: Path
 
 def test_managed_mirror_tables_exclude_local_audit_tables() -> None:
     pipeline_names = [table.name for table in PIPELINE_FULL_REFRESH_TABLES]
-    spec_names = [spec.name for spec in SYNC_TABLE_SPECS]
+    spec_names = {spec.name for spec in SYNC_TABLE_SPECS}
 
-    assert len(pipeline_names) == 19
-    assert pipeline_names == spec_names
+    # The mirror only carries raw + the shared common_feature_series config now;
+    # the derived/catalog tables are recomputed by the DuckDB marts (refactor §5.2).
+    assert len(pipeline_names) == 13
+    assert set(pipeline_names).issubset(spec_names)  # every mirrored table has a spec
     assert "ingestion_runs" not in pipeline_names
     assert "sync_checkpoints" not in pipeline_names
     assert "krx_security_flow_raw" in pipeline_names
-    assert "common_feature_daily_fact" in pipeline_names
+    assert "common_feature_series" in pipeline_names
+    # decommissioned -> no longer mirrored.
+    assert "stock_metric_fact" not in pipeline_names
+    assert "common_feature_daily_fact" not in pipeline_names
+    assert "metric_catalog" not in pipeline_names
 
 
 def test_security_flow_raw_uses_update_aware_incremental_cursor() -> None:
@@ -143,16 +149,13 @@ def test_security_flow_raw_uses_update_aware_incremental_cursor() -> None:
 
 
 def test_partial_sync_includes_fk_dependency_closure() -> None:
-    selected_names = [
-        spec.name for spec in _select_sync_specs(("stock_metric_fact", "common_feature_daily_fact"))
-    ]
+    # common_feature_observation_raw FK-depends on common_feature_series, so a
+    # partial sync of the observations pulls the series config first.
+    selected_names = [spec.name for spec in _select_sync_specs(("common_feature_observation_raw",))]
 
     assert selected_names == [
-        "metric_catalog",
-        "metric_mapping_rule",
-        "stock_metric_fact",
-        "common_feature_catalog",
-        "common_feature_daily_fact",
+        "common_feature_series",
+        "common_feature_observation_raw",
     ]
 
 

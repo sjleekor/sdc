@@ -162,12 +162,16 @@ def sync_common_features(
                 continue
 
             skip_existing_coverage = not incremental or lookback_days == 0
-            if skip_existing_coverage and not force and _has_existing_coverage(
-                storage=storage,
-                series=series,
-                start=effective_start,
-                end=end,
-                krx_trading_days=calendar,
+            if (
+                skip_existing_coverage
+                and not force
+                and _has_existing_coverage(
+                    storage=storage,
+                    series=series,
+                    start=effective_start,
+                    end=end,
+                    krx_trading_days=calendar,
+                )
             ):
                 result.requests_skipped += 1
                 logger.info(

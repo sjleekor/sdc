@@ -46,6 +46,7 @@ run_backfill() {
   sdc_log "app_dir=$SDC_APP_DIR"
   sdc_log "range=${end_year}..${start_year} reprt_codes=$reprt_codes fs_divs=$fs_divs"
   sdc_log "exclusive=${SDC_DART_BACKFILL_EXCLUSIVE:-1}"
+  sdc_log "mode=raw-only; derived metric marts are recomputed by bin/parquet-compute-all.sh"
 
   if [[ "$pull_image" == "1" ]]; then
     sdc_cd_app
@@ -74,13 +75,9 @@ run_backfill() {
       --bsns-years "$year" \
       --reprt-codes "$reprt_codes"
 
-    sdc_log "Normalizing metrics for ${year}"
-    sdc_run_collector metrics normalize \
-      --bsns-years "$year" \
-      --reprt-codes "$reprt_codes"
   done
 
-  sdc_log "OpenDART backfill completed"
+  sdc_log "OpenDART backfill completed; run bin/parquet-compute-all.sh when derived marts are needed"
 }
 
 if [[ "${SDC_DART_BACKFILL_EXCLUSIVE:-1}" == "1" ]]; then

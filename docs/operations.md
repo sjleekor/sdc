@@ -99,7 +99,7 @@ uv run krx-collector validate
 uv run krx-collector db init
 ```
 
-### 계정/수급/사업 KPI 파이프라인 실행
+### 계정/수급 raw 파이프라인 실행
 
 ```bash
 # 1) OpenDART corp_code 마스터 동기화
@@ -114,24 +114,11 @@ uv run krx-collector dart sync-share-info --tickers 005930 --bsns-years 2025 --r
 # 4) XBRL 원문 파싱
 uv run krx-collector dart sync-xbrl --tickers 005930 --bsns-years 2025 --reprt-codes 11011
 
-# 5) canonical metric 정규화
-uv run krx-collector metrics normalize --tickers 005930 --bsns-years 2025 --reprt-codes 11011
-
-# 6) 수급 raw 적재 (KRX MDC 직접 호출)
+# 5) 수급 raw 적재 (KRX MDC 직접 호출)
 uv run krx-collector flows sync --tickers 005930 --start 2026-04-17 --end 2026-04-17
-
-# 7) 사업 KPI 파일럿 문서 처리
-uv run krx-collector operating process-document \
-  --ticker 009540 \
-  --market KOSPI \
-  --sector-key shipbuilding_defense \
-  --document-type manual_text \
-  --title "조선 방산 수주 샘플" \
-  --document-date 2026-04-19 \
-  --period-end 2025-12-31 \
-  --source-system LOCAL \
-  --text-file tests/fixtures/operating/shipbuilding_defense_sample.txt
 ```
+
+재무 metric 정규화와 common daily fact 생성은 PostgreSQL CLI가 아니라 아래 "Parquet compute 파이프라인"에서 DuckDB 마트로 실행합니다.
 
 ### OpenDART 전체 사업연도 백필
 
@@ -158,7 +145,7 @@ uv run krx-collector operating process-document \
 - 종료연도: 현재연도 - 1
 - 보고서 코드: `11011,11012,11013,11014`
 - 재무제표 구분: `CFS,OFS`
-- 처리 순서: 최신 연도부터 `dart sync-financials`, `dart sync-share-info`, `dart sync-xbrl`, `metrics normalize`
+- 처리 순서: 최신 연도부터 `dart sync-financials`, `dart sync-share-info`, `dart sync-xbrl` raw 적재
 
 필요하면 Cronicle 이벤트 환경 변수로 범위를 좁힙니다.
 
@@ -189,9 +176,9 @@ FLOW_START=2026-05-01 FLOW_END=2026-05-31 /home/whi/apps/sdc/bin/flows-backfill-
 
 `flows-backfill-range.sh`는 `krx_marketdata` source lock을 유지하지만, daily KRX wrapper는 기본값에서 source lock을 잡지 않습니다. 따라서 daily event disable이 daily-backfill overlap을 막는 1차 방어선입니다. 자동 schedule guard는 아직 wrapper에 구현하지 않았습니다.
 
-### 공통 시장/거시 feature 갱신
+### 공통 시장/거시 feature raw 갱신
 
-공통 feature layer는 별도 Cronicle 이벤트(예: `sdc_daily_common_features`)로 운영합니다. 기존 가격/수급/계정 파이프라인과 독립적으로 실행해도 되며, 실패 여부는 마지막 `readiness-report --fail-on-not-ready` exit code로 판단합니다.
+공통 feature source sync는 raw 수집 이벤트로 운영합니다. 기존 가격/수급/계정 파이프라인과 독립적으로 실행할 수 있으며, coverage/readiness 판단은 sj2가 아니라 아래 "Parquet compute 파이프라인"에서 수행합니다.
 
 권장 Cronicle command:
 
@@ -204,9 +191,7 @@ FLOW_START=2026-05-01 FLOW_END=2026-05-31 /home/whi/apps/sdc/bin/flows-backfill-
 1. `common seed-catalog --init-schema`
 2. 일간 source sync: `fdr,fred,ecos,krx`, 최근 45일
 3. monthly macro sync: CPI/PPI/M2/CSI, 최근 540일, `--force`
-4. active feature 전체 `build-daily`, 최근 120일
-5. 최근 60일 `coverage-report`
-6. 최근 60일 `readiness-report --required-coverage-ratio 1.0 --fail-on-not-ready`
+4. 파생 daily fact, coverage, readiness는 로컬/compute 노드에서 `bin/parquet-compute-all.sh`로 실행
 
 필요하면 Cronicle 이벤트 환경 변수로 범위를 조정합니다.
 
@@ -270,6 +255,55 @@ ORDER BY started_at DESC;
 - `ingestion_runs` 테이블에 `status = 'partial'`가 반복 기록되면 경고 알림.
 - 유니버스 동기화 시 수집된 종목 수(`record_count`)가 평소 대비 10% 이상 감소하면 알림.
 - 영업일(주말, 공휴일 아님)인데 `daily_ohlcv`에 새로운 행이 전혀 없다면 알림.
+
+## Parquet compute 파이프라인 (수동 실행)
+
+> 리팩터(2026-07): `metrics normalize`·`common build-daily`·`coverage-report`·`readiness-report`
+> 같은 *compute* 단계는 더 이상 sj2(Postgres)에서 돌지 않습니다. sj2는 **raw 수집 전용**이고,
+> 파생 데이터는 사용자가 필요할 때 로컬에서 **parquet → DuckDB 마트**로 재계산합니다. 자동
+> 스케줄러는 없습니다(raw 수집만 sj2가 자동).
+
+### 한 번에 실행
+
+```bash
+# raw 미러 → parquet export → freshness 게이트 → normalize/build-daily 마트 → coverage/readiness
+bin/parquet-compute-all.sh
+
+# feat_*/labels 마트까지 빌드
+bin/parquet-compute-all.sh --features
+```
+
+### 단계 (각 단계는 게이트)
+
+1. `db sync-remote` — sj2 raw + `common_feature_series`를 로컬 mydb로 미러.
+2. `bin/raw-parquet-export-all.sh` — mydb → `data_lake/raw_postgres/<snapshot>/...` parquet.
+3. **freshness 게이트** — raw 입력이 충분히 신선한지(`common_feature_observation_raw` 최신 관측이
+   series별 허용 lag 이내) 확인. 미달 시 non-zero exit + stderr 요약 → compute가 stale raw 위에서
+   도는 것을 차단.
+4. **normalize/build-daily 마트** — `stock_metric_fact` / `common_feature_daily_fact`를 raw에서 재계산
+   (`research/etl/marts/`). 룰·카탈로그는 `krx_collector.definitions` 코드 정의에서 직접 읽습니다.
+5. **coverage / readiness 게이트** — `common_feature_daily_fact` 마트 위에서 커버리지/준비도 체크.
+   미달 시 non-zero exit + stderr 요약.
+
+### 부분 실행
+
+```bash
+# 이미 미러/export된 스냅샷을 재계산만 (sync/export 건너뜀)
+bin/parquet-compute-all.sh --skip-sync --snapshot-date 2026-06-19
+
+# 특정 단계부터: sync|export|freshness|marts|reports|features
+bin/parquet-compute-all.sh --from-step marts --snapshot-date 2026-06-19
+
+# readiness 임계값 조정(부분 이력 스냅샷에서 게이트 완화)
+bin/parquet-compute-all.sh --from-step reports --required-coverage-ratio 0.0
+```
+
+### 게이트 실패 시
+
+대화형 실행이므로 별도 notifier가 없습니다. 스크립트가 non-zero로 종료하며 stderr에 사람이 읽는
+요약(어떤 series/feature가 왜 미달인지)을 출력합니다. freshness 실패면 raw 수집(sj2)을 먼저
+확인하고, readiness 실패면 해당 feature의 커버리지/누락/PIT 위반 내역을 보고 재수집 또는
+스냅샷/임계값을 조정해 재실행하세요.
 
 ## 트러블슈팅
 

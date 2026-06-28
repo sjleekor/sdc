@@ -142,61 +142,6 @@ DART_FINANCIAL_STATEMENT_RAW = TableProfileSpec(
     domain_checks=("fin_sj_div_dist",),
 )
 
-STOCK_METRIC_FACT = TableProfileSpec(
-    table="stock_metric_fact",
-    weight=ProfileWeight.FULL,
-    role=ProfileTableRole.DERIVED,
-    entity_key="ticker",
-    time_col="bsns_year",
-    natural_key=("ticker", "metric_code", "bsns_year", "reprt_code"),
-    numeric_cols=("value_numeric",),
-    category_cols=("market", "period_type", "fs_div", "source_table", "unit"),
-    top_n_cols=("metric_code", "source_table", "mapping_rule_code"),
-    null_cols=("value_numeric", "value_text", "period_end", "unit"),
-    ingest_col="fetched_at",
-    drilldown_dim="metric_code",  # 29 canonical metrics → split per-metric
-    fk_relations=(
-        ForeignKeyProfileSpec(
-            ref_table="metric_catalog",
-            columns=(("metric_code", "metric_code"),),
-        ),
-    ),
-    cost_class=CostClass.CHEAP,  # ~34K rows; full aggregates are cheap
-    sampling=SamplingPolicy(sample_pct=None),
-    domain_checks=("smf_capital_impairment", "smf_metric_coverage"),
-)
-
-
-# ---------------------------------------------------------------------------
-# Wave 2 — common (market/macro) feature layer (PIT / stale / coverage gap)
-# ---------------------------------------------------------------------------
-
-COMMON_FEATURE_DAILY_FACT = TableProfileSpec(
-    table="common_feature_daily_fact",
-    weight=ProfileWeight.FULL,
-    role=ProfileTableRole.DERIVED,
-    entity_key="feature_code",
-    time_col="feature_date",
-    natural_key=("feature_date", "feature_code"),
-    numeric_cols=("value_numeric",),
-    category_cols=("feature_code", "unit", "selected_vintage"),
-    null_cols=("value_numeric", "value_text", "unit", "asof_available_date"),
-    ingest_col="generated_at",
-    drilldown_dim="feature_code",  # 37 active features → split per-feature
-    # Look-ahead guard: the as-of availability date must not be in the future
-    # of the feature date it is attached to.
-    pit_pairs=(("asof_available_date", "feature_date"),),
-    fk_relations=(
-        ForeignKeyProfileSpec(
-            ref_table="common_feature_catalog",
-            columns=(("feature_code", "feature_code"),),
-        ),
-    ),
-    cost_class=CostClass.CHEAP,
-    sampling=SamplingPolicy(sample_pct=None),
-    domain_checks=("cf_pit_violation", "cf_stale_runs", "cf_coverage_gap"),
-)
-
 COMMON_FEATURE_OBSERVATION_RAW = TableProfileSpec(
     table="common_feature_observation_raw",
     weight=ProfileWeight.FULL,
@@ -248,45 +193,6 @@ COMMON_FEATURE_SERIES = TableProfileSpec(
     sampling=SamplingPolicy(sample_pct=None),
     domain_checks=(),
 )
-
-COMMON_FEATURE_CATALOG = TableProfileSpec(
-    table="common_feature_catalog",
-    weight=ProfileWeight.LIGHT,
-    role=ProfileTableRole.REFERENCE,
-    natural_key=("feature_code",),
-    category_cols=("category", "frequency", "active"),
-    ingest_col="updated_at",
-    cost_class=CostClass.CHEAP,
-    sampling=SamplingPolicy(sample_pct=None),
-    domain_checks=("cf_catalog_orphan",),
-)
-
-COMMON_FEATURE_CATALOG_INPUT = TableProfileSpec(
-    table="common_feature_catalog_input",
-    weight=ProfileWeight.LIGHT,
-    role=ProfileTableRole.REFERENCE,
-    entity_key="feature_code",
-    natural_key=("feature_code", "series_id", "role"),
-    category_cols=("role",),
-    fk_relations=(
-        ForeignKeyProfileSpec(
-            ref_table="common_feature_catalog",
-            columns=(("feature_code", "feature_code"),),
-        ),
-        ForeignKeyProfileSpec(
-            ref_table="common_feature_series",
-            columns=(("series_id", "series_id"),),
-        ),
-    ),
-    cost_class=CostClass.CHEAP,
-    sampling=SamplingPolicy(sample_pct=None),
-    domain_checks=(),
-)
-
-
-# ---------------------------------------------------------------------------
-# Wave 3 — remaining DART raw, masters, catalogs, operating (mostly light)
-# ---------------------------------------------------------------------------
 
 DART_SHAREHOLDER_RETURN_RAW = TableProfileSpec(
     table="dart_shareholder_return_raw",
@@ -405,37 +311,6 @@ STOCK_MASTER_SNAPSHOT_ITEMS = TableProfileSpec(
     domain_checks=(),
 )
 
-METRIC_CATALOG = TableProfileSpec(
-    table="metric_catalog",
-    weight=ProfileWeight.LIGHT,
-    role=ProfileTableRole.REFERENCE,
-    natural_key=("metric_code",),
-    category_cols=("category", "unit", "is_active"),
-    ingest_col="updated_at",
-    cost_class=CostClass.CHEAP,
-    sampling=SamplingPolicy(sample_pct=None),
-    domain_checks=(),
-)
-
-METRIC_MAPPING_RULE = TableProfileSpec(
-    table="metric_mapping_rule",
-    weight=ProfileWeight.LIGHT,
-    role=ProfileTableRole.REFERENCE,
-    natural_key=("rule_code",),
-    category_cols=("source_table", "statement_type", "fs_div", "sj_div", "is_active"),
-    top_n_cols=("metric_code",),
-    ingest_col="updated_at",
-    fk_relations=(
-        ForeignKeyProfileSpec(
-            ref_table="metric_catalog",
-            columns=(("metric_code", "metric_code"),),
-        ),
-    ),
-    cost_class=CostClass.CHEAP,
-    sampling=SamplingPolicy(sample_pct=None),
-    domain_checks=(),
-)
-
 INGESTION_RUNS = TableProfileSpec(
     table="ingestion_runs",
     weight=ProfileWeight.LIGHT,
@@ -463,74 +338,27 @@ SYNC_CHECKPOINTS = TableProfileSpec(
 
 # operating_* are pre-load (0 rows) — checks are written but auto-skip until
 # data lands, then activate without a catalog change.
-OPERATING_METRIC_FACT = TableProfileSpec(
-    table="operating_metric_fact",
-    weight=ProfileWeight.LIGHT,
-    role=ProfileTableRole.OPERATIONAL,
-    entity_key="ticker",
-    time_col="period_end",
-    natural_key=("ticker", "metric_code", "period_end", "document_key", "extractor_code"),
-    numeric_cols=("value_numeric",),
-    category_cols=("market", "sector_key", "extractor_code", "unit"),
-    top_n_cols=("metric_code",),
-    ingest_col="fetched_at",
-    fk_relations=(
-        ForeignKeyProfileSpec(
-            ref_table="operating_source_document",
-            columns=(("document_key", "document_key"),),
-        ),
-    ),
-    cost_class=CostClass.CHEAP,
-    sampling=SamplingPolicy(sample_pct=None),
-    domain_checks=(),
-)
-
-OPERATING_SOURCE_DOCUMENT = TableProfileSpec(
-    table="operating_source_document",
-    weight=ProfileWeight.LIGHT,
-    role=ProfileTableRole.OPERATIONAL,
-    entity_key="ticker",
-    time_col="document_date",
-    natural_key=("document_key",),
-    category_cols=("market", "sector_key", "document_type", "source_system", "language"),
-    ingest_col="fetched_at",
-    cost_class=CostClass.CHEAP,
-    sampling=SamplingPolicy(sample_pct=None),
-    domain_checks=(),
-)
-
-
-# ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
-
-# Ordered by profiling priority (PROFILING_CODE_PLAN §9).
 _CATALOG: tuple[TableProfileSpec, ...] = (
-    # Wave 0–2: model-input core (full weight)
+    # Wave 0–2: model-input core (full weight). The derived facts
+    # (stock_metric_fact / common_feature_daily_fact) and the catalog/rule +
+    # operating tables were decommissioned (refactor §5) — recomputed by the
+    # DuckDB marts — so they are no longer profiled here.
     DAILY_OHLCV,
     KRX_SECURITY_FLOW_RAW,
-    COMMON_FEATURE_DAILY_FACT,
     COMMON_FEATURE_OBSERVATION_RAW,
-    STOCK_METRIC_FACT,
     DART_FINANCIAL_STATEMENT_RAW,
     DART_XBRL_FACT_RAW,
     DART_SHAREHOLDER_RETURN_RAW,
     DART_SHARE_COUNT_RAW,
     DART_XBRL_DOCUMENT,
-    # Wave 3: masters / catalogs / operations (light weight)
+    # Wave 3: masters / config (light weight)
     COMMON_FEATURE_SERIES,
-    COMMON_FEATURE_CATALOG,
-    COMMON_FEATURE_CATALOG_INPUT,
     DART_CORP_MASTER,
     STOCK_MASTER,
     STOCK_MASTER_SNAPSHOT,
     STOCK_MASTER_SNAPSHOT_ITEMS,
-    METRIC_CATALOG,
-    METRIC_MAPPING_RULE,
     INGESTION_RUNS,
     SYNC_CHECKPOINTS,
-    OPERATING_METRIC_FACT,
-    OPERATING_SOURCE_DOCUMENT,
 )
 
 _BY_TABLE: dict[str, TableProfileSpec] = {spec.table: spec for spec in _CATALOG}

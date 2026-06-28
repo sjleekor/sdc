@@ -43,9 +43,7 @@ class KrxCommonFeatureProvider:
         login_pw: str | None = None,
         human_throttle: HumanThrottle | None = None,
     ) -> None:
-        self._market_breadth_rows_cache: dict[
-            tuple[str, str, str, date], list[KrxMdcRow]
-        ] = {}
+        self._market_breadth_rows_cache: dict[tuple[str, str, str, date], list[KrxMdcRow]] = {}
         if client is not None:
             self._client = client
             return
@@ -53,9 +51,7 @@ class KrxCommonFeatureProvider:
         settings = get_settings()
         self._client = KrxMdcClient(
             timeout_seconds=(
-                timeout_seconds
-                if timeout_seconds is not None
-                else settings.krx_mdc_timeout_seconds
+                timeout_seconds if timeout_seconds is not None else settings.krx_mdc_timeout_seconds
             ),
             login_id=login_id if login_id is not None else settings.krx_id,
             login_pw=login_pw if login_pw is not None else settings.krx_pw,
