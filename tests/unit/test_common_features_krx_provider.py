@@ -1,3 +1,4 @@
+import logging
 from datetime import date
 from decimal import Decimal
 
@@ -299,6 +300,39 @@ def test_krx_common_feature_provider_aggregates_market_turnover_value() -> None:
 
     assert result.error is None
     assert result.records[0].value_numeric == Decimal("3500")
+
+
+def test_krx_common_feature_provider_logs_market_breadth_progress(caplog) -> None:
+    client = FakeKrxClient(
+        [
+            KrxMdcRow(row={"FLUC_TP_CD": "1", "ACC_TRDVAL": "1,000"}, request={}),
+            KrxMdcRow(row={"FLUC_TP_CD": "2", "ACC_TRDVAL": "2,500"}, request={}),
+        ]
+    )
+    caplog.set_level(logging.INFO, logger="krx_collector.adapters.common_features_krx.provider")
+
+    result = KrxCommonFeatureProvider(client=client).fetch_series(
+        series=_series(
+            series_id="market_kospi_advancers_krx",
+            endpoint_params={
+                "kind": "market_breadth",
+                "mktId": "STK",
+                "metric": "advancers",
+            },
+        ),
+        start=date(2026, 1, 1),
+        end=date(2026, 3, 31),
+    )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert result.error is None
+    assert len(client.calls) > 50
+    assert any("KRX market breadth fetch started" in message for message in messages)
+    assert any(
+        "KRX market breadth progress" in message and "processed=50/" in message
+        for message in messages
+    )
+    assert any("KRX market breadth fetch completed" in message for message in messages)
 
 
 def test_krx_common_feature_provider_reuses_market_breadth_rows_for_same_day() -> None:

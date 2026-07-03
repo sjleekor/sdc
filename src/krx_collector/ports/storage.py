@@ -411,6 +411,17 @@ class Storage(Protocol):
         """Return latest raw observation date grouped by ``series_id``."""
         ...
 
+    def get_common_feature_observation_dates(
+        self,
+        *,
+        source: Source,
+        series_id: str,
+        start: date,
+        end: date,
+    ) -> set[date]:
+        """Return stored raw observation dates for one source series and range."""
+        ...
+
     def upsert_common_feature_catalog(
         self,
         records: list[CommonFeatureCatalogEntry],

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from collections import Counter
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -29,6 +30,7 @@ KRX_INDEX_CLOSE_COLUMNS = ("CLSPRC_IDX", "close", "Close")
 KRX_MARKET_BREADTH_BLD = "dbms/MDC/STAT/standard/MDCSTAT01501"
 KRX_MARKET_BREADTH_OUTPUT_KEY = "OutBlock_1"
 MARKET_BREADTH_KIND = "market_breadth"
+MARKET_BREADTH_PROGRESS_INTERVAL = 50
 
 
 class KrxCommonFeatureProvider:
@@ -120,8 +122,24 @@ class KrxCommonFeatureProvider:
         output_key = _output_key(series)
         fetched_at = now_kst()
         records: list[CommonFeatureObservation] = []
+        trading_days = list(get_trading_days(start, end))
+        total_days = len(trading_days)
+        started_at = time.monotonic()
 
-        for trade_date in get_trading_days(start, end):
+        log_progress = total_days > 1
+        if log_progress:
+            logger.info(
+                "KRX market breadth fetch started: series=%s market=%s metric=%s "
+                "range=%s..%s trading_days=%d",
+                series.series_id,
+                market_id,
+                metric,
+                start.isoformat(),
+                end.isoformat(),
+                total_days,
+            )
+
+        for index, trade_date in enumerate(trading_days, start=1):
             rows = self._fetch_market_breadth_rows(
                 bld=bld,
                 output_key=output_key,
@@ -142,9 +160,34 @@ class KrxCommonFeatureProvider:
             )
             if observation is not None:
                 records.append(observation)
+            if log_progress and (
+                index % MARKET_BREADTH_PROGRESS_INTERVAL == 0 or index == total_days
+            ):
+                logger.info(
+                    "KRX market breadth progress: series=%s market=%s metric=%s "
+                    "processed=%d/%d last_trade_date=%s records=%d elapsed=%.1fs",
+                    series.series_id,
+                    market_id,
+                    metric,
+                    index,
+                    total_days,
+                    trade_date.isoformat(),
+                    len(records),
+                    time.monotonic() - started_at,
+                )
 
         if not records:
             return CommonFeatureFetchResult(no_data=True)
+        if log_progress:
+            logger.info(
+                "KRX market breadth fetch completed: series=%s market=%s metric=%s "
+                "records=%d elapsed=%.1fs",
+                series.series_id,
+                market_id,
+                metric,
+                len(records),
+                time.monotonic() - started_at,
+            )
         return CommonFeatureFetchResult(records=records)
 
     def _fetch_market_breadth_rows(

@@ -2499,6 +2499,30 @@ class PostgresStorage:
                 cur.execute(sql, params)
                 return {row[0]: row[1] for row in cur.fetchall() if row[1] is not None}
 
+    def get_common_feature_observation_dates(
+        self,
+        *,
+        source: Source,
+        series_id: str,
+        start: date,
+        end: date,
+    ) -> set[date]:
+        """Return stored raw observation dates for one source series and range."""
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT observation_date
+                    FROM common_feature_observation_raw
+                    WHERE source = %s
+                      AND series_id = %s
+                      AND observation_date >= %s
+                      AND observation_date <= %s
+                    """,
+                    (source.value, series_id, start, end),
+                )
+                return {row[0] for row in cur.fetchall()}
+
     def upsert_common_feature_catalog(
         self,
         records: list[CommonFeatureCatalogEntry],

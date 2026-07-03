@@ -771,7 +771,7 @@ wheels = [
 
 [[package]]
 name = "krx-data-pipeline"
-version = "0.8.15"
+version = "0.8.16"
 source = { editable = "." }
 dependencies = [
     { name = "finance-datareader" },
