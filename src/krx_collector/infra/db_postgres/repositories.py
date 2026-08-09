@@ -114,6 +114,7 @@ class PostgresStorage:
                         s.market.value,
                         s.name,
                         s.status.value,
+                        s.listing_date,
                     )
                     for s in snapshot.records
                 ]
@@ -125,7 +126,8 @@ class PostgresStorage:
                         ticker,
                         market,
                         name,
-                        status
+                        status,
+                        listing_date
                     )
                     VALUES %s
                     ON CONFLICT (snapshot_id, ticker, market) DO NOTHING
@@ -143,6 +145,8 @@ class PostgresStorage:
                         s.status.value,
                         s.last_seen_date,
                         s.source.value,
+                        s.listing_date,
+                        s.first_seen_date or snapshot.as_of_date,
                     )
                     for s in stocks
                 ]
@@ -151,18 +155,27 @@ class PostgresStorage:
                 # We will approximate or just use rowcount for total affected.
                 # Actually, DO UPDATE returns the affected rows if we append RETURNING.
 
-                # To accurately count, we can do a standard execute_values
+                # To accurately count, we can do a standard execute_values.
+                # listing_date: a fresh non-NULL source value wins (corrections
+                #   propagate); a source NULL never clobbers a stored value.
+                # first_seen_date: set once on first insert, never overwritten.
                 psycopg2.extras.execute_values(
                     cur,
                     """
-                    INSERT INTO stock_master (ticker, market, name, status, last_seen_date, source)
+                    INSERT INTO stock_master
+                        (ticker, market, name, status, last_seen_date, source,
+                         listing_date, first_seen_date)
                     VALUES %s
                     ON CONFLICT (ticker, market) DO UPDATE SET
-                        name = EXCLUDED.name,
-                        status = EXCLUDED.status,
-                        last_seen_date = EXCLUDED.last_seen_date,
-                        source = EXCLUDED.source,
-                        updated_at = now()
+                        name            = EXCLUDED.name,
+                        status          = EXCLUDED.status,
+                        last_seen_date  = EXCLUDED.last_seen_date,
+                        source          = EXCLUDED.source,
+                        listing_date    = COALESCE(EXCLUDED.listing_date,
+                                                   stock_master.listing_date),
+                        first_seen_date = COALESCE(stock_master.first_seen_date,
+                                                   EXCLUDED.first_seen_date),
+                        updated_at      = now()
                     """,
                     master_args,
                     page_size=1000,
@@ -194,6 +207,8 @@ class PostgresStorage:
                             status=ListingStatus(row["status"]),
                             last_seen_date=row["last_seen_date"],
                             source=Source(row["source"]),
+                            listing_date=row["listing_date"],
+                            first_seen_date=row["first_seen_date"],
                         )
                     )
         return stocks

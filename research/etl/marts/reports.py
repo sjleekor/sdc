@@ -6,11 +6,10 @@ These move the Postgres operational gates onto the parquet/DuckDB compute node:
   ``service/report_common_feature_coverage.py`` and ``report_common_feature_readiness.py``,
   computed over the ``common_feature_daily_fact`` mart and the KRX feature-date
   calendar instead of the dropped canonical table.
-- :func:`freshness_violations` — port of ``service/freshness.assert_common_freshness``
-  raw-input gate, run on the lake (``common_feature_observation_raw`` +
-  ``common_feature_series`` + ``ingestion_runs``) so the compute pipeline can refuse
-  to run on stale raw (decision 6). Catches collector failures at compute time
-  (plan §8 Q4) since ``ingestion_runs`` rides the raw mirror.
+- :func:`freshness_violations` — raw-observation freshness gate, run on the lake
+  (``common_feature_observation_raw`` + ``common_feature_series``) so the compute
+  pipeline can refuse to run on stale raw (decision 6). It does not check source
+  run age because remote ``ingestion_runs`` is not part of the raw mirror.
 
 All functions take a DuckDB connection with the needed views already registered
 and return plain dataclasses the orchestrator turns into a non-zero exit + stderr
@@ -24,6 +23,8 @@ from dataclasses import dataclass, field
 from datetime import date
 
 import duckdb
+
+from krx_collector.definitions.common_features import default_common_feature_catalog
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,22 +70,38 @@ def coverage_report(
     *,
     feature_dates: Sequence[date],
     cfdf_view: str = "common_feature_daily_fact",
+    feature_codes: Sequence[str] | None = None,
 ) -> list[CoverageRow]:
     """Per-feature coverage over the KRX feature-date calendar.
 
     ``target_count`` = number of feature dates; ``coverage_ratio`` =
-    non_null / target. Mirrors the Postgres coverage report 1:1.
+    non_null / target. Mirrors the Postgres coverage report 1:1 by evaluating
+    every active catalog feature, including features with zero generated facts.
     """
     target_count = len(feature_dates)
+    codes = _feature_codes(feature_codes)
+    if not codes:
+        return []
+
     rows = con.execute(f"""
+        WITH feature_codes(feature_code) AS ({_values_list(codes)}),
+        feature_dates(feature_date) AS ({_date_values_list(feature_dates)})
         SELECT
-            feature_code,
-            count(*) AS fact_count,
-            count(*) FILTER (WHERE value_numeric IS NOT NULL) AS non_null_count,
-            count(*) FILTER (WHERE value_numeric IS NULL) AS null_count,
-            count(*) FILTER (WHERE asof_available_date > feature_date) AS pit_violation_count
-        FROM {cfdf_view}
-        GROUP BY feature_code
+            c.feature_code,
+            count(f.feature_code) AS fact_count,
+            count(f.value_numeric) AS non_null_count,
+            count(*) FILTER (
+                WHERE f.feature_code IS NOT NULL AND f.value_numeric IS NULL
+            ) AS null_count,
+            count(*) FILTER (
+                WHERE f.feature_code IS NOT NULL AND f.asof_available_date > fd.feature_date
+            ) AS pit_violation_count
+        FROM feature_codes c
+        LEFT JOIN feature_dates fd ON TRUE
+        LEFT JOIN {cfdf_view} f
+          ON f.feature_code = c.feature_code
+         AND f.feature_date = fd.feature_date
+        GROUP BY c.feature_code
         """).fetchall()
     out: list[CoverageRow] = []
     for feature_code, fact_count, non_null, null_count, pit_violations in rows:
@@ -112,11 +129,17 @@ def readiness_report(
     feature_dates: Sequence[date],
     required_coverage_ratio: float = 1.0,
     cfdf_view: str = "common_feature_daily_fact",
+    feature_codes: Sequence[str] | None = None,
 ) -> list[ReadinessRow]:
     """Strict readiness: a feature is ready only with full coverage, no nulls,
     no missing dates, and no PIT violations. Mirrors the Postgres readiness report."""
     out: list[ReadinessRow] = []
-    for row in coverage_report(con, feature_dates=feature_dates, cfdf_view=cfdf_view):
+    for row in coverage_report(
+        con,
+        feature_dates=feature_dates,
+        cfdf_view=cfdf_view,
+        feature_codes=feature_codes,
+    ):
         blockers: list[str] = []
         if row.target_count == 0:
             blockers.append("target_count=0")
@@ -140,6 +163,26 @@ def readiness_report(
         )
     out.sort(key=lambda r: (not r.ready, r.feature_code))
     return out
+
+
+def _feature_codes(feature_codes: Sequence[str] | None) -> list[str]:
+    if feature_codes is not None:
+        return sorted(set(feature_codes))
+    return sorted({item.feature_code for item in default_common_feature_catalog() if item.active})
+
+
+def _sql_str_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _values_list(values: Sequence[str]) -> str:
+    return "VALUES " + ", ".join(f"({_sql_str_literal(value)})" for value in values)
+
+
+def _date_values_list(values: Sequence[date]) -> str:
+    if not values:
+        return "SELECT CAST(NULL AS DATE) WHERE FALSE"
+    return "VALUES " + ", ".join(f"(DATE '{value.isoformat()}')" for value in values)
 
 
 def freshness_violations(

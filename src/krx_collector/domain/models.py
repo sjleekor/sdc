@@ -40,6 +40,11 @@ class Stock:
         status: Current listing status.
         last_seen_date: Date when the stock was last observed in a universe fetch.
         source: Data source that provided this record.
+        listing_date: Source-reported listing date (FDR only, best-effort);
+            ``None`` when the provider did not supply one.
+        first_seen_date: First ``as_of_date`` on which the collector observed
+            this ticker as ``ACTIVE``. Storage-managed collector metadata,
+            never provider-set; ``None`` until persisted.
     """
 
     ticker: str
@@ -48,6 +53,8 @@ class Stock:
     status: ListingStatus
     last_seen_date: date
     source: Source
+    listing_date: date | None = None
+    first_seen_date: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -660,11 +667,18 @@ class BackfillResult:
     Attributes:
         tickers_processed: Number of tickers attempted.
         bars_upserted: Total bars written.
+        baseline_clamped_tickers: Incremental baseline-missing tickers whose
+            auto-derived start was clamped to the ``max_auto_range_days`` window
+            (each needs a separate full-history repair).
+        auto_new_ticker_start_tickers: Incremental baseline-missing tickers that
+            used an auto-derived ``listing_date`` / ``first_seen_date`` start.
         errors: Per-ticker error messages.
     """
 
     tickers_processed: int = 0
     bars_upserted: int = 0
+    baseline_clamped_tickers: int = 0
+    auto_new_ticker_start_tickers: int = 0
     errors: dict[str, str] = field(default_factory=dict)
 
 

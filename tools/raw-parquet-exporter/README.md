@@ -9,14 +9,13 @@ This crate currently implements Phase 1 and a narrow Phase 2 MVP from
 - TOML config loading and validation.
 - PostgreSQL connection with read-only session settings.
 - `information_schema` table introspection.
-- Dry-run job planning for raw-id, monthly-date, full-table, snapshot-items,
-  and schema-only empty-table strategies.
+- Dry-run job planning for raw-id, monthly-date, full-table, and snapshot-items
+  strategies.
 - raw-id DART table export to partitioned Parquet files under
   `bsns_year=<YYYY>/reprt_code=<CODE>/`.
 - monthly date-range export to `year=<YYYY>/month=<MM>/` partitions.
 - unpartitioned full-table export for small dimension tables.
 - snapshot item export to `snapshot_date=<YYYY-MM-DD>/` partitions.
-- schema-only manifests for configured empty tables.
 - Table manifest generation and Parquet metadata row-count validation.
 
 ## Usage
@@ -54,12 +53,11 @@ variables, not committed runtime config.
 |---|---|---|
 | `raw_id_range` | `dart_xbrl_fact_raw`, `dart_financial_statement_raw`, `dart_shareholder_return_raw`, `dart_share_count_raw` | `bsns_year=<YYYY>/reprt_code=<CODE>/` |
 | `date_month` | `krx_security_flow_raw`, `daily_ohlcv` | `year=<YYYY>/month=<MM>/` |
-| `full_table` | `dart_xbrl_document`, `common_feature_observation_raw`, `dart_corp_master`, `stock_master`, `stock_master_snapshot` | configured simple column partitions or unpartitioned |
+| `full_table` | `dart_xbrl_document`, `common_feature_observation_raw`, `common_feature_series`, `dart_corp_master`, `stock_master`, `stock_master_snapshot` | configured simple column partitions or unpartitioned |
 | `snapshot_items` | `stock_master_snapshot_items` | `snapshot_date=<YYYY-MM-DD>/` |
-| `empty_table` | `operating_source_document` | schema-only manifest |
 
 Empty source tables are valid for `date_month`, `full_table`,
-`snapshot_items`, and `empty_table`: they write a table manifest with
+and `snapshot_items`: they write a table manifest with
 `rows_exported = 0` and no Parquet files. `raw_id_range` tables are expected to
 contain source rows before export.
 
@@ -129,15 +127,6 @@ cargo run --manifest-path tools/raw-parquet-exporter/Cargo.toml -- \
 partitions such as `["bsns_year", "reprt_code"]` or `["source"]`. Expression
 partitions remain a later implementation step.
 
-Write a schema-only manifest for an `empty_table` entry:
-
-```bash
-cargo run --manifest-path tools/raw-parquet-exporter/Cargo.toml -- \
-  export \
-  --tables operating_source_document \
-  --force
-```
-
 Export snapshot item rows partitioned by the parent snapshot date:
 
 ```bash
@@ -192,3 +181,12 @@ cargo run --manifest-path tools/raw-parquet-exporter/Cargo.toml -- \
   resume \
   --checkpoint data_lake/raw_postgres/snapshot_date=2026-06-19/source=local_mydb/_manifests/checkpoints/<run_id>.json
 ```
+
+**Resume support is limited to the `raw_id_range` and `date_month`
+strategies** (`FullTableExportOptions`/`SnapshotItemsExportOptions` have no
+`resume` field at all). For the `full_table`/`snapshot_items` tables — small
+dimension tables (~0.2 GB combined) — an interrupted run has no checkpoint to
+resume from; re-run the export with `--force` instead.
+`bin/raw-parquet-export-all.sh` handles this distinction automatically (see
+`bin/README.md`), calling `resume` only for the resumable strategies and
+`--force` re-export for the rest.

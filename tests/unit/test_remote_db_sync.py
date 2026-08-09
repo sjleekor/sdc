@@ -137,6 +137,34 @@ def test_managed_mirror_tables_exclude_local_audit_tables() -> None:
     assert "metric_catalog" not in pipeline_names
 
 
+def test_stock_master_spec_includes_new_date_columns() -> None:
+    spec = next(spec for spec in SYNC_TABLE_SPECS if spec.name == "stock_master")
+
+    select_columns = tuple(col.strip() for col in spec.select_list.split(","))
+    assert select_columns[: len(spec.insert_columns)] == spec.insert_columns
+    assert "listing_date" in spec.insert_columns
+    assert "first_seen_date" in spec.insert_columns
+    assert "listing_date" in spec.update_columns
+    assert "first_seen_date" in spec.update_columns
+    # updated_at cursor is unchanged at index 6.
+    assert spec.cursor_indexes == (6, 0, 1)
+    assert select_columns[6] == "updated_at"
+
+
+def test_stock_master_snapshot_items_spec_includes_listing_date() -> None:
+    spec = next(spec for spec in SYNC_TABLE_SPECS if spec.name == "stock_master_snapshot_items")
+
+    select_columns = tuple(col.strip() for col in spec.select_list.split(","))
+    # insert_columns strips the table alias prefix present in select_list.
+    stripped = tuple(col.split(".")[-1] for col in select_columns)
+    assert stripped[: len(spec.insert_columns)] == spec.insert_columns
+    assert "listing_date" in spec.insert_columns
+    assert "listing_date" in spec.update_columns
+    # fetched_at is the joined parent watermark and moves from index 5 -> 6.
+    assert spec.cursor_indexes == (6, 0, 1, 2)
+    assert select_columns[6] == "s.fetched_at"
+
+
 def test_security_flow_raw_uses_update_aware_incremental_cursor() -> None:
     pipeline_names = [table.name for table in PIPELINE_FULL_REFRESH_TABLES]
     assert "krx_security_flow_raw" in pipeline_names

@@ -152,3 +152,94 @@ def test_end_to_end_pipeline(storage: PostgresStorage) -> None:
     # but the KOSPI stock should pass.
     # Validation service doesn't return anything, but it shouldn't crash.
     validate(storage=storage, market=Market.KOSPI, target_date=test_date)
+
+
+def _snapshot(records: list[Stock], as_of: date) -> StockUniverseSnapshot:
+    return StockUniverseSnapshot(
+        snapshot_id=str(uuid.uuid4()),
+        as_of_date=as_of,
+        source=Source.FDR,
+        fetched_at=now_kst(),
+        records=records,
+    )
+
+
+def test_first_seen_and_listing_dates_persist_and_are_preserved(
+    storage: PostgresStorage,
+) -> None:
+    """T14: first_seen_date is set once and preserved; a NULL-listing sync does
+    not erase an existing listing_date."""
+    first_as_of = date(2026, 6, 1)
+    ticker = "111111"
+
+    # First sync (FDR) with an explicit listing date.
+    fdr_stock = Stock(
+        ticker=ticker,
+        market=Market.KOSPI,
+        name="First Corp",
+        status=ListingStatus.ACTIVE,
+        last_seen_date=first_as_of,
+        source=Source.FDR,
+        listing_date=date(2026, 5, 20),
+    )
+    storage.upsert_stock_master([fdr_stock], _snapshot([fdr_stock], first_as_of))
+
+    stored = {s.ticker: s for s in storage.get_active_stocks()}[ticker]
+    assert stored.listing_date == date(2026, 5, 20)
+    assert stored.first_seen_date == first_as_of
+
+    # Second sync (pykrx) later, with NO listing date -> must not erase it, and
+    # first_seen_date must stay at the original value.
+    second_as_of = date(2026, 6, 10)
+    pykrx_stock = Stock(
+        ticker=ticker,
+        market=Market.KOSPI,
+        name="First Corp",
+        status=ListingStatus.ACTIVE,
+        last_seen_date=second_as_of,
+        source=Source.PYKRX,
+        listing_date=None,
+    )
+    storage.upsert_stock_master([pykrx_stock], _snapshot([pykrx_stock], second_as_of))
+
+    stored = {s.ticker: s for s in storage.get_active_stocks()}[ticker]
+    assert stored.listing_date == date(2026, 5, 20)  # preserved
+    assert stored.first_seen_date == first_as_of  # preserved
+    assert stored.last_seen_date == second_as_of  # updated
+
+
+def test_get_active_stocks_round_trips_dates_and_snapshot_items(
+    storage: PostgresStorage,
+) -> None:
+    """T15: get_active_stocks returns both dates; snapshot item rows persist
+    listing_date."""
+    as_of = date(2026, 6, 15)
+    ticker = "222222"
+    stock = Stock(
+        ticker=ticker,
+        market=Market.KOSDAQ,
+        name="Round Trip Corp",
+        status=ListingStatus.ACTIVE,
+        last_seen_date=as_of,
+        source=Source.FDR,
+        listing_date=date(2026, 6, 12),
+    )
+    snapshot = _snapshot([stock], as_of)
+    storage.upsert_stock_master([stock], snapshot)
+
+    stored = {s.ticker: s for s in storage.get_active_stocks()}[ticker]
+    assert stored.listing_date == date(2026, 6, 12)
+    assert stored.first_seen_date == as_of
+
+    from krx_collector.infra.db_postgres.connection import get_connection
+
+    with get_connection(storage._dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT listing_date FROM stock_master_snapshot_items "
+                "WHERE snapshot_id = %s AND ticker = %s AND market = %s",
+                (snapshot.snapshot_id, ticker, Market.KOSDAQ.value),
+            )
+            row = cur.fetchone()
+    assert row is not None
+    assert row[0] == date(2026, 6, 12)

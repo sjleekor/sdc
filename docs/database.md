@@ -270,79 +270,15 @@ OpenDART XBRL instance에서 추출한 fact raw 저장용 테이블입니다.
 **고유키(Unique):** `(corp_code, bsns_year, reprt_code, rcept_no, context_id, concept_id)`
 **인덱스(Index):** `(ticker, bsns_year, reprt_code, concept_id)`
 
-### 13. `metric_catalog`
+### Removed derived metric tables
 
-정규화된 canonical metric 정의 사전입니다.
+리팩터 이후 PostgreSQL에는 raw 수집 테이블만 남기고, `metric_catalog`,
+`metric_mapping_rule`, `stock_metric_fact`는 DDL에서 제거했습니다. metric 정의와 mapping rule은
+`src/krx_collector/definitions/metric_rules.py`의 코드 정의가 source of truth이며,
+canonical-compatible `stock_metric_fact`는 `bin/parquet-compute-all.sh`가 raw parquet 위에서
+DuckDB derived mart로 재계산합니다.
 
-| 컬럼명         | 타입            | 비고                    |
-|----------------|-----------------|-------------------------|
-| `metric_code`  | TEXT PK         | 내부 metric code        |
-| `metric_name`  | TEXT NOT NULL   | 표시용 이름             |
-| `category`     | TEXT NOT NULL   | financial, share_count, xbrl 등 |
-| `unit`         | TEXT NOT NULL   | KRW, shares 등          |
-| `description`  | TEXT NOT NULL   | metric 설명             |
-| `is_active`    | BOOLEAN         | 활성 여부               |
-| `updated_at`   | TIMESTAMPTZ     | 수정 시각               |
-
-### 14. `metric_mapping_rule`
-
-raw row를 canonical metric으로 연결하는 규칙 테이블입니다.
-
-| 컬럼명              | 타입            | 비고                                  |
-|---------------------|-----------------|---------------------------------------|
-| `rule_code`         | TEXT PK         | 안정적인 규칙 식별자                  |
-| `metric_code`       | TEXT FK         | `metric_catalog` 참조                 |
-| `source_table`      | TEXT NOT NULL   | raw source table 명                   |
-| `value_selector`    | TEXT NOT NULL   | raw row에서 읽을 값 컬럼              |
-| `priority`          | INT NOT NULL    | 낮을수록 우선                         |
-| `statement_type`    | TEXT NOT NULL   | dividend 등                           |
-| `fs_div`            | TEXT NOT NULL   | CFS \| OFS                            |
-| `sj_div`            | TEXT NOT NULL   | BS \| IS \| CF 등                     |
-| `account_id`        | TEXT NOT NULL   | 재무계정 매핑용 account_id            |
-| `account_nm`        | TEXT NOT NULL   | 재무계정 매핑용 account_nm            |
-| `row_name`          | TEXT NOT NULL   | 배당/주식수 row 이름                  |
-| `stock_knd`         | TEXT NOT NULL   | 보통주/우선주 등                      |
-| `dim1`              | TEXT NOT NULL   | treasury stock 1차 분류축             |
-| `dim2`              | TEXT NOT NULL   | treasury stock 2차 분류축             |
-| `dim3`              | TEXT NOT NULL   | treasury stock 3차 분류축             |
-| `metric_code_match` | TEXT NOT NULL   | raw metric_code 매칭값                |
-| `is_active`         | BOOLEAN         | 활성 여부                             |
-| `updated_at`        | TIMESTAMPTZ     | 수정 시각                             |
-
-### 15. `stock_metric_fact`
-
-raw를 정규화해 적재한 종목별 canonical metric fact 테이블입니다.
-
-| 컬럼명              | 타입              | 비고                                  |
-|---------------------|-------------------|---------------------------------------|
-| `fact_id`           | BIGSERIAL PK      | 내부 surrogate key                    |
-| `ticker`            | TEXT NOT NULL     | 6자리 KRX 종목 코드                   |
-| `market`            | TEXT NOT NULL     | KOSPI \| KOSDAQ                       |
-| `corp_code`         | TEXT NOT NULL     | OpenDART 기업 고유번호                |
-| `metric_code`       | TEXT FK           | canonical metric code                 |
-| `period_type`       | TEXT NOT NULL     | annual, q1, half, q3 등               |
-| `period_end`        | DATE              | 기준 종료일                           |
-| `bsns_year`         | INT NOT NULL      | 사업연도                              |
-| `reprt_code`        | TEXT NOT NULL     | 보고서 코드                           |
-| `fs_div`            | TEXT NOT NULL     | 재무 raw의 경우 CFS \| OFS, 아니면 빈 문자열 |
-| `value_numeric`     | NUMERIC(30,4)     | 정규화 수치 값                        |
-| `value_text`        | TEXT NOT NULL     | 텍스트 표현                           |
-| `unit`              | TEXT NOT NULL     | KRW, shares 등                        |
-| `source_table`      | TEXT NOT NULL     | 원천 raw table                        |
-| `source_key`        | TEXT NOT NULL     | 원천 row 식별자                       |
-| `mapping_rule_code` | TEXT FK           | 적용된 mapping rule                   |
-| `fetched_at`        | TIMESTAMPTZ       | 원천 row 수집 시각                    |
-| `updated_at`        | TIMESTAMPTZ       | fact 갱신 시각                        |
-
-**고유키(Unique):** `(ticker, metric_code, bsns_year, reprt_code)`
-**인덱스(Index):** `(ticker, metric_code, bsns_year DESC, reprt_code)`
-
-주의:
-
-- `period_end`는 share info raw에 결산일이 있으면 그 값을 사용합니다.
-- 재무 raw는 OpenDART 응답에 직접 결산일이 없으므로 `reprt_code` 기반으로 분기말을 추론합니다.
-
-### 16. `krx_security_flow_raw`
+### 13. `krx_security_flow_raw`
 
 KRX MDC 기반 수급 raw 저장용 테이블입니다.
 
@@ -377,56 +313,10 @@ KRX MDC 기반 수급 raw 저장용 테이블입니다.
 
 - `borrow_balance_quantity`
 
-### 17. `operating_source_document`
+### Removed operating pilot tables
 
-섹터별 사업 KPI 추출에 사용하는 원문 문서 provenance 저장용 테이블입니다.
-
-| 컬럼명           | 타입            | 비고                                 |
-|------------------|-----------------|--------------------------------------|
-| `document_key`   | TEXT PK         | 문서 자연키 해시                     |
-| `ticker`         | TEXT NOT NULL   | 6자리 KRX 종목 코드                  |
-| `market`         | TEXT NOT NULL   | KOSPI \| KOSDAQ                      |
-| `sector_key`     | TEXT NOT NULL   | extractor 선택용 sector key          |
-| `document_type`  | TEXT NOT NULL   | `manual_text`, `dart_report` 등      |
-| `title`          | TEXT NOT NULL   | 문서 제목                            |
-| `document_date`  | DATE            | 문서 기준일                          |
-| `period_end`     | DATE            | KPI 대상 기간 종료일                 |
-| `source_system`  | TEXT NOT NULL   | `LOCAL`, `DART`, `IR` 등             |
-| `source_url`     | TEXT NOT NULL   | 원문 URL                             |
-| `language`       | TEXT NOT NULL   | 기본 `ko`                            |
-| `content_text`   | TEXT NOT NULL   | extractor 입력 텍스트                |
-| `fetched_at`     | TIMESTAMPTZ     | 문서 적재 시각                       |
-| `raw_payload`    | JSONB NOT NULL  | 파일 경로 등 추가 provenance         |
-| `updated_at`     | TIMESTAMPTZ     | 문서 갱신 시각                       |
-
-**기본키(Primary key):** `document_key`
-**인덱스(Index):** `(ticker, sector_key, period_end DESC)`
-
-### 18. `operating_metric_fact`
-
-섹터별 extractor가 추출한 비정형 사업 KPI fact 저장용 테이블입니다.
-
-| 컬럼명          | 타입            | 비고                                  |
-|-----------------|-----------------|---------------------------------------|
-| `fact_id`       | BIGSERIAL PK    | 내부 surrogate key                    |
-| `ticker`        | TEXT NOT NULL   | 6자리 KRX 종목 코드                   |
-| `market`        | TEXT NOT NULL   | KOSPI \| KOSDAQ                       |
-| `sector_key`    | TEXT NOT NULL   | sector key                            |
-| `metric_code`   | TEXT NOT NULL   | `order_intake_amount` 등              |
-| `metric_name`   | TEXT NOT NULL   | 표시용 metric 명                      |
-| `period_end`    | DATE            | KPI 대상 기간 종료일                  |
-| `value_numeric` | NUMERIC(30,4)   | 수치형 값                             |
-| `value_text`    | TEXT NOT NULL   | 표시용 원문 값                        |
-| `unit`          | TEXT NOT NULL   | `KRW`, `count` 등                     |
-| `document_key`  | TEXT FK         | `operating_source_document` 참조      |
-| `extractor_code`| TEXT NOT NULL   | extractor 버전 식별자                 |
-| `raw_snippet`   | TEXT NOT NULL   | 추출 근거 snippet                     |
-| `fetched_at`    | TIMESTAMPTZ     | fact 적재 시각                        |
-| `raw_payload`   | JSONB NOT NULL  | extractor 부가 메타                   |
-| `updated_at`    | TIMESTAMPTZ     | fact 갱신 시각                        |
-
-**고유키(Unique):** `(ticker, metric_code, period_end, document_key, extractor_code)`
-**인덱스(Index):** `(ticker, sector_key, metric_code, period_end DESC)`
+파일럿 operating KPI 경로(`operating_source_document`, `operating_metric_fact`)는 스케줄과
+프로덕션 데이터가 없어 리팩터 P5에서 DDL과 CLI 경로를 제거했습니다.
 
 ## Upsert 전략
 

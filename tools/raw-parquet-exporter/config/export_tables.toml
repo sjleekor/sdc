@@ -116,11 +116,3 @@ extract_strategy = "full_table"
 output_partitions = []
 order_by = ["series_id"]
 jsonb_columns = ["endpoint_params"]
-
-[[tables]]
-name = "operating_source_document"
-priority = "P2"
-extract_strategy = "empty_table"
-output_partitions = ["source_system"]
-order_by = ["ticker", "document_date", "document_key"]
-jsonb_columns = ["raw_payload"]

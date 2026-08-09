@@ -129,7 +129,11 @@ SYNC_TABLE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
 SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
     TableSyncSpec(
         name="stock_master",
-        select_list="ticker, market, name, status, last_seen_date, source, updated_at",
+        # listing_date/first_seen_date appended after updated_at so insert_columns
+        # stays a positional prefix of select_list and the updated_at cursor at
+        # index 6 is unchanged.
+        select_list="ticker, market, name, status, last_seen_date, source, updated_at, "
+        "listing_date, first_seen_date",
         from_clause="stock_master",
         order_columns=("updated_at", "ticker", "market"),
         insert_columns=(
@@ -140,9 +144,19 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
             "last_seen_date",
             "source",
             "updated_at",
+            "listing_date",
+            "first_seen_date",
         ),
         conflict_columns=("ticker", "market"),
-        update_columns=("name", "status", "last_seen_date", "source", "updated_at"),
+        update_columns=(
+            "name",
+            "status",
+            "last_seen_date",
+            "source",
+            "updated_at",
+            "listing_date",
+            "first_seen_date",
+        ),
         local_cursor_sql=(
             "SELECT updated_at, ticker, market "
             "FROM stock_master "
@@ -173,15 +187,19 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
     ),
     TableSyncSpec(
         name="stock_master_snapshot_items",
-        select_list="i.snapshot_id, i.ticker, i.market, i.name, i.status, s.fetched_at",
+        # s.fetched_at is the joined parent watermark and is NOT inserted, so
+        # i.listing_date must precede it to keep insert_columns a positional
+        # prefix of select_list; the fetched_at cursor moves 5 -> 6.
+        select_list="i.snapshot_id, i.ticker, i.market, i.name, i.status, "
+        "i.listing_date, s.fetched_at",
         from_clause=(
             "stock_master_snapshot_items i "
             "JOIN stock_master_snapshot s ON s.snapshot_id = i.snapshot_id"
         ),
         order_columns=("s.fetched_at", "i.snapshot_id", "i.ticker", "i.market"),
-        insert_columns=("snapshot_id", "ticker", "market", "name", "status"),
+        insert_columns=("snapshot_id", "ticker", "market", "name", "status", "listing_date"),
         conflict_columns=("snapshot_id", "ticker", "market"),
-        update_columns=("name", "status"),
+        update_columns=("name", "status", "listing_date"),
         local_cursor_sql=(
             "SELECT s.fetched_at, i.snapshot_id, i.ticker, i.market "
             "FROM stock_master_snapshot_items i "
@@ -189,7 +207,7 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
             "ORDER BY s.fetched_at DESC, i.snapshot_id DESC, i.ticker DESC, i.market DESC "
             "LIMIT 1"
         ),
-        cursor_indexes=(5, 0, 1, 2),
+        cursor_indexes=(6, 0, 1, 2),
         always_full_scan=True,
         prune_missing_after_full_scan=True,
     ),

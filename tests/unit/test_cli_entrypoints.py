@@ -1,3 +1,5 @@
+import contextlib
+import os
 from datetime import date
 from types import SimpleNamespace
 
@@ -397,3 +399,133 @@ def test_common_sync_parser_supports_krx_source() -> None:
     )
 
     assert args.sources == [Source.KRX]
+
+
+def test_db_with_remote_dsn_parser_captures_command_after_double_dash() -> None:
+    args = app.build_parser().parse_args(
+        [
+            "db",
+            "with-remote-dsn",
+            "--ssh-host",
+            "sj2-server",
+            "--",
+            "printenv",
+            "SDC_REMOTE_DSN",
+        ]
+    )
+
+    assert args.command == "db"
+    assert args.db_command == "with-remote-dsn"
+    assert args.ssh_host == "sj2-server"
+    assert args.remote_command == ["--", "printenv", "SDC_REMOTE_DSN"]
+    assert args.handler == app._handle_db_with_remote_dsn
+
+
+def test_db_with_remote_dsn_parser_defaults() -> None:
+    args = app.build_parser().parse_args(["db", "with-remote-dsn"])
+
+    assert args.command == "db"
+    assert args.db_info_path is None
+    assert args.remote_host is None
+    assert args.ssh_host is None
+    assert args.ssh_local_port is None
+    assert args.ssh_compression is None
+    assert args.remote_command == []
+
+
+def test_run_child_with_env_var_exposes_env_only_to_child(tmp_path) -> None:
+    out_file = tmp_path / "out.txt"
+    command = ["sh", "-c", f'printenv SDC_REMOTE_DSN > "{out_file}"']
+
+    exit_code = app._run_child_with_env_var(command, "SDC_REMOTE_DSN", "postgresql://secret")
+
+    assert exit_code == 0
+    assert out_file.read_text().strip() == "postgresql://secret"
+    assert "SDC_REMOTE_DSN" not in os.environ
+
+
+def test_run_child_with_env_var_true_returns_zero() -> None:
+    assert app._run_child_with_env_var(["true"], "SDC_REMOTE_DSN", "x") == 0
+
+
+def test_run_child_with_env_var_preserves_meaningful_exit_code() -> None:
+    assert app._run_child_with_env_var(["sh", "-c", "exit 75"], "SDC_REMOTE_DSN", "x") == 75
+
+
+def test_run_child_with_env_var_signal_death_returns_128_plus_signum() -> None:
+    exit_code = app._run_child_with_env_var(["sh", "-c", "kill -TERM $$"], "SDC_REMOTE_DSN", "x")
+
+    assert exit_code == 143
+
+
+def test_handle_db_with_remote_dsn_missing_command_exits_2() -> None:
+    args = app.build_parser().parse_args(["db", "with-remote-dsn"])
+
+    with pytest.raises(SystemExit) as exc:
+        app._handle_db_with_remote_dsn(args)
+
+    assert exc.value.code == 2
+
+
+def test_handle_db_with_remote_dsn_injects_dsn_into_child_only(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    @contextlib.contextmanager
+    def fake_resolve_remote_dsn(**kwargs):
+        calls["resolve_kwargs"] = kwargs
+        yield SimpleNamespace(host="sj2-server"), "postgresql://fake-dsn"
+
+    def fake_run_child(command, env_name, env_value):
+        calls["command"] = command
+        calls["env_name"] = env_name
+        calls["env_value"] = env_value
+        return 0
+
+    monkeypatch.setattr(
+        "krx_collector.infra.db_postgres.remote_sync.resolve_remote_dsn",
+        fake_resolve_remote_dsn,
+    )
+    monkeypatch.setattr(app, "_run_child_with_env_var", fake_run_child)
+
+    args = app.build_parser().parse_args(
+        [
+            "db",
+            "with-remote-dsn",
+            "--ssh-host",
+            "sj2-server",
+            "--ssh-local-port",
+            "6543",
+            "--",
+            "printenv",
+            "SDC_REMOTE_DSN",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        app._handle_db_with_remote_dsn(args)
+
+    assert exc.value.code == 0
+    assert calls["command"] == ["printenv", "SDC_REMOTE_DSN"]
+    assert calls["env_name"] == "SDC_REMOTE_DSN"
+    assert calls["env_value"] == "postgresql://fake-dsn"
+    assert calls["resolve_kwargs"]["ssh_host"] == "sj2-server"
+    assert calls["resolve_kwargs"]["ssh_local_port"] == 6543
+
+
+def test_handle_db_with_remote_dsn_propagates_child_exit_code(monkeypatch) -> None:
+    @contextlib.contextmanager
+    def fake_resolve_remote_dsn(**kwargs):
+        yield SimpleNamespace(host="sj2-server"), "postgresql://fake-dsn"
+
+    monkeypatch.setattr(
+        "krx_collector.infra.db_postgres.remote_sync.resolve_remote_dsn",
+        fake_resolve_remote_dsn,
+    )
+    monkeypatch.setattr(app, "_run_child_with_env_var", lambda *a, **k: 75)
+
+    args = app.build_parser().parse_args(["db", "with-remote-dsn", "--", "true"])
+
+    with pytest.raises(SystemExit) as exc:
+        app._handle_db_with_remote_dsn(args)
+
+    assert exc.value.code == 75

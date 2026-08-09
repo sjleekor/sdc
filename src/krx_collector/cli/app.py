@@ -18,7 +18,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import signal
+import subprocess
 import sys
+import threading
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -185,6 +189,99 @@ def _handle_db_sync_remote(args: argparse.Namespace) -> None:
     print(f"   - Total rows synced: {result.total_rows}")
     for table_name, row_count in result.table_counts.items():
         print(f"   - {table_name}: {row_count}")
+
+
+_SIGNAL_FORWARD_GRACE_SECONDS = 10.0
+
+
+def _run_child_with_env_var(command: list[str], env_name: str, env_value: str) -> int:
+    """Run ``command`` with one extra env var injected into the child only.
+
+    SIGINT/SIGTERM received by this process are forwarded to the child's own
+    process group (it runs in a new session so a terminal Ctrl-C targeting our
+    group does not already reach it), escalating to SIGKILL after a grace
+    period if the child ignores the signal. The child's exit status is
+    preserved as-is, or as ``128 + signum`` if it died from a signal — the
+    standard shell convention — so meaningful codes like OpenDART's exit 75
+    are not swallowed.
+    """
+    child_env = os.environ.copy()
+    child_env[env_name] = env_value
+
+    proc = subprocess.Popen(command, env=child_env, start_new_session=True)
+    grace_timer: threading.Timer | None = None
+
+    def _kill_child(sig: int) -> None:
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            pass
+
+    def _forward(signum: int, _frame: object) -> None:
+        nonlocal grace_timer
+        _kill_child(signum)
+        grace_timer = threading.Timer(
+            _SIGNAL_FORWARD_GRACE_SECONDS, _kill_child, args=(signal.SIGKILL,)
+        )
+        grace_timer.daemon = True
+        grace_timer.start()
+
+    previous_sigint = signal.signal(signal.SIGINT, _forward)
+    previous_sigterm = signal.signal(signal.SIGTERM, _forward)
+    try:
+        proc.wait()
+    finally:
+        if grace_timer is not None:
+            grace_timer.cancel()
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)
+
+    if proc.returncode < 0:
+        return 128 - proc.returncode
+    return proc.returncode
+
+
+def _handle_db_with_remote_dsn(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector db with-remote-dsn -- <command...>``.
+
+    Resolves the remote sj2-server DSN the same way ``db sync-remote`` does
+    (including the SSH-tunnel case, which needs the tunnel alive for the
+    whole child run — this is why the DSN is injected around a wrapped
+    subprocess rather than just printed). ``SDC_REMOTE_DSN`` is set only in
+    the child's environment; this process's own env and stdout/stderr never
+    carry the secret.
+    """
+    settings = get_settings()
+
+    db_info_path = args.db_info_path or str(settings.remote_db_info_path)
+    remote_host_override = args.remote_host or settings.remote_db_host_override
+    ssh_host = args.ssh_host or settings.remote_db_ssh_host
+    ssh_local_port = args.ssh_local_port or settings.remote_db_ssh_local_port
+    ssh_compression = (
+        args.ssh_compression
+        if args.ssh_compression is not None
+        else settings.remote_db_ssh_compression
+    )
+
+    command = list(args.remote_command)
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        print("db with-remote-dsn: missing command after `--`", file=sys.stderr)
+        sys.exit(2)
+
+    from krx_collector.infra.db_postgres.remote_sync import resolve_remote_dsn
+
+    with resolve_remote_dsn(
+        db_info_path=db_info_path,
+        host_override=remote_host_override,
+        ssh_host=ssh_host,
+        ssh_local_port=ssh_local_port,
+        ssh_compression=ssh_compression,
+    ) as (_info, dsn):
+        exit_code = _run_child_with_env_var(command, "SDC_REMOTE_DSN", dsn)
+
+    sys.exit(exit_code)
 
 
 def _handle_ops_freshness_report(args: argparse.Namespace) -> None:
@@ -1325,6 +1422,13 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
 
     print(f"   - Tickers processed: {result.tickers_processed}")
     print(f"   - Bars upserted: {result.bars_upserted}")
+    if result.auto_new_ticker_start_tickers:
+        print(f"   - Auto new-ticker starts: {result.auto_new_ticker_start_tickers}")
+    if result.baseline_clamped_tickers:
+        print(
+            f"   - Clamped new-ticker starts: {result.baseline_clamped_tickers} "
+            "(run full-history repair separately)"
+        )
     if args.incremental and result.errors:
         sys.exit(1)
 
@@ -1778,6 +1882,50 @@ def build_parser() -> argparse.ArgumentParser:
         help="Enable SSH compression for the optional DB tunnel (default: from config).",
     )
     db_sync_remote.set_defaults(handler=_handle_db_sync_remote)
+
+    db_with_remote_dsn = db_sub.add_parser(
+        "with-remote-dsn",
+        help=(
+            "Resolve the remote sj2-server DSN (opening an SSH tunnel if configured) and run "
+            "a child command with SDC_REMOTE_DSN injected into its environment only."
+        ),
+    )
+    db_with_remote_dsn.add_argument(
+        "--db-info-path",
+        default=None,
+        help="Path to the remote DB metadata file (default: from config).",
+    )
+    db_with_remote_dsn.add_argument(
+        "--remote-host",
+        default=None,
+        help="Override the remote DB hostname from db_info (default: from config/file).",
+    )
+    db_with_remote_dsn.add_argument(
+        "--ssh-host",
+        default=None,
+        help="Optional SSH host for port forwarding to the remote PostgreSQL server.",
+    )
+    db_with_remote_dsn.add_argument(
+        "--ssh-local-port",
+        type=int,
+        default=None,
+        help="Optional fixed local port for the SSH tunnel (default: random free port).",
+    )
+    db_with_remote_dsn.add_argument(
+        "--ssh-compression",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable SSH compression for the optional DB tunnel (default: from config).",
+    )
+    db_with_remote_dsn.add_argument(
+        "remote_command",
+        nargs=argparse.REMAINDER,
+        help=(
+            "Command to run with SDC_REMOTE_DSN set, e.g. "
+            "-- bin/raw-parquet-export-all.sh --route remote"
+        ),
+    )
+    db_with_remote_dsn.set_defaults(handler=_handle_db_with_remote_dsn)
 
     # -- ops ------------------------------------------------------------------
     ops_parser = subparsers.add_parser("ops", help="Read-only operational reports.")
@@ -2352,13 +2500,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-auto-range-days",
         type=int,
         default=10,
-        help="Maximum inclusive day range allowed for --incremental without override.",
+        help=(
+            "Maximum inclusive day range allowed for --incremental without override. "
+            "Also bounds auto-derived new-ticker starts (listing_date/first_seen_date)."
+        ),
     )
     prices_backfill.add_argument(
         "--new-ticker-start",
         type=_parse_date,
         default=None,
-        help="Explicit start date for tickers with no stored price baseline.",
+        help=(
+            "Explicit start date for tickers with no stored price baseline; "
+            "overrides stock_master listing_date/first_seen_date and is not "
+            "clamped to the auto-range window."
+        ),
     )
     prices_backfill.add_argument(
         "--allow-new-ticker-backfill",

@@ -52,7 +52,10 @@ catalog are pure code in `krx_collector.definitions/` (the marts import them);
 only `common_feature_series` remains a Postgres table the collector seeds and the
 mart shares via the lake (decision 7). Parity with the old Postgres path is frozen
 in `tests/unit/golden/*.json` (differential mart tests). See `docs/operations.md`
-"Parquet compute 파이프라인".
+"Parquet compute 파이프라인". Raw can come via either `--route local` (default;
+`db sync-remote --full-refresh` → mirror → export) or `--route remote` (direct
+sj2 capture through `db with-remote-dsn`, no local mirror) — see `bin/README.md`
+and `docs/dev/20260730_refactor_dump/00_dual_route_raw_export_plan.md`.
 
 ## Architecture
 

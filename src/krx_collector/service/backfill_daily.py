@@ -2,7 +2,11 @@
 
 Responsibilities:
     1. Determine the set of tickers to process (all active, or a subset).
-    2. For each ticker, determine the start date (defaults to 2000-01-01).
+    2. For each ticker, determine the start date. Non-incremental runs default
+       to an early date (2000-01-01) clamped up to the earliest stored bar when
+       no explicit ``--start`` is given; incremental runs start after
+       ``MAX(trade_date)``, or — for baseline-missing tickers — resolve a bounded
+       start from ``--new-ticker-start`` / ``listing_date`` / ``first_seen_date``.
     3. Chunk the date range into manageable batches to avoid memory issues
        and enable resume/checkpointing.
     4. Fetch daily bars from ``PriceProvider`` with rate limiting.
@@ -32,6 +36,38 @@ from krx_collector.util.time import now_kst, today_kst
 logger = logging.getLogger(__name__)
 
 
+def _resolve_new_ticker_incremental_start(
+    stock: Stock,
+    resolved_end: date,
+    new_ticker_start: date | None,
+    max_auto_range_days: int | None,
+) -> tuple[date | None, str | None, bool]:
+    """Resolve an incremental start for a baseline-missing ticker.
+
+    Returns (resolved_start, source_label, was_clamped):
+      - source_label ∈ {"new_ticker_start", "listing_date", "first_seen_date"}
+        or None when no start could be derived (caller records baseline_missing).
+      - was_clamped is True only when an auto-derived start (listing_date /
+        first_seen_date) was raised to the guard window.
+      - new_ticker_start is used verbatim and never clamped.
+    """
+    if new_ticker_start is not None:
+        return new_ticker_start, "new_ticker_start", False
+
+    auto_start: date | None = stock.listing_date or stock.first_seen_date
+    if auto_start is None:
+        return None, None, False
+    source = "listing_date" if stock.listing_date else "first_seen_date"
+
+    if max_auto_range_days is None:
+        return auto_start, source, False
+
+    guard_start = resolved_end - timedelta(days=max_auto_range_days - 1)
+    if auto_start < guard_start:
+        return guard_start, source, True
+    return auto_start, source, False
+
+
 def backfill_daily_prices(
     provider: PriceProvider,
     storage: Storage,
@@ -56,8 +92,12 @@ def backfill_daily_prices(
             fetch a single contiguous range starting from
             ``MAX(trade_date) + 1`` for each ticker. This trusts that
             historical data is already complete and is intended for
-            fast daily catch-up runs. Tickers with no stored rows fall
-            back to ``start`` (or the default early date).
+            fast daily catch-up runs. Tickers with no stored baseline
+            resolve a start via ``_resolve_new_ticker_incremental_start``
+            (``--new-ticker-start`` verbatim, else ``listing_date`` /
+            ``first_seen_date`` clamped to the ``max_auto_range_days``
+            window); a ticker with no derivable start records a
+            baseline-missing error.
     """
     run = IngestionRun(
         run_type=RunType.DAILY_BACKFILL,
@@ -148,28 +188,50 @@ def backfill_daily_prices(
                         )
                         resolved_start = next_date
                 elif start is None and not allow_new_ticker_backfill:
-                    if new_ticker_start is None:
+                    auto_start, source_label, was_clamped = _resolve_new_ticker_incremental_start(
+                        stock,
+                        resolved_end,
+                        new_ticker_start,
+                        max_auto_range_days,
+                    )
+                    if auto_start is None:
                         baseline_missing_tickers += 1
                         result.errors[ticker] = (
                             "No stored daily_ohlcv baseline for incremental backfill. "
-                            "Run explicit backfill or pass --new-ticker-start."
+                            "Run explicit backfill, pass --new-ticker-start, or populate "
+                            "stock_master listing_date/first_seen_date."
                         )
                         logger.warning("Skipping %s: %s", ticker, result.errors[ticker])
                         continue
-                    resolved_start = new_ticker_start
+                    if source_label in ("listing_date", "first_seen_date"):
+                        result.auto_new_ticker_start_tickers += 1
+                    if was_clamped:
+                        result.baseline_clamped_tickers += 1
+                        logger.warning(
+                            "Clamped %s: %s=%s -> %s (window=%dd); run full backfill " "separately",
+                            ticker,
+                            source_label,
+                            stock.listing_date or stock.first_seen_date,
+                            auto_start,
+                            max_auto_range_days,
+                        )
+                    resolved_start = auto_start
             else:
-                # Clamp start to the ticker's earliest stored trade date (if any).
-                # This avoids re-requesting pre-listing / pre-data-start ranges
-                # that the provider will never return on subsequent runs.
-                min_stored = storage.get_min_trade_date(ticker)
-                if min_stored and min_stored > resolved_start:
-                    logger.debug(
-                        "Clamping start for %s from %s to %s (earliest stored trade date)",
-                        ticker,
-                        resolved_start,
-                        min_stored,
-                    )
-                    resolved_start = min_stored
+                # Clamp the *default* early start up to the ticker's earliest stored
+                # trade date to avoid re-requesting pre-listing ranges the provider
+                # never returns. Only when start is None: an explicit --start is an
+                # operator decision and must be honored so full-history repair can
+                # reach before the earliest stored bar.
+                if start is None:
+                    min_stored = storage.get_min_trade_date(ticker)
+                    if min_stored and min_stored > resolved_start:
+                        logger.debug(
+                            "Clamping start for %s from %s to %s (earliest stored trade date)",
+                            ticker,
+                            resolved_start,
+                            min_stored,
+                        )
+                        resolved_start = min_stored
 
             if resolved_start > resolved_end:
                 logger.info(
@@ -279,6 +341,8 @@ def backfill_daily_prices(
             "bars_upserted": result.bars_upserted,
             "no_work_tickers": no_work_tickers,
             "baseline_missing_tickers": baseline_missing_tickers,
+            "baseline_clamped_tickers": result.baseline_clamped_tickers,
+            "auto_new_ticker_start_tickers": result.auto_new_ticker_start_tickers,
             "range_too_large_tickers": range_too_large_tickers,
             "error_count": len(result.errors),
         }

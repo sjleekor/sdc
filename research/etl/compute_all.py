@@ -6,18 +6,23 @@ raw lake, replacing the sj2 compute Cronicle events. Steps (each gated):
     freshness -> marts (normalize + build-daily) -> coverage/readiness -> features
 
 The raw mirror + parquet export run in the wrapping shell (db sync-remote +
-raw-parquet-export-all.sh); this module assumes the raw lake for ``--snapshot-date``
-already exists. Gate failures print a human-readable summary to stderr and exit
-non-zero (no notifier — interactive run, OQ1). Nothing is written back to Postgres.
+raw-parquet-export-all.sh); this module requires that export wrapper's
+``_manifests/_SUCCESS.json`` completion marker for ``--snapshot-date``/``--source``
+before it will read the lake (bypass with ``--allow-incomplete-lake``; see
+docs/dev/20260730_refactor_dump/00_dual_route_raw_export_plan.md §3.7). Gate
+failures print a human-readable summary to stderr and exit non-zero (no notifier —
+interactive run, OQ1). Nothing is written back to Postgres.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import date
 
-from research.etl.config import EngineOptions, LakeConfig
+from krx_collector.util.time import now_kst
+from research.etl.config import CONFIG_TABLES, RAW_TABLES, EngineOptions, LakeConfig
 from research.etl.lake import (
     _common_feature_calendars,
     connect,
@@ -43,6 +48,30 @@ def _eprint(*args: object) -> None:
     print(*args, file=sys.stderr)
 
 
+def _check_lake_complete(cfg: LakeConfig, *, allow_incomplete_lake: bool) -> str | None:
+    """Verify the export wrapper's completion marker before trusting the raw lake.
+
+    ``bin/raw-parquet-export-all.sh`` writes ``_manifests/_SUCCESS.json`` only after
+    every configured table is confirmed complete (§3.7 of the dual-route plan) — a
+    half-finished export (crash, killed job, still running) leaves no such marker.
+    Returns an error message if the gate fails, or ``None`` if it passes.
+    """
+    success_path = cfg.raw_root / "_manifests" / "_SUCCESS.json"
+    if not success_path.exists():
+        return f"raw lake capture not marked complete: {success_path} missing"
+
+    with open(success_path, encoding="utf-8") as f:
+        success = json.load(f)
+    expected_tables = set(RAW_TABLES) | set(CONFIG_TABLES)
+    actual_tables = set(success.get("tables", {}))
+    if actual_tables != expected_tables:
+        missing = sorted(expected_tables - actual_tables)
+        extra = sorted(actual_tables - expected_tables)
+        return f"{success_path} table set mismatch (missing={missing}, extra={extra})"
+
+    return None
+
+
 def _register_series_if_present(con, cfg: LakeConfig) -> None:
     """Register common_feature_series opportunistically (decision 7 fallback)."""
     from research.etl.lake import _glob_has_files
@@ -61,6 +90,8 @@ def run(
     threads: int = 4,
     memory_limit: str = "4GB",
     with_features: bool = False,
+    source: str | None = None,
+    allow_incomplete_lake: bool = False,
 ) -> int:
     """Run the compute pipeline from ``from_step``. Returns a process exit code."""
     if from_step not in _STEPS:
@@ -70,17 +101,22 @@ def run(
 
     cfg = LakeConfig(
         snapshot_date=snapshot_date or LakeConfig().snapshot_date,
+        source=source or LakeConfig().source,
         engine=EngineOptions(threads=threads, memory_limit=memory_limit),
     )
-    if not cfg.raw_root.exists():
-        _eprint(f"raw lake not present at {cfg.raw_root}; run sync + export first")
-        return 1
+    lake_error = _check_lake_complete(cfg, allow_incomplete_lake=allow_incomplete_lake)
+    if lake_error:
+        if allow_incomplete_lake:
+            _eprint(f"WARNING: {lake_error}; proceeding anyway (--allow-incomplete-lake)")
+        else:
+            _eprint(f"{lake_error}; run the export wrapper first (or pass --allow-incomplete-lake)")
+            return 1
 
     con = connect(cfg)
     register_views(con, cfg, tables=_SMF_RAW_INPUTS + _CF_RAW_INPUTS)
     _register_series_if_present(con, cfg)
     _, feature_dates = _common_feature_calendars(con)
-    gate_end = end or (feature_dates[-1] if feature_dates else date.today())
+    gate_end = end or now_kst().date()
 
     # 1) freshness gate (raw inputs fresh enough?)
     if start_idx <= _STEPS.index("freshness"):
@@ -94,10 +130,10 @@ def run(
 
     # 2) derived marts (normalize + build-daily)
     if start_idx <= _STEPS.index("marts"):
-        created = register_derived_marts(con, cfg)
+        created = register_derived_marts(con, cfg, persist=True, force=True)
         smf_n = con.execute("SELECT count(*) FROM stock_metric_fact").fetchone()[0]
         cfdf_n = con.execute("SELECT count(*) FROM common_feature_daily_fact").fetchone()[0]
-        print(f"marts built: {created} (smf={smf_n}, cfdf={cfdf_n})")
+        print(f"marts built + persisted: {created} (smf={smf_n}, cfdf={cfdf_n})")
     else:
         register_derived_marts(con, cfg)  # need the views for later steps
 
@@ -128,13 +164,35 @@ def run(
 
 
 def _build_features(con, cfg: LakeConfig) -> None:
-    """Build the feat_*/labels marts on top of the derived marts (optional step)."""
+    """Build the A0 price/flow/label inputs plus legacy model feature views."""
     from research.etl.calendar import materialize_calendar
     from research.etl.features import common as cf_feat
     from research.etl.features import fin_pit
-    from research.etl.universe import UniverseFilter, build_universe_sql
+    from research.etl.features.flow import materialize_flow
+    from research.etl.features.price import materialize_price
+    from research.etl.labels import materialize_label_scan
+    from research.etl.quality import QUALITY_TABLE, materialize_price_quality
+    from research.etl.stock_pit import PIT_TABLE, materialize_stock_pit
+    from research.etl.universe import (
+        UniverseFilter,
+        build_universe_sql,
+        materialize_named_universes,
+    )
 
     register_views(con, cfg, tables=["krx_security_flow_raw"])
+    materialize_stock_pit(con, cfg, force=False)
+    materialize_price_quality(con, cfg, pit_view=PIT_TABLE, force=False)
+    materialize_named_universes(con, cfg, force=False)
+    materialize_price(con, cfg, quality_view=QUALITY_TABLE, force=False)
+    materialize_flow(
+        con,
+        cfg,
+        price_view="daily_ohlcv",
+        pit_view=PIT_TABLE,
+        quality_view=QUALITY_TABLE,
+        force=False,
+    )
+    materialize_label_scan(con, cfg, quality_view=QUALITY_TABLE, force=False)
     materialize_calendar(con, cfg)
     con.execute(
         f"CREATE OR REPLACE VIEW dim_universe_daily AS {build_universe_sql(UniverseFilter())}"
@@ -146,12 +204,20 @@ def _build_features(con, cfg: LakeConfig) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot-date", default=None)
+    parser.add_argument(
+        "--source", default=None, help="lake source= partition (default: local_mydb)"
+    )
     parser.add_argument("--from-step", default="freshness", choices=_STEPS)
     parser.add_argument("--end", default=None, help="freshness gate end date YYYY-MM-DD")
     parser.add_argument("--required-coverage-ratio", type=float, default=1.0)
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--memory-limit", default="4GB")
     parser.add_argument("--features", action="store_true", help="also build feat_*/labels")
+    parser.add_argument(
+        "--allow-incomplete-lake",
+        action="store_true",
+        help="bypass the _SUCCESS.json completeness gate (prints a warning)",
+    )
     args = parser.parse_args(argv)
 
     end = date.fromisoformat(args.end) if args.end else None
@@ -163,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
         threads=args.threads,
         memory_limit=args.memory_limit,
         with_features=args.features,
+        source=args.source,
+        allow_incomplete_lake=args.allow_incomplete_lake,
     )
 
 

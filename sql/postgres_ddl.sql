@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS stock_master (
     status          TEXT        NOT NULL,   -- ACTIVE | DELISTED | UNKNOWN
     last_seen_date  DATE        NOT NULL,
     source          TEXT        NOT NULL,   -- FDR | PYKRX
+    listing_date    DATE,                   -- source-reported listing date (FDR only)
+    first_seen_date DATE,                   -- first as_of_date observed ACTIVE (storage-managed)
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (ticker, market)
 );
@@ -43,8 +45,32 @@ CREATE TABLE IF NOT EXISTS stock_master_snapshot_items (
     market          TEXT        NOT NULL,
     name            TEXT        NOT NULL,
     status          TEXT        NOT NULL,
+    listing_date    DATE,       -- source-reported listing date (FDR only); NULL for old snapshots
     UNIQUE (snapshot_id, ticker, market)
 );
+
+-- New-ticker start-date support (2026-07): listing / first-seen dates.
+-- ADD COLUMN IF NOT EXISTS keeps a rerun of this file idempotent for
+-- databases created before these columns existed.
+ALTER TABLE stock_master
+    ADD COLUMN IF NOT EXISTS listing_date    DATE,
+    ADD COLUMN IF NOT EXISTS first_seen_date DATE;
+
+ALTER TABLE stock_master_snapshot_items
+    ADD COLUMN IF NOT EXISTS listing_date DATE;
+
+-- One-time, idempotent backfill of first_seen_date for pre-existing rows.
+-- Prefers the earliest snapshot the ticker appears in; falls back to
+-- last_seen_date. Only touches NULLs, so re-running db init is a no-op.
+UPDATE stock_master sm
+SET first_seen_date = COALESCE(
+        (SELECT MIN(s.as_of_date)
+           FROM stock_master_snapshot_items i
+           JOIN stock_master_snapshot s ON s.snapshot_id = i.snapshot_id
+          WHERE i.ticker = sm.ticker
+            AND i.market = sm.market),
+        sm.last_seen_date)
+WHERE sm.first_seen_date IS NULL;
 
 -- 4) daily_ohlcv ─ daily price bars
 CREATE TABLE IF NOT EXISTS daily_ohlcv (

@@ -117,6 +117,8 @@ def sync_universe(
                 status=ListingStatus.DELISTED,
                 last_seen_date=old_s.last_seen_date,  # keep the last seen date
                 source=old_s.source,
+                listing_date=old_s.listing_date,
+                first_seen_date=old_s.first_seen_date,
             )
             upsert_records.append(delisted_stock)
 

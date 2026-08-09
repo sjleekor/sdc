@@ -45,8 +45,8 @@ uv run krx-collector prices backfill --market kospi
 
 | 모드 | 시작일 결정 | 조회 범위 | 주 용도 |
 |---|---|---|---|
-| **기본** | `--start` (또는 2000-01-01), 각 티커의 `MIN(trade_date)`로 자동 클램핑 | 거래일 캘린더 기준 누락된 모든 영업일을 구간으로 묶어 fetch | 최초 백필, 히스토리 보강, 중간 구멍(holes) 메우기 |
-| **`--incremental`** | 각 티커의 `MAX(trade_date) + 1` (또는 `--start` 중 더 늦은 날) | 시작일 ~ `--end`까지 단일 연속 구간 | 매일 돌리는 catch-up cron |
+| **기본** | `--start` (또는 2000-01-01). `--start`가 없을 때만 각 티커의 `MIN(trade_date)`로 자동 클램핑 | 거래일 캘린더 기준 누락된 모든 영업일을 구간으로 묶어 fetch | 최초 백필, 히스토리 보강, 중간 구멍(holes) 메우기 |
+| **`--incremental`** | 각 티커의 `MAX(trade_date) + 1` (또는 `--start` 중 더 늦은 날). baseline이 없으면 `--new-ticker-start` / `listing_date` / `first_seen_date`로 결정(아래 참고) | 시작일 ~ `--end`까지 단일 연속 구간 | 매일 돌리는 catch-up cron |
 
 **언제 어떤 모드를 써야 하나?**
 
@@ -65,7 +65,40 @@ uv run krx-collector prices backfill --tickers 005930,000660 --incremental
 uv run krx-collector prices backfill --market all
 ```
 
-> **메모**: 두 모드 모두 주말·공휴일은 `query_missing_days` / 단일 구간 fetch 단계에서 자연스럽게 배제됩니다. 또한 기본 모드에서는 `MIN(trade_date)` 클램프 덕분에 005930처럼 pykrx가 제공하지 못하는 과거 구간(예: 2014-01-20 이전)을 매 실행마다 헛스캔하지 않습니다.
+> **메모**: 두 모드 모두 주말·공휴일은 `query_missing_days` / 단일 구간 fetch 단계에서 자연스럽게 배제됩니다. 또한 기본 모드에서는 `MIN(trade_date)` 클램프 덕분에 005930처럼 pykrx가 제공하지 못하는 과거 구간(예: 2014-01-20 이전)을 매 실행마다 헛스캔하지 않습니다. 단, `MIN(trade_date)` 클램프는 **`--start`가 없을 때만** 적용됩니다. 명시적 `--start`는 운영자 의도로 존중되므로, 최근 baseline이 이미 있어도 그보다 이른 히스토리를 다시 채울 수 있습니다(아래 신규 종목 full-history 복구 참고).
+
+#### 신규 상장 종목 (baseline 없는 티커) 시작일 결정
+
+`--incremental` 모드에서 `daily_ohlcv` baseline이 아직 없는 `ACTIVE` 티커는 다음 우선순위로 시작일을 정합니다(운영자가 `PRICE_NEW_TICKER_START`를 설정할 필요 없음):
+
+1. `--new-ticker-start`가 있으면 그대로 사용(클램프하지 않음).
+2. 없으면 `stock_master.listing_date`(FDR 제공) → 자동 시작일; **클램프**.
+3. 없으면 `stock_master.first_seen_date`(수집기가 처음 ACTIVE로 관측한 날) → 자동 시작일; **클램프**.
+4. 셋 다 없으면 baseline-missing 에러로 기록하고 해당 티커만 건너뜁니다.
+
+클램프는 자동 시작일(2·3번)을 `--max-auto-range-days` 가드 윈도(`end - (N-1)`)까지 끌어올려, 긴 과거 백필이 daily critical path에 들어오지 않게 합니다. 클램프된 티커 수는 `ingestion_runs.counts.baseline_clamped_tickers`와 stdout(`- Clamped new-ticker starts: N`)에 집계됩니다. 명시적 `--new-ticker-start`(오래된 날짜)와 오래된 기존 `MAX(trade_date)`는 여전히 `--allow-large-range` 없이는 range 가드에서 실패합니다.
+
+**클램프된 티커의 full-history 복구** — daily chain 밖에서, **비증분(`--incremental` 생략)** 모드로 명시적 `--start`를 주어 실행합니다. §5.7 수정 덕분에 명시적 `--start`는 최근 baseline의 `MIN(trade_date)`로 앞당겨지지 않고 그대로 존중됩니다:
+
+```bash
+# baseline_clamped_tickers로 잡힌 종목을 상장일부터 다시 채우기
+uv run krx-collector prices backfill \
+  --tickers 475040,153890,0164H0 \
+  --start 2026-06-01 --end 2026-07-03
+```
+
+상장일보다 늦게 첫 가격이 찍힌 종목을 찾는 운영자 쿼리:
+
+```sql
+SELECT sm.ticker, sm.name, sm.market, sm.listing_date, sm.first_seen_date,
+       MIN(d.trade_date) AS first_price_date
+FROM stock_master sm
+JOIN daily_ohlcv d ON d.ticker = sm.ticker AND d.market = sm.market
+WHERE sm.status = 'ACTIVE' AND sm.listing_date IS NOT NULL
+GROUP BY sm.ticker, sm.name, sm.market, sm.listing_date, sm.first_seen_date
+HAVING MIN(d.trade_date) > sm.listing_date
+ORDER BY sm.listing_date DESC, sm.ticker;
+```
 
 ### 종목 유니버스 전체 갱신 (Full Refresh)
 
@@ -273,10 +306,62 @@ bin/parquet-compute-all.sh
 bin/parquet-compute-all.sh --features
 ```
 
+### 경로 선택 (`--route local` / `--route remote`)
+
+raw 확보는 **두 경로 중 선택**할 수 있습니다(`docs/dev/20260730_refactor_dump/00_dual_route_raw_export_plan.md`).
+`--route`를 생략하면 지금까지와 완전히 동일하게 동작합니다(`local`이 기본값).
+
+| 경로 | 흐름 | 로컬 SSD | 용도 |
+|---|---|---|---|
+| **`local`(기본)** | sj2 → `db sync-remote --full-refresh` → mydb → parquet | ~189 GB 상주 | 반복 재계산, 오프라인, 재현 가능한 재읽기 |
+| **`remote`** | sj2 → parquet 직접 캡처 | 0 GB(출력만) | 1회성 최신 캡처, 디스크 절약, 전체적으로 더 빠름(90분 미러 갱신을 생략) |
+
+```bash
+# 직접 캡처 경로 (sj2 SSH 터널 필요 시 --ssh-host 전달)
+bin/parquet-compute-all.sh --route remote --ssh-host sj2-server
+```
+
+- `remote` 경로는 raw-parquet-exporter 바이너리를 손대지 않고 `db with-remote-dsn`으로 감싸
+  `SDC_REMOTE_DSN`을 export 하위 프로세스에만 주입합니다. 자격증명은 `stock_data_collector_secrets/db_info`에서
+  읽습니다(`db sync-remote`와 동일).
+- **캡처 격리 수준.** 정책은 여전히 테이블 export 시점별 read-committed입니다(공유 스냅샷 아님).
+  raw 테이블이 `ON CONFLICT ... DO UPDATE`로 기존 행도 갱신하므로, export가 수집(Cronicle) 창과
+  겹치면 한 테이블 안에 서로 다른 시점의 값이 섞일 수 있습니다. 그래서 결과물을 "스냅샷"이 아니라
+  **"캡처(capture)"**라고 부릅니다. 가능하면 Cronicle 체인(18:30/20:30/23:30/04:00 KST)과 겹치지 않는
+  시각에 실행하세요. 캡처 창과 수집 창이 겹쳤는지는 `_SUCCESS.json`의 `collector_overlap`에 기록됩니다.
+- `--route remote --features`는 아직 차단되어 있습니다 — 모델별 dataset 경로(`dataset_dir()`)가 아직
+  `source=`로 분리되지 않아, remote 캡처로 만든 feature/label 마트가 local 캡처 결과를 같은
+  `--snapshot-date`에서 덮어쓸 수 있기 때문입니다.
+
+### `_SUCCESS.json` 완료 표식
+
+`bin/raw-parquet-export-all.sh`는 설정된 13개 테이블이 **전부** skip/export/resume으로 완료된 뒤에만
+`data_lake/raw_postgres/snapshot_date=<D>/source=<S>/_manifests/_SUCCESS.json`을 원자적으로 씁니다.
+`research.etl.compute_all`은 이 표식이 없거나 테이블 목록이 기대치(13개)와 다르면 **거부**합니다 —
+export가 절반만 끝난 레이크로 조용히 계산이 도는 것을 막기 위함입니다.
+
+긴급하게 우회해야 하면(예: 부분 이력만으로 먼저 확인하고 싶을 때) `--allow-incomplete-lake`를 씁니다.
+기본은 off이고, 쓰면 stderr에 경고가 남습니다.
+
+```bash
+uv run python -m research.etl.compute_all --snapshot-date 2026-07-30 --allow-incomplete-lake
+```
+
+### export 실패 후 재실행
+
+한 테이블이라도 실패하면 `_SUCCESS.json`은 쓰이지 않고 스크립트는 실패한 테이블 목록과 함께
+non-zero로 종료합니다. **같은 `--snapshot-date`/`--route`로 다시 실행**하면 됩니다 — 이미 완료된
+테이블(유효한 manifest 존재)은 skip, 도중에 끊긴 테이블(체크포인트 1개, `raw_id_range`/`date_month`
+전략만)은 `resume`으로 이어받고, resume을 지원하지 않는 나머지 7개 테이블(`full_table`/
+`snapshot_items` 전략)은 저렴하므로 그냥 다시 `--force` export합니다. 한 테이블에 미완료 체크포인트가
+2개 이상 쌓여 있으면(반복 중단) 자동 판단을 포기하고 에러를 내며 `--force-table <테이블명>`을
+요구합니다.
+
 ### 단계 (각 단계는 게이트)
 
-1. `db sync-remote` — sj2 raw + `common_feature_series`를 로컬 mydb로 미러.
-2. `bin/raw-parquet-export-all.sh` — mydb → `data_lake/raw_postgres/<snapshot>/...` parquet.
+1. `db sync-remote --full-refresh`(`--route local`) 또는 sj2 직접 캡처(`--route remote`) — raw +
+   `common_feature_series` 확보.
+2. `bin/raw-parquet-export-all.sh` — 확보한 DB → `data_lake/raw_postgres/<snapshot>/...` parquet.
 3. **freshness 게이트** — raw 입력이 충분히 신선한지(`common_feature_observation_raw` 최신 관측이
    series별 허용 lag 이내) 확인. 미달 시 non-zero exit + stderr 요약 → compute가 stale raw 위에서
    도는 것을 차단.

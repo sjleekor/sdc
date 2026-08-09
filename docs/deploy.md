@@ -98,6 +98,8 @@ docker compose run --rm collector prices backfill \
 
 `--incremental` 모드는 종목별 `MAX(trade_date) + 1`부터 오늘(KST)까지 한 번의 연속 구간으로 가져온다. 중간 누락 구간을 찾는 gap detection은 하지 않는다.
 
+신규 상장 종목(`daily_ohlcv` baseline 없음)은 `stock_master.listing_date`(FDR 제공) 또는 `first_seen_date`(수집기 관측)로 시작일을 자동 결정하고 `--max-auto-range-days` 윈도로 클램프하므로, 운영자가 `PRICE_NEW_TICKER_START`를 설정하지 않아도 daily 작업이 baseline 부재로 실패하지 않는다. 클램프된 종목 수는 `ingestion_runs.counts.baseline_clamped_tickers`에 집계되며, 상장일부터의 full-history는 daily chain 밖에서 비증분 + 명시적 `--start`로 별도 복구한다(자세한 절차는 `docs/operations.md` "신규 상장 종목" 참고). 래퍼는 여전히 `PRICE_NEW_TICKER_START`, `PRICE_ALLOW_NEW_TICKER_BACKFILL`, `PRICE_ALLOW_LARGE_RANGE`를 긴급 override로 지원하지만, 임시 9일 default는 두지 않는다.
+
 ### 3. `flows-sync.sh`
 
 ```bash
@@ -234,29 +236,11 @@ docker compose run --rm collector dart sync-xbrl \
 
 XBRL 수집 대상은 먼저 `dart_financial_statement_raw`에 저장된 `rcept_no`에서 만든다. 재무 raw row가 없으면 해당 filing의 XBRL 요청도 만들 수 없다. 일일 래퍼는 `--incremental` 모드를 사용하고 negative cache/max-attempt guard를 적용한다.
 
-### 5. `metrics-normalize.sh`
+### 5. Metric mart compute
 
-```bash
-docker compose run --rm collector metrics normalize \
-  --incremental \
-  --lookback-years "${SDC_METRICS_NORMALIZE_LOOKBACK_YEARS:-2}"
-```
-
-| 항목 | 내용 |
-|---|---|
-| 외부 source | 없음. DB raw table을 정규화 |
-| 주요 read table | `dart_corp_master`, `dart_financial_statement_raw`, `dart_share_count_raw`, `dart_shareholder_return_raw`, `dart_xbrl_fact_raw`, `metric_mapping_rule` |
-| write table | `metric_catalog`, `metric_mapping_rule`, `stock_metric_fact`, `ingestion_runs` |
-| `ingestion_runs.run_type` | `metric_normalize` |
-
-저장 데이터:
-
-- `metric_catalog`: canonical metric 사전. 매출액, 영업이익, 총자산, 발행주식수, DPS, 가중평균주식수 등 표준 metric 정의.
-- `metric_mapping_rule`: raw row를 canonical metric으로 변환하는 규칙. 실행 시 기존 rule을 inactive로 만들고 현재 기본 rule set을 upsert한다.
-- `stock_metric_fact`: 종목/사업연도/보고서/metric 단위 정규화 fact. 원천 raw table, 원천 row key, 적용 mapping rule, period type/end, numeric value를 저장한다.
-- `ingestion_runs`: 정규화 대상 수, catalog/rule upsert 수, fact write 수, 에러 수.
-
-일일 래퍼는 `--incremental` 모드를 사용해 현재 연도와 최근 lookback business year만 정규화한다. 기본 lookback은 2년이다.
+`metrics normalize`와 `metrics coverage-report` collector 명령은 리팩터 후 제거됐다. OpenDART
+raw 수집은 `dart-sync-xbrl.sh`에서 종료되며, canonical-compatible `stock_metric_fact`는 compute
+노드에서 `bin/parquet-compute-all.sh`가 raw parquet 위 DuckDB mart로 재계산한다.
 
 ## Common feature source events
 
@@ -269,18 +253,14 @@ docker compose run --rm collector common sync --sources fred --incremental --loo
 docker compose run --rm collector common sync --sources ecos --incremental --lookback-days <lookback> --end <end>
 docker compose run --rm collector common sync --sources ecos --series macro_cpi,macro_ppi,macro_m2,macro_consumer_sentiment --incremental --lookback-days <macro_lookback> --end <end>
 docker compose run --rm collector common sync --sources krx --incremental --lookback-days <lookback> --end <end>
-docker compose run --rm collector ops assert-common-freshness --sources fdr,fred,ecos,krx --end <end>
-docker compose run --rm collector common build-daily --incremental --lookback-days <build_lookback> --end <end>
-docker compose run --rm collector common coverage-report --start <readiness_start> --end <end>
-docker compose run --rm collector common readiness-report --start <readiness_start> --end <end> --required-coverage-ratio 1.0 --fail-on-not-ready
 ```
 
 | 항목 | 내용 |
 |---|---|
 | 외부 source | KRX direct, ECOS, FRED, FinanceDataReader |
-| 주요 read table | `common_feature_series`, `common_feature_catalog`, `common_feature_observation_raw`, KRX 휴장일 CSV |
-| write table | `common_feature_series`, `common_feature_catalog`, `common_feature_catalog_input`, `common_feature_observation_raw`, `common_feature_daily_fact`, `ingestion_runs` |
-| `ingestion_runs.run_type` | `common_feature_sync`, `common_feature_build` |
+| 주요 read table | `common_feature_series`, `common_feature_observation_raw` |
+| write table | `common_feature_series`, `common_feature_observation_raw`, `ingestion_runs` |
+| `ingestion_runs.run_type` | `common_feature_sync` |
 
 기본 lookback:
 
@@ -288,12 +268,9 @@ docker compose run --rm collector common readiness-report --start <readiness_sta
 |---|---:|---|
 | daily sync | 45 calendar days | KRX/FDR/FRED/ECOS 일간 source 최근분 보강 |
 | monthly macro sync | 540 calendar days | CPI/PPI/M2/CSI revision 및 YoY 입력 보강 |
-| build daily | 120 calendar days | 최근 모델 feature row 재생성 |
-| readiness | 60 calendar days | 운영 품질 판정 |
 
-`common-build-daily.sh`는 build 전에 `ops assert-common-freshness`를 실행한다. 기본 필수 source는 `fdr,fred,ecos,krx`이며 `pykrx` common source는 wrapper만 준비하고 기본 Cronicle 활성화/필수 source에서는 제외한다. `pykrx`를 운영 필수로 승격할 때는 `SDC_COMMON_ENABLE_PYKRX=1`과 `SDC_COMMON_REQUIRED_SOURCES=fdr,fred,ecos,krx,pykrx`를 함께 적용한다. freshness guard 기본값은 source run age 30시간, daily observation lag 2일, macro observation lag 60일이다.
-
-`readiness-report --fail-on-not-ready`가 not-ready feature 또는 report error를 발견하면 exit code `2`로 종료한다. Cronicle은 이 exit code를 이벤트 실패로 기록한다.
+파생 `common_feature_daily_fact`, coverage, readiness는 sj2에서 실행하지 않는다. raw mirror/export 후
+compute 노드에서 `bin/parquet-compute-all.sh`가 freshness/readiness gate를 수행한다.
 
 ## 테이블별 write 경로
 
@@ -310,14 +287,8 @@ docker compose run --rm collector common readiness-report --start <readiness_sta
 | `dart_shareholder_return_raw` | `dart-sync-share-info.sh` | OpenDART 배당/자기주식 공시 raw metric row |
 | `dart_xbrl_document` | `dart-sync-xbrl.sh` | OpenDART XBRL ZIP 문서 메타데이터 |
 | `dart_xbrl_fact_raw` | `dart-sync-xbrl.sh` | OpenDART XBRL instance fact raw row |
-| `metric_catalog` | `metrics-normalize.sh` | canonical metric 정의 |
-| `metric_mapping_rule` | `metrics-normalize.sh` | raw-to-canonical metric mapping rule |
-| `stock_metric_fact` | `metrics-normalize.sh` | 종목별 canonical metric fact |
 | `common_feature_series` | `common-seed-catalog.sh` | 공통 feature source catalog |
-| `common_feature_catalog` | `common-seed-catalog.sh` | 모델 노출 공통 feature catalog |
-| `common_feature_catalog_input` | `common-seed-catalog.sh` | feature와 source series input mapping |
 | `common_feature_observation_raw` | `common-sync-fdr.sh`, `common-sync-fred.sh`, `common-sync-ecos-*.sh`, `common-sync-krx.sh`, optional `common-sync-pykrx.sh` | 시장/거시 source raw observation |
-| `common_feature_daily_fact` | `common-build-daily.sh` | KRX 거래일 기준 PIT-safe 공통 feature fact |
 | `ingestion_runs` | 모든 collector 명령 | collector 실행 감사 로그, 상태, counts, 에러 요약 |
 
 ## 주요 의존성
@@ -331,14 +302,13 @@ docker compose run --rm collector common readiness-report --start <readiness_sta
 | `dart sync-financials` | `dart_corp_master` | active OpenDART corp mapping이 있어야 기업별 재무 요청을 만든다. |
 | `dart sync-share-info` | `dart_corp_master` | active OpenDART corp mapping이 있어야 주식수/배당/자사주 요청을 만든다. |
 | `dart sync-xbrl` | `dart_financial_statement_raw` | 저장된 재무 raw의 `rcept_no`를 XBRL ZIP 요청 키로 사용한다. |
-| `metrics normalize` | DART raw tables, `dart_corp_master` | raw row를 canonical metric으로 변환하고 market/corp_code를 채운다. |
-| `ops assert-common-freshness` | `ingestion_runs`, `common_feature_series`, `common_feature_observation_raw` | 필수 common source 최신 성공 run과 raw observation freshness를 build 전 gate로 검사한다. |
-| `common build-daily` | `common_feature_observation_raw`, `common_feature_catalog_input` | raw observation을 KRX 거래일 기준 point-in-time daily fact로 정렬한다. |
+| Parquet compute `stock_metric_fact` mart | DART raw tables, `dart_corp_master`, code metric definitions | raw row를 canonical-compatible metric mart로 변환한다. |
+| Parquet compute `common_feature_daily_fact` mart | `common_feature_series`, `common_feature_observation_raw`, code common feature definitions | raw observation을 KRX 거래일 기준 point-in-time daily fact mart로 정렬한다. |
 
 ## 운영상 주의사항
 
 - 대부분의 raw 수집 명령은 기존 key가 있으면 `--force` 없이는 skip한다. 재실행은 대체로 멱등적이며, 필요한 경우 동일 파라미터로 다시 실행해 누락분을 이어받는다.
 - OpenDART 명령은 모든 API key가 일일 한도에 도달하면 exit code `75`로 종료한다. Cronicle script는 `set -e`라서 그 시점에서 이벤트가 중단된다.
-- KRX 수급(`krx_security_flow_raw`) 수집은 `sdc_daily_krx_flows`의 `flows-sync.sh`가 수행한다. OpenDART 계열 event는 DART raw 수집과 `stock_metric_fact` 정규화만 담당한다.
+- KRX 수급(`krx_security_flow_raw`) 수집은 `sdc_daily_krx_flows`의 `flows-sync.sh`가 수행한다. OpenDART 계열 event는 DART raw 수집만 담당한다.
 - manual/backfill 실행 전에는 해당 domain의 daily root event를 Cronicle에서 일시 비활성화한다. daily wrapper는 기본적으로 source lock을 잡지 않으므로, backfill lock만으로 daily overlap을 막을 수 없다.
-- 현재 나열된 collector 경로는 `sync_checkpoints`, `operating_source_document`, `operating_metric_fact`에는 쓰지 않는다.
+- 현재 나열된 collector 경로는 `sync_checkpoints`에는 쓰지 않는다. operating KPI 파일럿 테이블은 리팩터 P5에서 제거됐다.

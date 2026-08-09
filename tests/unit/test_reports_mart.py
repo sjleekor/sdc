@@ -74,6 +74,7 @@ def _load_observations(con: duckdb.DuckDBPyConnection, observations) -> None:
 def _build_mart_con(observations, series_list, catalog, start, end, monkeypatch):
     monkeypatch.setattr(common_build, "default_common_feature_series", lambda: series_list)
     monkeypatch.setattr(common_build, "default_common_feature_catalog", lambda: catalog)
+    monkeypatch.setattr(reports, "default_common_feature_catalog", lambda: catalog)
     feature_dates = _krx_days(start, end)
     first_avail = min(
         (o.available_from_date for o in observations if o.available_from_date is not None),
@@ -169,6 +170,29 @@ def test_readiness_matches_golden(golden, monkeypatch):
         r.feature_code: r.ready for r in reports.readiness_report(con, feature_dates=feature_dates)
     }
     assert {k: bool(v) for k, v in golden["readiness"].items()} == mart
+
+
+def test_readiness_includes_catalog_feature_with_zero_facts(monkeypatch):
+    series = [_series("market_kospi", max_stale_business_days=2)]
+    catalog = [
+        _feature("market_kospi_close", transform_code="level"),
+        _feature("missing_feature", transform_code="level", series_id="missing_series"),
+    ]
+    obs = [_obs(1, "market_kospi", date(2026, 1, 5), date(2026, 1, 6), "2500")]
+    con, feature_dates = _build_mart_con(
+        obs,
+        series,
+        catalog,
+        date(2026, 1, 6),
+        date(2026, 1, 7),
+        monkeypatch,
+    )
+
+    rows = {r.feature_code: r for r in reports.readiness_report(con, feature_dates=feature_dates)}
+
+    assert "missing_feature" in rows
+    assert rows["missing_feature"].ready is False
+    assert any("missing_count=2" == blocker for blocker in rows["missing_feature"].blockers)
 
 
 def test_freshness_gate_flags_stale_series():
