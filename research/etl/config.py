@@ -35,7 +35,10 @@ CANONICAL_LAKE_NAME = "canonical_postgres"
 DERIVED_MART_LAKE_NAME = "derived_mart"
 
 # Default export source (exporter writes ``source=<name>`` into the path).
-DEFAULT_SOURCE = "local_mydb"
+# Override with SDC_LAKE_SOURCE for the sj2-direct capture route (dual-route
+# raw export, docs/dev/20260730_refactor_dump/00_dual_route_raw_export_plan.md).
+DEFAULT_SOURCE = os.environ.get("SDC_LAKE_SOURCE", "local_mydb")
+REMOTE_SOURCE = "sj2_remote"
 
 # Default snapshot — the lake export this model was designed against
 # (etl_01 §1, §5). Override per run via SDC_SNAPSHOT_DATE or LakeConfig.
@@ -116,6 +119,9 @@ class LakeConfig:
     data_lake_root: Path = DATA_LAKE_ROOT
     datasets_root: Path = DATASETS_ROOT
     engine: EngineOptions = field(default_factory=EngineOptions)
+    # Optional analysis-contract hash.  A0 sets this to the canonical horizon
+    # scan YAML hash so a changed preregistration cannot reuse old marts.
+    analysis_config_hash: str | None = None
 
     def lake_root(self, lake_name: str) -> Path:
         """Root for one lake (``raw_postgres`` / ``canonical_postgres``)."""
@@ -139,8 +145,13 @@ class LakeConfig:
         return self.lake_root(DERIVED_MART_LAKE_NAME)
 
     def dataset_dir(self, model_id: str) -> Path:
-        """Per-model dataset dir (L2b): ``datasets/<model_id>/snapshot_date=.../``."""
-        return self.datasets_root / model_id / f"snapshot_date={self.snapshot_date}"
+        """Per-model dataset dir (L2b), isolated by source as well as snapshot."""
+        return (
+            self.datasets_root
+            / model_id
+            / f"snapshot_date={self.snapshot_date}"
+            / f"source={self.source}"
+        )
 
     def table_glob(self, table: str) -> str:
         """Recursive parquet glob for a table, across the lake roots.

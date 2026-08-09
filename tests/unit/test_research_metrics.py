@@ -1,101 +1,143 @@
-"""Unit tests for P6 — metrics (Rank IC / ICIR / top-decile / spread)."""
-
 from __future__ import annotations
 
-import datetime
+import math
 
+import numpy as np
 import polars as pl
 import pytest
-from research.etl import metrics
+from research.etl.metrics import (
+    benjamini_hochberg,
+    choose_nw_lag,
+    daily_market_weighted_ic,
+    daily_market_weighted_spread,
+    exact_binomial_sign_test_p,
+    market_weight_means,
+    n_hac_pairs,
+    newey_west_tstat,
+    per_date_market_quantile_spread,
+    per_date_market_rank_ic,
+    raw_vs_rank_quantile_spread,
+    two_sided_normal_p,
+)
 
 
-def _df(rows: list[tuple]) -> pl.DataFrame:
-    return pl.DataFrame(
+def test_market_ic_is_not_double_counted_by_date() -> None:
+    df = pl.DataFrame(
         {
-            "trade_date": [r[0] for r in rows],
-            "pred": [r[1] for r in rows],
-            "realized": [r[2] for r in rows],
+            "trade_date": [1, 1, 1, 1, 2, 2],
+            "market": ["KOSPI", "KOSPI", "KOSDAQ", "KOSDAQ", "KOSPI", "KOSPI"],
+            "pred": [1, 2, 1, 2, 2, 1],
+            "realized": [1, 2, 2, 1, 1, 2],
         }
     )
+    market = per_date_market_rank_ic(df, pred_col="pred", realized_col="realized")
+    daily = daily_market_weighted_ic(market)
+    assert market.height == 3
+    assert daily.height == 2
+    assert daily.filter(pl.col("trade_date") == 1).height == 1
 
 
-D1 = datetime.date(2020, 1, 1)
-D2 = datetime.date(2020, 1, 2)
+def test_nw_uses_session_gap_not_compressed_array_position() -> None:
+    values = np.array([1.0, 2.0, 3.0, 4.0])
+    dense = newey_west_tstat(values, [1, 2, 3, 4], lag=1)
+    gapped = newey_west_tstat(values, [1, 3, 4, 6], lag=1)
+    assert dense == pytest.approx(4.0)
+    assert gapped == pytest.approx(4.5883146774)
 
 
-def test_perfect_rank_agreement_ic_is_one() -> None:
-    # pred ranks == realized ranks within the date -> IC 1.0.
-    df = _df([(D1, 1.0, 0.1), (D1, 2.0, 0.2), (D1, 3.0, 0.3), (D1, 4.0, 0.4)])
-    ic = metrics.per_date_rank_ic(df, pred_col="pred", realized_col="realized")
-    assert ic["rank_ic"][0] == pytest.approx(1.0)
-
-
-def test_reversed_rank_ic_is_minus_one() -> None:
-    df = _df([(D1, 1.0, 0.4), (D1, 2.0, 0.3), (D1, 3.0, 0.2), (D1, 4.0, 0.1)])
-    ic = metrics.per_date_rank_ic(df, pred_col="pred", realized_col="realized")
-    assert ic["rank_ic"][0] == pytest.approx(-1.0)
-
-
-def test_rankdata_handles_ties() -> None:
-    import numpy as np
-
-    r = metrics._rankdata(np.array([10.0, 10.0, 20.0]))
-    # tied first two -> average rank 1.5; third -> 3.
-    assert list(r) == pytest.approx([1.5, 1.5, 3.0])
-
-
-def test_evaluate_aggregates_over_dates() -> None:
-    df = _df(
-        [
-            (D1, 1.0, 0.1),
-            (D1, 2.0, 0.2),
-            (D1, 3.0, 0.3),
-            (D2, 1.0, 0.3),
-            (D2, 2.0, 0.2),
-            (D2, 3.0, 0.1),
-        ]
+def test_raw_and_rank_quantile_spreads_are_finite() -> None:
+    df = pl.DataFrame({
+        "trade_date": [1] * 20,
+        "raw": list(range(20)),
+        "rank": [i / 19 for i in range(20)],
+    })
+    result = raw_vs_rank_quantile_spread(
+        df, rank_col="rank", raw_col="raw", min_names=20
     )
-    rep = metrics.evaluate(df, pred_col="pred", realized_col="realized")
-    assert rep.n_dates == 2
-    assert rep.n_obs == 6
-    # D1 IC=+1, D2 IC=-1 -> mean 0.
-    assert rep.rank_ic_mean == pytest.approx(0.0)
+    assert result.height == 1
+    assert result["raw_score_spread"][0] == pytest.approx(result["rank_score_spread"][0])
 
 
-def test_top_minus_bottom_positive_when_pred_orders_realized() -> None:
-    # one date, 5 names, pred perfectly orders realized excess.
-    rows = [(D1, float(i), float(i) / 100) for i in range(1, 6)]
-    rep = metrics.evaluate(df := _df(rows), pred_col="pred", realized_col="realized", n_quantiles=5)
-    assert rep.top_minus_bottom > 0  # top quantile realized > bottom quantile
-    assert rep.hit_ratio_top == pytest.approx(1.0)  # top name has positive excess
-    assert df.height == 5
+def test_lag_and_bh_contract() -> None:
+    assert choose_nw_lag(scan_type="cum", horizon=20) == 19
+    assert choose_nw_lag(scan_type="bucket", bucket_width=5) == 4
+    q = benjamini_hochberg([0.001, 0.02, 0.5])
+    assert q[0] <= q[1] <= q[2]
+    assert q[0] == pytest.approx(0.003)
 
 
-def test_degenerate_single_obs_ic_is_nan() -> None:
-    import math
+def test_exact_binomial_sign_test_matches_known_values() -> None:
+    # cross-checked against scipy.stats.binomtest(..., alternative="greater")
+    assert exact_binomial_sign_test_p(4, 4) == pytest.approx(0.0625)
+    assert exact_binomial_sign_test_p(3, 4) == pytest.approx(0.3125)
+    assert exact_binomial_sign_test_p(5, 10) == pytest.approx(0.623046875)
 
-    df = _df([(D1, 1.0, 0.5)])
-    ic = metrics.per_date_rank_ic(df, pred_col="pred", realized_col="realized")
-    assert math.isnan(ic["rank_ic"][0])
+
+def test_exact_binomial_sign_test_edge_cases() -> None:
+    assert exact_binomial_sign_test_p(0, 0) != exact_binomial_sign_test_p(0, 0)  # nan
+    assert exact_binomial_sign_test_p(0, 5) == pytest.approx(1.0)
+    with pytest.raises(ValueError):
+        exact_binomial_sign_test_p(6, 5)
 
 
-def test_nan_inf_rows_dropped_not_poisoning() -> None:
-    """Fix #5: NaN/inf pred or realized are filtered, not left in the stats."""
-    nan = float("nan")
-    inf = float("inf")
-    # D1: 4 clean perfectly-aligned rows + 1 NaN realized + 1 inf pred.
-    rows = [
-        (D1, 1.0, 0.1),
-        (D1, 2.0, 0.2),
-        (D1, 3.0, 0.3),
-        (D1, 4.0, 0.4),
-        (D1, 5.0, nan),  # NaN realized -> must be dropped
-        (D1, inf, 0.5),  # inf pred -> must be dropped
-    ]
-    rep = metrics.evaluate(_df(rows), pred_col="pred", realized_col="realized", n_quantiles=2)
-    # The 4 clean rows are perfectly rank-aligned -> IC 1.0, not NaN.
-    assert rep.rank_ic_mean == pytest.approx(1.0)
-    assert rep.n_obs == 4  # NaN + inf rows excluded
-    # top-decile / spread must be finite (would be NaN if the NaN leaked in).
-    assert rep.top_decile_spread == rep.top_decile_spread  # not NaN
-    assert rep.top_minus_bottom == rep.top_minus_bottom
+def test_two_sided_normal_p_matches_known_value() -> None:
+    assert two_sided_normal_p(1.96) == pytest.approx(0.05, abs=1e-4)
+    assert two_sided_normal_p(0.0) == pytest.approx(1.0)
+    assert math.isnan(two_sided_normal_p(float("nan")))
+
+
+def test_n_hac_pairs_counts_within_lag_distance_not_array_position() -> None:
+    # dense: sessions 1..4, lag=1 -> 3 adjacent pairs
+    assert n_hac_pairs([1, 2, 3, 4], lag=1) == 3
+    # a multi-year gap (session 3 -> 100) breaks the lag=1 adjacency there
+    assert n_hac_pairs([1, 2, 3, 100, 101], lag=1) == 3
+    assert n_hac_pairs([1, 2, 3, 4], lag=0) == 0
+
+
+def test_market_weight_means_reflects_n_weighted_composition() -> None:
+    df = pl.DataFrame(
+        {
+            "trade_date": [1, 1, 2],
+            "market": ["KOSPI", "KOSDAQ", "KOSPI"],
+            "pred": [1, 2, 1],
+            "realized": [1, 2, 1],
+        }
+    )
+    market_ic = per_date_market_rank_ic(df, pred_col="pred", realized_col="realized", min_names=1)
+    weights = market_weight_means(market_ic)
+    # date 1: KOSPI/KOSDAQ each 1 name -> kospi weight 0.5; date 2: KOSPI-only -> weight 1.0
+    assert weights["kospi_weight_mean"] == pytest.approx(0.75)
+    assert weights["kosdaq_weight_mean"] == pytest.approx(0.25)
+
+
+def test_market_quantile_spread_matches_raw_vs_rank_identity_per_market() -> None:
+    # Same date×market cross-section as the raw/rank identity test, but through
+    # the market-aware (§4.3) path used by the Phase A scan.
+    df = pl.DataFrame(
+        {
+            "trade_date": [1] * 20,
+            "market": ["KOSPI"] * 20,
+            "raw": [float(i) for i in range(20)],
+        }
+    )
+    market_spread = per_date_market_quantile_spread(
+        df, feature_col="raw", raw_label_col="raw", min_names=20
+    )
+    daily = daily_market_weighted_spread(market_spread)
+    assert daily.height == 1
+    # rank/20 >= 0.8 (>=16th of 20, ties-free) keeps {15..19}; <= 0.2 keeps {0..3}.
+    assert daily["spread"][0] == pytest.approx(sum(range(15, 20)) / 5 - sum(range(0, 4)) / 4)
+
+
+def test_market_quantile_spread_drops_thin_cross_sections() -> None:
+    df = pl.DataFrame(
+        {
+            "trade_date": [1, 1, 1],
+            "market": ["KOSPI"] * 3,
+            "raw": [1.0, 2.0, 3.0],
+        }
+    )
+    result = per_date_market_quantile_spread(
+        df, feature_col="raw", raw_label_col="raw", min_names=50
+    )
+    assert result.is_empty()

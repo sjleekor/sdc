@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """dim_universe_daily — per-(trade_date, ticker, market) eligibility flags.
 
 Implements the etl_00 §1.2 universe filter as *auditable boolean columns* (one
@@ -34,6 +35,24 @@ from research.etl.config import LakeConfig
 from research.etl.mart import materialize, register_mart_view
 
 UNIVERSE_TABLE = "dim_universe_daily"
+BROAD_UNIVERSE_TABLE = "dim_universe_broad_daily"
+TRADABLE_UNIVERSE_TABLE = "dim_universe_tradable_daily"
+
+
+def assert_tradable_subset(
+    con: duckdb.DuckDBPyConnection,
+    broad_view: str = BROAD_UNIVERSE_TABLE,
+    tradable_view: str = TRADABLE_UNIVERSE_TABLE,
+) -> None:
+    """Fail closed if the tradable formation population escapes the broad one."""
+    count = con.execute(f"""
+        SELECT count(*)
+        FROM {tradable_view} t
+        LEFT JOIN {broad_view} b USING (trade_date, ticker, market)
+        WHERE t.in_universe AND (b.in_universe IS NULL OR NOT b.in_universe)
+    """).fetchone()[0]
+    if count:
+        raise AssertionError(f"tradable universe is not a subset of broad universe: {count} rows")
 
 
 @dataclass(frozen=True)
@@ -45,6 +64,29 @@ class UniverseFilter:
     liquidity_window: int = 60  # trailing rows for avg turnover
     min_liquidity_krw: float = 1e8  # 1억원 floor
     label_horizon: int = 20  # H trading days forward for label existence
+    min_close_krw: float = 0.0
+    apply_liquidity_filter: bool = True
+    membership_reconstruction_available: bool = False
+
+
+def broad_universe_filter() -> UniverseFilter:
+    """Broad observed-OHLCV universe; liquidity is diagnostic only."""
+    return UniverseFilter(
+        liquidity_window=20,
+        min_liquidity_krw=0.0,
+        min_close_krw=0.0,
+        apply_liquidity_filter=False,
+    )
+
+
+def tradable_universe_filter() -> UniverseFilter:
+    """Tradable screen kept separate from the broad formation population."""
+    return UniverseFilter(
+        liquidity_window=20,
+        min_liquidity_krw=1e8,
+        min_close_krw=1000.0,
+        apply_liquidity_filter=True,
+    )
 
 
 def build_universe_sql(
@@ -65,13 +107,14 @@ def build_universe_sql(
         WITH base AS (
             SELECT
                 trade_date, ticker, market,
+                CAST(close AS DOUBLE) AS close_d,
                 (open = 0 AND high = 0 AND low = 0) AS is_halted,
                 CAST(close AS DOUBLE) * CAST(volume AS DOUBLE) AS turnover
             FROM {price_view}
         ),
         win AS (
             SELECT
-                trade_date, ticker, market, is_halted,
+                trade_date, ticker, market, close_d, is_halted,
                 COALESCE(SUM(CASE WHEN NOT is_halted THEN 1 ELSE 0 END)
                     OVER (PARTITION BY ticker, market ORDER BY trade_date
                           ROWS BETWEEN {w - 1} PRECEDING AND CURRENT ROW), 0) AS valid_days,
@@ -99,12 +142,23 @@ def build_universe_sql(
             (NOT w.is_halted) AS not_halted,
             (w.valid_days >= {flt.warmup_min_valid}) AS warmup_ok,
             (COALESCE(w.avg_turnover, 0) >= {flt.min_liquidity_krw}) AS liquidity_ok,
+            (w.close_d >= {flt.min_close_krw}) AS close_ok,
+            (w.close_d >= {flt.min_close_krw}
+                AND COALESCE(w.avg_turnover, 0) >= {flt.min_liquidity_krw}) AS tradable_ok,
             (nh.d_idx_nh IS NOT NULL
                 AND nh.d_idx_nh + {flt.label_horizon} <= nh.n_nonhalt) AS label_ok,
+            {', '.join(
+                f"(nh.d_idx_nh IS NOT NULL AND nh.d_idx_nh + {h} <= nh.n_nonhalt) AS label_ok_{h}d"
+                for h in (1, 2, 3, 5, 10, 20, 40, 60, 120)
+            )},
+            {str(flt.membership_reconstruction_available).upper()} AS membership_reconstruction_available,
+            FALSE AS management_filter_available,
             (
                 NOT w.is_halted
                 AND w.valid_days >= {flt.warmup_min_valid}
-                AND COALESCE(w.avg_turnover, 0) >= {flt.min_liquidity_krw}
+                AND w.close_d >= {flt.min_close_krw}
+                AND ({str(not flt.apply_liquidity_filter).upper()}
+                     OR COALESCE(w.avg_turnover, 0) >= {flt.min_liquidity_krw})
             ) AS in_universe
         FROM win w
         LEFT JOIN nonhalt nh USING (trade_date, ticker, market)
@@ -132,3 +186,26 @@ def materialize_universe(
         force=force,
     )
     return register_mart_view(con, config, UNIVERSE_TABLE)
+
+
+def materialize_named_universes(
+    con: duckdb.DuckDBPyConnection,
+    config: LakeConfig,
+    *,
+    price_view: str = "daily_ohlcv",
+    force: bool = False,
+) -> tuple[str, str]:
+    """Materialize the broad and tradable universes used by horizon scans."""
+    for name, flt in (
+        (BROAD_UNIVERSE_TABLE, broad_universe_filter()),
+        (TRADABLE_UNIVERSE_TABLE, tradable_universe_filter()),
+    ):
+        materialize(
+            con,
+            config,
+            name,
+            build_universe_sql(flt, price_view=price_view),
+            force=force,
+        )
+        register_mart_view(con, config, name)
+    return BROAD_UNIVERSE_TABLE, TRADABLE_UNIVERSE_TABLE

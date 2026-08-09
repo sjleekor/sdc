@@ -24,7 +24,8 @@ configs.
 Usage (from repo root)::
 
     uv run python -m research.models._01_20_access_return_rank.experiments.run_feature_ablation
-    uv run python -m research.models._01_20_access_return_rank.experiments.run_feature_ablation --smoke
+    uv run python -m research.models._01_20_access_return_rank.experiments.run_feature_ablation \
+        --smoke
 """
 
 from __future__ import annotations
@@ -169,8 +170,7 @@ def render_markdown(records: list[dict], *, smoke: bool) -> str:
     lines.append("## 2. holdout (post-selection, 1회) 비교")
     lines.append("")
     lines.append(
-        "| config | holdout Rank IC | ICIR | top-decile spread | "
-        "top−bottom | hit ratio |"
+        "| config | holdout Rank IC | ICIR | top-decile spread | " "top−bottom | hit ratio |"
     )
     lines.append("|---|---|---|---|---|---|")
     for r in records:

@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """make_label — the single, parameterized label generator (00_shared §3.1).
 
 Model count == label count, so there is ONE generator. The 20d excess-return
@@ -38,6 +39,7 @@ from research.etl.config import LakeConfig
 from research.etl.mart import materialize, register_mart_view
 
 LABEL_TABLE = "label_daily"
+LABEL_SCAN_TABLE = "label_scan"
 
 _VALID_KINDS = ("excess", "abs")
 _VALID_BENCH = ("eqw_market", "index")
@@ -301,3 +303,229 @@ def materialize_label(
     spec = spec or LabelSpec()
     materialize(con, config, LABEL_TABLE, build_label_sql(spec, price_view), force=force)
     return register_mart_view(con, config, LABEL_TABLE)
+
+
+def build_label_scan_sql(
+    price_view: str = "daily_ohlcv",
+    *,
+    quality_view: str | None = None,
+    holdout_start: str = "2025-08-01",
+    horizons: Sequence[int] = (1, 2, 3, 5, 10, 20, 40, 60, 120),
+    buckets: Sequence[tuple[int, int]] = ((0, 5), (5, 10), (10, 20), (20, 40), (40, 60), (60, 120)),
+) -> str:
+    """Build the preregistered scan labels without changing ``label_daily``.
+
+    The raw forward endpoint and CA count are retained internally so a bucket
+    can be valid even when an earlier cumulative horizon was masked. Benchmarks
+    and ranks are then computed from the same remaining population.
+    """
+    hs = tuple(horizons)
+    if not hs or any(h <= 0 for h in hs):
+        raise ValueError("label scan horizons must be positive")
+    q_join = (
+        f"LEFT JOIN {quality_view} q USING (trade_date, ticker, market)"
+        if quality_view
+        else ""
+    )
+    event_expr = "COALESCE(q.ca_event, FALSE)" if quality_view else "FALSE"
+    px = f"""
+        px0 AS (
+            SELECT p.trade_date, p.ticker, p.market,
+                   CAST(p.close AS DOUBLE) AS close_d,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY p.ticker, p.market ORDER BY p.trade_date
+                   ) AS d_idx,
+                   SUM(CASE WHEN {event_expr} THEN 1 ELSE 0 END) OVER (
+                       PARTITION BY p.ticker, p.market ORDER BY p.trade_date
+                       ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                   ) AS ca_cum
+            FROM {price_view} p {q_join}
+            WHERE NOT (p.open = 0 AND p.high = 0 AND p.low = 0)
+        )"""
+    fwd_ctes = []
+    for h in hs:
+        fwd_ctes.append(f"""
+        fwd_{h} AS (
+            SELECT a.trade_date, a.ticker, a.market,
+                   f.trade_date AS label_end_date_{h}d,
+                   f.close_d / NULLIF(a.close_d, 0) - 1 AS gross_ret_{h}d,
+                   f.ca_cum - a.ca_cum AS ca_count_{h}d
+            FROM px0 a
+            LEFT JOIN px0 f
+              ON f.ticker = a.ticker AND f.market = a.market
+             AND f.d_idx = a.d_idx + {h}
+        )""")
+    bench_ctes = []
+    for h in hs:
+        bench_ctes.append(f"""
+        bench_{h} AS (
+            SELECT trade_date, market, AVG(fwd_ret_{h}d) AS bench_ret_{h}d
+            FROM raw_forward GROUP BY trade_date, market
+        )""")
+    # The unmasked endpoint columns are needed for bucket-specific CA masks.
+    raw_forward = f"""
+        raw_forward AS (
+            SELECT a.trade_date, a.ticker, a.market, a.close_d,
+                   {', '.join(
+                       f"CASE WHEN f{h}.ca_count_{h}d = 0 THEN "
+                       f"f{h}.gross_ret_{h}d END AS fwd_ret_{h}d, "
+                       f"f{h}.gross_ret_{h}d, f{h}.label_end_date_{h}d, f{h}.ca_count_{h}d"
+                       for h in hs
+                   )}
+            FROM px0 a
+            {''.join(f'LEFT JOIN fwd_{h} f{h} USING (trade_date, ticker, market) ' for h in hs)}
+        )"""
+    label_select: list[str] = []
+    for h in hs:
+        raw = f"(r.fwd_ret_{h}d - b{h}.bench_ret_{h}d)"
+        label_select.extend([
+            f"r.fwd_ret_{h}d, r.label_end_date_{h}d, b{h}.bench_ret_{h}d, "
+            f"{raw} AS raw_label_{h}d",
+            f"(r.label_end_date_{h}d < DATE '{holdout_start}' AND {raw} IS NOT NULL) "
+            f"AS label_ok_{h}d",
+        ])
+    bucket_ctes: list[str] = []
+    bucket_bench: list[str] = []
+    bucket_select: list[str] = []
+    for h1, h2 in buckets:
+        if h2 not in hs or (h1 and h1 not in hs):
+            raise ValueError(f"bucket ({h1},{h2}] requires horizons in the scan grid")
+        gross1 = "0.0" if h1 == 0 else f"r.gross_ret_{h1}d"
+        ca1 = "0" if h1 == 0 else f"COALESCE(r.ca_count_{h1}d, 0)"
+        bucket_ctes.append(f"""
+        bucket_{h1}_{h2} AS (
+            SELECT r.trade_date, r.ticker, r.market,
+                   r.label_end_date_{h2}d AS bucket_end_date_{h1}_{h2}d,
+                   CASE WHEN r.ca_count_{h2}d - {ca1} = 0
+                        THEN (1 + r.gross_ret_{h2}d) / (1 + {gross1}) - 1 END
+                        AS bucket_ret_{h1}_{h2}d
+            FROM raw_forward r
+        )""")
+        bucket_bench.append(f"""
+        bucket_bench_{h1}_{h2} AS (
+            SELECT trade_date, market, AVG(bucket_ret_{h1}_{h2}d) AS bucket_bench_ret_{h1}_{h2}d
+            FROM bucket_{h1}_{h2} GROUP BY trade_date, market
+        )""")
+        br = f"(bk{h1}_{h2}.bucket_ret_{h1}_{h2}d - bb{h1}_{h2}.bucket_bench_ret_{h1}_{h2}d)"
+        bucket_select.extend([
+            f"bk{h1}_{h2}.bucket_ret_{h1}_{h2}d, "
+            f"bb{h1}_{h2}.bucket_bench_ret_{h1}_{h2}d AS bucket_bench_ret_{h1}_{h2}d, "
+            f"{br} AS raw_bucket_label_{h1}_{h2}d, "
+            f"bk{h1}_{h2}.bucket_end_date_{h1}_{h2}d",
+        ])
+    bucket_joins = " ".join(
+        f"LEFT JOIN bucket_{h1}_{h2} bk{h1}_{h2} USING (trade_date, ticker, market) "
+        f"LEFT JOIN bucket_bench_{h1}_{h2} bb{h1}_{h2} USING (trade_date, market)"
+        for h1, h2 in buckets
+    )
+    survivor_expr = (
+        f"(f.common_formation_120d AND r.label_end_date_120d IS NOT NULL "
+        f"AND r.label_end_date_120d < DATE '{holdout_start}')"
+        if 120 in hs
+        else "FALSE"
+    )
+    joined_bench = ", ".join(
+        f"b{h}.bench_ret_{h}d AS bench_ret_{h}d" for h in hs
+    )
+    joined_buckets = ", ".join(
+        f"bk{h1}_{h2}.*, bb{h1}_{h2}.bucket_bench_ret_{h1}_{h2}d "
+        f"AS bucket_bench_ret_{h1}_{h2}d"
+        for h1, h2 in buckets
+    )
+    rank_ctes = ", ".join(
+        f"rank_{h} AS ("
+        f"SELECT trade_date, ticker, market, "
+        f"PERCENT_RANK() OVER (PARTITION BY trade_date, market ORDER BY raw_label_{h}d) "
+        f"AS y_rank_{h}d FROM joined WHERE raw_label_{h}d IS NOT NULL)"
+        for h in hs
+    )
+    bucket_rank_ctes = ", ".join(
+        f"bucket_rank_{h1}_{h2} AS ("
+        f"SELECT trade_date, ticker, market, "
+        f"PERCENT_RANK() OVER (PARTITION BY trade_date, market ORDER BY raw_bucket_label_{h1}_{h2}d) "
+        f"AS y_rank_bucket_{h1}_{h2}d "
+        f"FROM joined WHERE raw_bucket_label_{h1}_{h2}d IS NOT NULL)"
+        for h1, h2 in buckets
+    )
+    joined_raw_labels = ", ".join(
+        f"(r.fwd_ret_{h}d - b{h}.bench_ret_{h}d) AS raw_label_{h}d" for h in hs
+    )
+    joined_raw_buckets = ", ".join(
+        f"(bk{h1}_{h2}.bucket_ret_{h1}_{h2}d - "
+        f"bb{h1}_{h2}.bucket_bench_ret_{h1}_{h2}d) AS raw_bucket_label_{h1}_{h2}d"
+        for h1, h2 in buckets
+    )
+    label_select_j = [item for h in hs for item in [
+                          f"j.fwd_ret_{h}d, j.label_end_date_{h}d, j.bench_ret_{h}d, "
+                          f"(j.fwd_ret_{h}d - j.bench_ret_{h}d) AS raw_label_{h}d",
+                          f"(j.label_end_date_{h}d < DATE '{holdout_start}' AND "
+                          f"(j.fwd_ret_{h}d - j.bench_ret_{h}d) IS NOT NULL) AS label_ok_{h}d",
+                      ]]
+    bucket_select_j = [item for h1, h2 in buckets for item in [
+            f"j.bucket_ret_{h1}_{h2}d, j.bucket_bench_ret_{h1}_{h2}d, "
+            f"(j.bucket_ret_{h1}_{h2}d - j.bucket_bench_ret_{h1}_{h2}d) "
+            f"AS raw_bucket_label_{h1}_{h2}d, j.bucket_end_date_{h1}_{h2}d"
+        ]]
+    bucket_coverage_j = ", ".join(
+        f"(j.bucket_end_date_{h1}_{h2}d < DATE '{holdout_start}' AND "
+        f"j.bucket_ret_{h1}_{h2}d IS NOT NULL) AS bucket_ok_{h1}_{h2}d"
+        for h1, h2 in buckets
+    )
+    return f"""
+        WITH {px}, {', '.join(fwd_ctes)}, {raw_forward},
+        {', '.join(bench_ctes)},
+        {', '.join(bucket_ctes)},
+        {', '.join(bucket_bench)},
+        calendar AS (
+            SELECT trade_date, ROW_NUMBER() OVER (ORDER BY trade_date) AS session_idx
+            FROM (SELECT DISTINCT trade_date FROM px0)
+        ),
+        formation AS (
+            SELECT c.trade_date,
+                   (c120.trade_date < DATE '{holdout_start}') AS common_formation_120d
+            FROM calendar c
+            LEFT JOIN calendar c120 ON c120.session_idx = c.session_idx + 120
+        ),
+        joined AS (
+            SELECT r.*, {joined_bench}, {joined_buckets},
+                   {joined_raw_labels}, {joined_raw_buckets}
+            FROM raw_forward r
+            {' '.join(f'LEFT JOIN bench_{h} b{h} USING (trade_date, market)' for h in hs)}
+            {bucket_joins}
+        )
+        , {rank_ctes}, {bucket_rank_ctes}
+        SELECT j.trade_date, j.ticker, j.market,
+               {', '.join(label_select_j)},
+               {', '.join(bucket_select_j)}, {bucket_coverage_j},
+               f.common_formation_120d,
+               {survivor_expr.replace('r.', 'j.')} AS common_survivor_120d,
+               {', '.join(f'rank_{h}.y_rank_{h}d' for h in hs)},
+               {', '.join(f'bucket_rank_{h1}_{h2}.y_rank_bucket_{h1}_{h2}d' for h1, h2 in buckets)}
+        FROM joined j
+        {' '.join(f'LEFT JOIN rank_{h} USING (trade_date, ticker, market)' for h in hs)}
+        {' '.join(f'LEFT JOIN bucket_rank_{h1}_{h2} USING (trade_date, ticker, market)' for h1, h2 in buckets)}
+        LEFT JOIN formation f USING (trade_date)
+    """
+
+
+def materialize_label_scan(
+    con: duckdb.DuckDBPyConnection,
+    config: LakeConfig,
+    *,
+    price_view: str = "daily_ohlcv",
+    quality_view: str | None = None,
+    holdout_start: str = "2025-08-01",
+    force: bool = False,
+) -> str:
+    materialize(
+        con,
+        config,
+        LABEL_SCAN_TABLE,
+        build_label_scan_sql(
+            price_view,
+            quality_view=quality_view,
+            holdout_start=holdout_start,
+        ),
+        force=force,
+    )
+    return register_mart_view(con, config, LABEL_SCAN_TABLE)

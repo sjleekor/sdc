@@ -17,6 +17,7 @@ See ``docs/target/01_20_access_return_rank/etl_01_parquet_data_flow_plan.md`` §
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Iterable
 
 import duckdb
@@ -101,6 +102,8 @@ def register_derived_marts(
     config: LakeConfig | None = None,
     *,
     which: Iterable[str] = ("stock_metric_fact", "common_feature_daily_fact"),
+    persist: bool = False,
+    force: bool = False,
 ) -> list[str]:
     """Recompute the derived facts from the raw lake and register them as views.
 
@@ -109,6 +112,12 @@ def register_derived_marts(
     from the raw (+ ``common_feature_series``) views via the DuckDB marts, then
     registers each under its canonical view name so ``fin_pit.py`` / ``common.py``
     read them unchanged. Requires the needed raw views already registered on ``con``.
+
+    With ``persist=True``, each derived view is written to
+    ``data_lake/derived_mart/snapshot_date=.../source=.../<table>/`` as parquet and
+    the canonical view name is rebound to that parquet output. The default remains
+    in-memory for unit tests and smoke checks that should not write repository
+    artifacts.
 
     Returns the view names created.
     """
@@ -124,16 +133,47 @@ def register_derived_marts(
     created: list[str] = []
 
     if "stock_metric_fact" in requested:
-        created.append(register_stock_metric_fact_view(con))
+        view = register_stock_metric_fact_view(con)
+        if persist:
+            _persist_derived_mart(con, config, view, force=force)
+        created.append(view)
 
     if "common_feature_daily_fact" in requested:
         trading_days, feature_dates = _common_feature_calendars(con)
-        created.append(
-            register_common_feature_daily_fact_view(
-                con, trading_days=trading_days, feature_dates=feature_dates
-            )
+        view = register_common_feature_daily_fact_view(
+            con, trading_days=trading_days, feature_dates=feature_dates
         )
+        if persist:
+            _persist_derived_mart(con, config, view, force=force)
+        created.append(view)
     return created
+
+
+def _persist_derived_mart(
+    con: duckdb.DuckDBPyConnection,
+    config: LakeConfig,
+    name: str,
+    *,
+    force: bool = False,
+) -> None:
+    """Write one derived canonical-compatible view to the derived mart lake."""
+    table_dir = config.derived_mart_root / name
+    if table_dir.exists() and force:
+        shutil.rmtree(table_dir)
+    glob_path = str(table_dir / "**" / "*.parquet")
+    has_files = table_dir.exists() and _glob_has_files(con, glob_path)
+    if not has_files:
+        if table_dir.exists():
+            shutil.rmtree(table_dir)
+        table_dir.mkdir(parents=True, exist_ok=True)
+        target = _sql_str_literal(str(table_dir / "part-000000.parquet"))
+        con.execute(f"COPY (SELECT * FROM {name}) TO {target} (FORMAT PARQUET, COMPRESSION ZSTD)")
+
+    glob = _sql_str_literal(glob_path)
+    con.execute(
+        f"CREATE OR REPLACE VIEW {name} AS "
+        f"SELECT * FROM read_parquet({glob}, hive_partitioning=false)"
+    )
 
 
 def _common_feature_calendars(

@@ -14,6 +14,8 @@ See ``docs/target/00_shared_etl_platform.md`` §1, §5 and
 
 from __future__ import annotations
 
+import hashlib
+import json
 import shutil
 from pathlib import Path
 
@@ -27,7 +29,12 @@ FEATURE_MART_NAME = "feature_mart"
 
 def mart_root(config: LakeConfig) -> Path:
     """Root for the snapshot's feature mart (``data_lake/feature_mart/...``)."""
-    return config.data_lake_root / FEATURE_MART_NAME / f"snapshot_date={config.snapshot_date}"
+    return (
+        config.data_lake_root
+        / FEATURE_MART_NAME
+        / f"snapshot_date={config.snapshot_date}"
+        / f"source={config.source}"
+    )
 
 
 def mart_table_dir(config: LakeConfig, name: str) -> Path:
@@ -46,6 +53,26 @@ def is_materialized(config: LakeConfig, name: str) -> bool:
     return directory.is_dir() and any(directory.rglob("*.parquet"))
 
 
+def _metadata_path(config: LakeConfig, name: str) -> Path:
+    return mart_table_dir(config, name) / "_cache_metadata.json"
+
+
+def _schema_hash(con: duckdb.DuckDBPyConnection, select_sql: str) -> str:
+    """Hash the DuckDB output schema, not merely the output file presence."""
+    rows = con.execute(f"DESCRIBE SELECT * FROM ({select_sql}) AS _cache_query").fetchall()
+    encoded = json.dumps(rows, default=str, sort_keys=True).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _expected_metadata(
+    con: duckdb.DuckDBPyConnection, config: LakeConfig, select_sql: str
+) -> dict[str, str | None]:
+    return {
+        "analysis_config_hash": config.analysis_config_hash,
+        "schema_hash": _schema_hash(con, select_sql),
+    }
+
+
 def materialize(
     con: duckdb.DuckDBPyConnection,
     config: LakeConfig,
@@ -62,7 +89,21 @@ def materialize(
     rebuilt. Returns the table directory.
     """
     table_dir = mart_table_dir(config, name)
+    expected = _expected_metadata(con, config, select_sql)
     if is_materialized(config, name) and not force:
+        metadata_path = _metadata_path(config, name)
+        if not metadata_path.is_file():
+            raise RuntimeError(
+                f"mart cache metadata is missing for {name!r}; rerun with force=True"
+            )
+        try:
+            actual = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"invalid mart cache metadata for {name!r}; use force=True") from exc
+        if actual != expected:
+            raise RuntimeError(
+                f"mart cache contract mismatch for {name!r}; use force=True to rebuild"
+            )
         return table_dir
 
     if table_dir.exists():
@@ -80,6 +121,9 @@ def materialize(
         target = _sql_str_literal(str(table_dir / "part-000000.parquet"))
 
     con.execute(f"COPY ({select_sql}) TO {target} ({', '.join(copy_opts)})")
+    _metadata_path(config, name).write_text(
+        json.dumps(expected, sort_keys=True) + "\n", encoding="utf-8"
+    )
     return table_dir
 
 
@@ -98,6 +142,19 @@ def register_mart_view(
     if not is_materialized(config, name):
         raise FileNotFoundError(
             f"mart table {name!r} not materialized at {mart_table_dir(config, name)}"
+        )
+    metadata_path = _metadata_path(config, name)
+    if not metadata_path.is_file():
+        raise RuntimeError(
+            f"mart cache metadata is missing for {name!r}; rebuild with force=True"
+        )
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid mart cache metadata for {name!r}") from exc
+    if metadata.get("analysis_config_hash") != config.analysis_config_hash:
+        raise RuntimeError(
+            f"mart cache config hash mismatch for {name!r}; rebuild with force=True"
         )
     view = view_name or name
     glob = _sql_str_literal(mart_glob(config, name))

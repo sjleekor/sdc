@@ -122,13 +122,17 @@ def _asof_metric(topk: pl.DataFrame, avail: pl.DataFrame, metric: str) -> pl.Dat
     )
     if right.height == 0:
         return topk.with_columns(pl.lit(None, dtype=pl.Float64).alias(metric))
-    return topk.sort("trade_date").join_asof(
-        right,
-        left_on="trade_date",
-        right_on="available_from",
-        by="ticker",
-        strategy="backward",
-    ).drop("available_from")
+    return (
+        topk.sort("trade_date")
+        .join_asof(
+            right,
+            left_on="trade_date",
+            right_on="available_from",
+            by="ticker",
+            strategy="backward",
+        )
+        .drop("available_from")
+    )
 
 
 def enrich_topk(topk: pl.DataFrame) -> pl.DataFrame:

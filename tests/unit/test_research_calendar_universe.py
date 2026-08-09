@@ -7,6 +7,7 @@ checkable on a handful of rows.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import duckdb
@@ -194,3 +195,11 @@ def test_register_mart_view_before_materialize_raises(lake_with_prices) -> None:
     con, cfg = lake_with_prices
     with pytest.raises(FileNotFoundError):
         mart.register_mart_view(con, cfg, "dim_universe_daily")
+
+
+def test_mart_cache_hash_mismatch_requires_rebuild(lake_with_prices) -> None:
+    con, cfg = lake_with_prices
+    mart.materialize(con, cfg, "cache_contract", "SELECT 1 AS value")
+    changed = replace(cfg, analysis_config_hash="changed")
+    with pytest.raises(RuntimeError, match="contract mismatch"):
+        mart.materialize(con, changed, "cache_contract", "SELECT 1 AS value")

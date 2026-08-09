@@ -5,13 +5,42 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import research.etl.config as config_module
 from research.etl.config import (
     CANONICAL_TABLES,
     CONFIG_TABLES,
     RAW_TABLES,
+    REMOTE_SOURCE,
     EngineOptions,
     LakeConfig,
 )
+
+
+def test_remote_source_constant() -> None:
+    assert REMOTE_SOURCE == "sj2_remote"
+
+
+def test_default_source_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    import importlib
+
+    monkeypatch.setenv("SDC_LAKE_SOURCE", REMOTE_SOURCE)
+    try:
+        importlib.reload(config_module)
+        assert config_module.DEFAULT_SOURCE == REMOTE_SOURCE
+        assert config_module.LakeConfig().source == REMOTE_SOURCE
+    finally:
+        monkeypatch.delenv("SDC_LAKE_SOURCE", raising=False)
+        importlib.reload(config_module)
+    assert config_module.DEFAULT_SOURCE == "local_mydb"
+
+
+def test_lake_root_supports_remote_source() -> None:
+    cfg = LakeConfig(
+        snapshot_date="2026-07-30",
+        source=REMOTE_SOURCE,
+        data_lake_root=Path("/lake"),
+    )
+    assert cfg.raw_root == Path("/lake/raw_postgres/snapshot_date=2026-07-30/source=sj2_remote")
 
 
 def test_lake_roots_follow_exporter_layout() -> None:
@@ -51,7 +80,7 @@ def test_table_glob_unknown_raises() -> None:
 def test_table_sets_disjoint_and_expected_counts() -> None:
     assert set(RAW_TABLES).isdisjoint(CANONICAL_TABLES)
     assert set(RAW_TABLES).isdisjoint(CONFIG_TABLES)
-    assert len(RAW_TABLES) == 12  # 13th (operating_source_document) is schema-only
+    assert len(RAW_TABLES) == 12
     assert CONFIG_TABLES == ("common_feature_series",)
     assert len(CANONICAL_TABLES) == 5
 

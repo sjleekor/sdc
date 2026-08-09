@@ -24,21 +24,22 @@ Usage (from repo root)::
 
     python -m research.models._01_20_access_return_rank.predict
     python -m research.models._01_20_access_return_rank.predict --k 50 \
-        --dataset-dir data/datasets/ablation/px_flow_fin/01_20_access_return_rank/snapshot_date=2026-06-19
+        --dataset-dir data/datasets/ablation/px_flow_fin/01_20_access_return_rank/\
+snapshot_date=2026-06-19
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import polars as pl
 
 from research.models._01_20_access_return_rank import train as tr
-from research.models._01_20_access_return_rank.spec import ModelSpec
 from research.models._01_20_access_return_rank.enrich import enrich_topk
+from research.models._01_20_access_return_rank.spec import ModelSpec
 
 DEFAULT_K = 100
 
@@ -79,7 +80,7 @@ def _with_meta(df: pl.DataFrame, *, model: str, alpha, groups: str) -> pl.DataFr
         pl.lit(groups).alias("model_groups"),
         pl.lit(model).alias("model_name"),
         pl.lit(str(alpha)).alias("best_alpha"),
-        pl.lit(datetime.now(timezone.utc).isoformat(timespec="seconds")).alias("generated_at"),
+        pl.lit(datetime.now(UTC).isoformat(timespec="seconds")).alias("generated_at"),
     )
 
 
@@ -204,7 +205,9 @@ def _render_markdown(rec: dict, latest: pl.DataFrame) -> str:
     lines.append("")
     lines.append("## 2. holdout 백테스트 (per-date Top-k)")
     lines.append("")
-    lines.append(f"- holdout 일자 수: {rec['n_holdout_dates']}, 출력: `{rec['outputs']['backtest_csv']}`")
+    lines.append(
+        f"- holdout 일자 수: {rec['n_holdout_dates']}, " f"출력: `{rec['outputs']['backtest_csv']}`"
+    )
     if s["mean_realized"] is not None:
         lines.append(
             f"- 라벨 확정 구간 Top-{rec['k']} 실현 20일 초과수익 평균: "
@@ -217,8 +220,16 @@ def _render_markdown(rec: dict, latest: pl.DataFrame) -> str:
     lines.append(f"- 출력: `{rec['outputs']['latest_csv']}` (총 {rec['latest_n']}종목)")
     lines.append("")
     head = latest.select(
-        ["rank", "ticker", "market", "name", "market_cap_eok", "revenue_eok",
-         "operating_income_eok", "pred"]
+        [
+            "rank",
+            "ticker",
+            "market",
+            "name",
+            "market_cap_eok",
+            "revenue_eok",
+            "operating_income_eok",
+            "pred",
+        ]
     ).head(20)
     lines.append("| rank | ticker | market | 종목명 | 시총(억) | 매출(억) | 영업이익(억) | pred |")
     lines.append("|---|---|---|---|---|---|---|---|")
