@@ -350,9 +350,7 @@ def _finite_clean(
     prediction), which would poison the rank/quantile stats; filter those too.
     """
     columns = (
-        [date_col, pred_col]
-        if pred_col == realized_col
-        else [date_col, pred_col, realized_col]
+        [date_col, pred_col] if pred_col == realized_col else [date_col, pred_col, realized_col]
     )
     clean = df.select(columns).drop_nulls()
     return clean.filter(pl.col(pred_col).is_finite() & pl.col(realized_col).is_finite())
@@ -467,14 +465,161 @@ def raw_vs_rank_quantile_spread(
 ) -> pl.DataFrame:
     """Compare quantile spreads formed from a raw score and its rank score."""
     raw = per_date_quantile_spread(
-        df, score_col=raw_col, realized_col=raw_col, date_col=date_col,
-        n_quantiles=n_quantiles, min_names=min_names,
+        df,
+        score_col=raw_col,
+        realized_col=raw_col,
+        date_col=date_col,
+        n_quantiles=n_quantiles,
+        min_names=min_names,
     ).rename({"spread": "raw_score_spread"})
     ranked = per_date_quantile_spread(
-        df, score_col=rank_col, realized_col=raw_col, date_col=date_col,
-        n_quantiles=n_quantiles, min_names=min_names,
+        df,
+        score_col=rank_col,
+        realized_col=raw_col,
+        date_col=date_col,
+        n_quantiles=n_quantiles,
+        min_names=min_names,
     ).rename({"spread": "rank_score_spread"})
     return raw.join(ranked, on=[date_col, "n"], how="full", coalesce=True)
+
+
+@dataclass(frozen=True)
+class EconomicReport:
+    """Non-overlapping-rebalance economic significance (acceptance gate §6.1 ⑤).
+
+    Daily top-decile membership is not directly comparable across successive
+    days because the label horizon overlaps (each day's realized return window
+    covers the next ``horizon`` sessions) — turnover computed on daily
+    snapshots would double-count the same holding period many times over. This
+    report instead re-derives membership only on a grid spaced ``horizon``
+    sessions apart (mirroring the non-overlap bucket grid in
+    ``research/etl/labels.py``), so each rebalance is a genuinely distinct
+    holding period.
+    """
+
+    horizon: int
+    n_rebalances: int
+    grid_top_decile_spread: float
+    turnover: float
+    cost_bps_roundtrip: float
+    cost_adjusted_spread: float
+
+    def as_dict(self) -> dict:
+        return {
+            "horizon": self.horizon,
+            "n_rebalances": self.n_rebalances,
+            "grid_top_decile_spread": self.grid_top_decile_spread,
+            "turnover": self.turnover,
+            "cost_bps_roundtrip": self.cost_bps_roundtrip,
+            "cost_adjusted_spread": self.cost_adjusted_spread,
+        }
+
+
+def rebalance_grid(dates: list, horizon: int) -> list:
+    """Every ``horizon``-th date of the sorted unique ``dates`` (non-overlap grid)."""
+    if horizon < 1:
+        raise ValueError(f"horizon must be >= 1, got {horizon}")
+    ordered = sorted(set(dates))
+    return ordered[::horizon]
+
+
+def decile_membership(
+    df: pl.DataFrame,
+    *,
+    pred_col: str,
+    date_col: str = "trade_date",
+    ticker_col: str = "ticker",
+    q: float = 0.9,
+) -> dict:
+    """Per-date set of tickers whose ``pred`` rank is at/above quantile ``q``.
+
+    ``q=0.9`` is the top decile (matches ``_quantile_stats``'s ``top_decile_spread``
+    convention); ``q=0.1`` with ``rank <= q`` would give the bottom decile — this
+    helper always takes the upper tail, so pass ``1 - q`` and filter externally
+    for a bottom-decile membership map if ever needed.
+    """
+    clean = df.select([date_col, ticker_col, pred_col]).drop_nulls()
+    clean = clean.filter(pl.col(pred_col).is_finite())
+    out: dict = {}
+    for (d,), grp in clean.group_by([date_col], maintain_order=True):
+        pred = grp[pred_col].to_numpy()
+        if pred.size == 0:
+            continue
+        rank = _rankdata(pred) / pred.size
+        mask = rank >= q
+        if mask.any():
+            out[d] = set(grp[ticker_col].to_numpy()[mask].tolist())
+    return out
+
+
+def portfolio_turnover(membership_by_date: dict, ordered_keys: list) -> float:
+    """Mean pairwise turnover between consecutive membership snapshots.
+
+    ``turnover = 1 - |A ∩ B| / max(|A|, |B|)`` for each consecutive pair present
+    in ``membership_by_date`` — 0.0 means identical holdings, 1.0 means fully
+    disjoint. Snapshots missing from ``membership_by_date`` (e.g. a rebalance
+    date with too few names) are skipped rather than treated as empty.
+    """
+    present = [k for k in ordered_keys if k in membership_by_date]
+    turnovers = []
+    for prev, curr in zip(present, present[1:]):
+        a, b = membership_by_date[prev], membership_by_date[curr]
+        denom = max(len(a), len(b))
+        if denom == 0:
+            continue
+        turnovers.append(1.0 - len(a & b) / denom)
+    return float(np.mean(turnovers)) if turnovers else float("nan")
+
+
+def economic_report(
+    df: pl.DataFrame,
+    *,
+    pred_col: str,
+    realized_col: str,
+    horizon: int,
+    date_col: str = "trade_date",
+    ticker_col: str = "ticker",
+    q: float = 0.9,
+    cost_bps_roundtrip: float = 60.0,
+) -> EconomicReport:
+    """Grid-based top-decile spread net of an assumed round-trip transaction cost.
+
+    ``cost_bps_roundtrip`` (default 60bp) is a business assumption, not derived
+    from data — document it alongside any reported result. The realized spread
+    is averaged only over the rebalance grid (not daily), so it is directly
+    comparable to the turnover measured on that same grid.
+    """
+    clean = _finite_clean(df, date_col, pred_col, realized_col)
+    grid = rebalance_grid(clean[date_col].to_list(), horizon)
+
+    membership = decile_membership(
+        df, pred_col=pred_col, date_col=date_col, ticker_col=ticker_col, q=q
+    )
+    turnover = portfolio_turnover(membership, grid)
+
+    realized_means = []
+    for d in grid:
+        day = clean.filter(pl.col(date_col) == d)
+        if day.height == 0:
+            continue
+        pred = day[pred_col].to_numpy()
+        rank = _rankdata(pred) / pred.size
+        mask = rank >= q
+        if mask.any():
+            realized_means.append(float(day[realized_col].to_numpy()[mask].mean()))
+    grid_spread = float(np.mean(realized_means)) if realized_means else float("nan")
+
+    cost = 0.0 if turnover != turnover else turnover * cost_bps_roundtrip / 10_000.0
+    net = grid_spread - cost if grid_spread == grid_spread else float("nan")
+
+    return EconomicReport(
+        horizon=horizon,
+        n_rebalances=len(grid),
+        grid_top_decile_spread=grid_spread,
+        turnover=turnover,
+        cost_bps_roundtrip=cost_bps_roundtrip,
+        cost_adjusted_spread=net,
+    )
 
 
 def evaluate(

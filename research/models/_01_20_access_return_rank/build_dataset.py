@@ -118,12 +118,19 @@ def _panel_sql(spec: ModelSpec) -> str:
     joins.append("LEFT JOIN label_daily AS l USING (trade_date, ticker, market)")
     selects.append("l.* EXCLUDE (trade_date, ticker, market)")
 
+    # Without an explicit ORDER BY, DuckDB's parallel scan/join can return rows
+    # in a different order on every execution; HGB's histogram splits are not
+    # perfectly row-order-invariant under floating-point summation, so an
+    # unordered panel makes walk-forward/holdout metrics irreproducible run to
+    # run even with a fixed random_state (observed directly: repeated builds
+    # of the same spec differed in row order and downstream Rank IC).
     return f"""
         SELECT {", ".join(selects)}
         FROM dim_universe_daily u
         {" ".join(joins)}
         WHERE u.in_universe
           AND u.trade_date BETWEEN DATE '{spec.period_start}' AND DATE '{spec.period_end}'
+        ORDER BY u.trade_date, u.ticker, u.market
     """
 
 
@@ -137,6 +144,24 @@ def _label_col(spec: ModelSpec) -> str:
     return f"y_rank_{spec.primary_horizon}d"
 
 
+def _restrict_to_feature_cols(panel: pl.DataFrame, feature_cols: list[str]) -> pl.DataFrame:
+    """Drop raw feature columns not in ``feature_cols`` (keys/labels untouched.
+
+    Used by ``feature_cols_override`` to pin an exact feature set (e.g. an
+    acceptance-gate baseline vs candidate comparison) even though
+    ``_panel_sql``'s ``{alias}.* EXCLUDE (...)`` pulls in every column a mart
+    currently exposes. ``research/etl/preprocess.py::feature_columns`` scans
+    whatever numeric columns survive here, so this is the only place a caller
+    needs to intervene — standardization/``*_isna``/design columns downstream
+    adapt automatically.
+    """
+    key_cols = {"trade_date", "ticker", "market"}
+    label_prefixes = ("y_", "raw_label", "fwd_ret_", "bench_ret_")
+    keep = set(feature_cols)
+    cols = [c for c in panel.columns if c in key_cols or c.startswith(label_prefixes) or c in keep]
+    return panel.select(cols)
+
+
 def build_dataset(
     spec: ModelSpec | None = None,
     config: LakeConfig | None = None,
@@ -144,12 +169,17 @@ def build_dataset(
     created_at: str | None = None,
     write: bool = True,
     force_mart: bool = False,
+    feature_cols_override: list[str] | None = None,
 ) -> BuildResult:
     """Build (and optionally write) model 01's dataset. Returns a :class:`BuildResult`.
 
     ``write=False`` runs the full pipeline in-memory (used by tests/dry-runs) and
     skips parquet/manifest output. ``force_mart=True`` rebuilds the shared feature
     marts even if already materialized for this snapshot (00_shared §5).
+    ``feature_cols_override``, if given, restricts the assembled panel to exactly
+    these raw feature columns (plus keys/labels) before standardization/folds —
+    for pinning a baseline/candidate column set independent of whatever extra
+    columns the current ``feat_price``/``feat_flow`` marts happen to expose.
     """
     spec = spec or ModelSpec()
     config = config or LakeConfig()
@@ -194,6 +224,8 @@ def build_dataset(
     _materialize_source_marts(con, config, spec, force=force_mart)
 
     panel = assemble_panel(con, spec)
+    if feature_cols_override is not None:
+        panel = _restrict_to_feature_cols(panel, feature_cols_override)
     panel_rows = panel.height
 
     # trading dates available in the panel (sorted unique) -> folds.

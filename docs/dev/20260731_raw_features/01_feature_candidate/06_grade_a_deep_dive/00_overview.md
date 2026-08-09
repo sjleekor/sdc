@@ -132,3 +132,8 @@ date)는 다음과 같다.
 - 6개 모두 **아직 acceptance gate(증분성·거래비용·holdout 최종평가)를 통과한 것은
   아니다** — 이 조사는 Phase A 스크리닝 결과를 더 구체적으로 검증한 것일 뿐,
   실거래 채택 여부에 대한 결론이 아니다.
+- **후속**: 이 acceptance gate를 실제로 실행한 결과는
+  [../07_phase1_acceptance_gate.md](../07_phase1_acceptance_gate.md) 참고 —
+  `px_amihud_20d`/`px_near_52w_high`는 이미 baseline 모델에 있던 피쳐라 제외하고,
+  나머지 4개(`px_reversal_5d`/`px_maxret_20d`/`px_idio_vol_60d`/
+  `flow_individual_netbuy_to_volume`)만 조건부 채택으로 판정했다.
