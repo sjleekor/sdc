@@ -622,6 +622,140 @@ def economic_report(
     )
 
 
+@dataclass(frozen=True)
+class TopKEconomicReport:
+    """Economics of the fixed top-k buy list, not the top decile.
+
+    ``economic_report``'s decile is ~260 names on a ~2,600-name universe and
+    turns over more gently than the k=100 list ``predict.select_topk`` actually
+    trades. The Grade A acceptance gate (``07_phase1_acceptance_gate.md`` §6)
+    adopted its candidates conditionally on exactly this gap: the improvement
+    had only been shown at decile granularity. Same non-overlapping rebalance
+    grid and same cost assumption as ``economic_report``, so the two are read
+    side by side.
+
+    ``mean_names_scored`` is below ``mean_names_held`` near the end of the
+    sample, where the label horizon has not closed yet — those names are held
+    but cannot contribute a realized return.
+    """
+
+    horizon: int
+    k: int
+    n_rebalances: int
+    mean_names_held: float
+    mean_names_scored: float
+    grid_topk_mean_return: float
+    turnover: float
+    cost_bps_roundtrip: float
+    cost_adjusted_return: float
+
+    def as_dict(self) -> dict:
+        return {
+            "horizon": self.horizon,
+            "k": self.k,
+            "n_rebalances": self.n_rebalances,
+            "mean_names_held": self.mean_names_held,
+            "mean_names_scored": self.mean_names_scored,
+            "grid_topk_mean_return": self.grid_topk_mean_return,
+            "turnover": self.turnover,
+            "cost_bps_roundtrip": self.cost_bps_roundtrip,
+            "cost_adjusted_return": self.cost_adjusted_return,
+        }
+
+
+def _topk_ranked(
+    df: pl.DataFrame,
+    *,
+    pred_col: str,
+    k: int,
+    date_col: str,
+    ticker_col: str,
+) -> pl.DataFrame:
+    """Per-date top-k rows by ``pred``, mirroring ``predict.select_topk`` exactly.
+
+    Cross-sectional ordinal rank on ``pred`` descending (ties broken
+    deterministically), keeping ``rank <= k``. Rows with a null/non-finite
+    ``pred`` are dropped first — an unscored name is never bought.
+    """
+    if k < 1:
+        raise ValueError(f"k must be >= 1, got {k}")
+    clean = df.select([date_col, ticker_col, pred_col]).drop_nulls()
+    clean = clean.filter(pl.col(pred_col).is_finite())
+    rank = pl.col(pred_col).rank("ordinal", descending=True).over(date_col)
+    return clean.with_columns(rank.alias("_topk_rank")).filter(pl.col("_topk_rank") <= k)
+
+
+def topk_membership(
+    df: pl.DataFrame,
+    *,
+    pred_col: str,
+    k: int,
+    date_col: str = "trade_date",
+    ticker_col: str = "ticker",
+) -> dict:
+    """Per-date set of the k highest-``pred`` tickers — the deployed buy list."""
+    picked = _topk_ranked(df, pred_col=pred_col, k=k, date_col=date_col, ticker_col=ticker_col)
+    out: dict = {}
+    for (d,), grp in picked.group_by([date_col], maintain_order=True):
+        out[d] = set(grp[ticker_col].to_list())
+    return out
+
+
+def topk_economic_report(
+    df: pl.DataFrame,
+    *,
+    pred_col: str,
+    realized_col: str,
+    horizon: int,
+    k: int = 100,
+    date_col: str = "trade_date",
+    ticker_col: str = "ticker",
+    cost_bps_roundtrip: float = 60.0,
+) -> TopKEconomicReport:
+    """Top-k mean realized return on the rebalance grid, net of turnover cost.
+
+    ``cost_bps_roundtrip`` is the same business assumption ``economic_report``
+    documents — not derived from data.
+    """
+    grid = rebalance_grid(df[date_col].to_list(), horizon)
+    picked = _topk_ranked(df, pred_col=pred_col, k=k, date_col=date_col, ticker_col=ticker_col)
+    membership = {
+        d: set(grp[ticker_col].to_list())
+        for (d,), grp in picked.group_by([date_col], maintain_order=True)
+    }
+    turnover = portfolio_turnover(membership, grid)
+
+    labels = df.select([date_col, ticker_col, realized_col]).drop_nulls()
+    labels = labels.filter(pl.col(realized_col).is_finite())
+    scored = picked.join(labels, on=[date_col, ticker_col], how="inner")
+
+    returns: list[float] = []
+    scored_counts: list[int] = []
+    for d in grid:
+        day = scored.filter(pl.col(date_col) == d)
+        if day.height == 0:
+            continue
+        returns.append(float(day[realized_col].mean()))
+        scored_counts.append(day.height)
+    held_counts = [len(membership[d]) for d in grid if d in membership]
+
+    grid_return = float(np.mean(returns)) if returns else float("nan")
+    cost = 0.0 if turnover != turnover else turnover * cost_bps_roundtrip / 10_000.0
+    net = grid_return - cost if grid_return == grid_return else float("nan")
+
+    return TopKEconomicReport(
+        horizon=horizon,
+        k=k,
+        n_rebalances=len(held_counts),
+        mean_names_held=float(np.mean(held_counts)) if held_counts else float("nan"),
+        mean_names_scored=float(np.mean(scored_counts)) if scored_counts else float("nan"),
+        grid_topk_mean_return=grid_return,
+        turnover=turnover,
+        cost_bps_roundtrip=cost_bps_roundtrip,
+        cost_adjusted_return=net,
+    )
+
+
 def evaluate(
     df: pl.DataFrame,
     *,

@@ -21,6 +21,8 @@ from research.etl.metrics import (
     portfolio_turnover,
     raw_vs_rank_quantile_spread,
     rebalance_grid,
+    topk_economic_report,
+    topk_membership,
     two_sided_normal_p,
 )
 
@@ -229,3 +231,92 @@ def test_economic_report_zero_turnover_when_top_decile_never_changes() -> None:
 
     assert report.turnover == pytest.approx(0.0)
     assert report.cost_adjusted_spread == pytest.approx(report.grid_top_decile_spread)
+
+
+def _topk_frame(preds_per_date: dict, realized_per_date: dict | None = None) -> pl.DataFrame:
+    rows = []
+    for d, preds in preds_per_date.items():
+        realized = (realized_per_date or {}).get(d, {})
+        for name, pred in preds.items():
+            rows.append(
+                {
+                    "trade_date": d,
+                    "ticker": name,
+                    "pred": pred,
+                    "realized": realized.get(name, 0.0),
+                }
+            )
+    return pl.DataFrame(rows)
+
+
+def test_topk_membership_takes_exactly_k_names_per_date() -> None:
+    df = _topk_frame({1: {"A": 4.0, "B": 3.0, "C": 2.0, "D": 1.0}})
+    assert topk_membership(df, pred_col="pred", k=2) == {1: {"A", "B"}}
+
+
+def test_topk_membership_never_buys_an_unscored_name() -> None:
+    df = pl.DataFrame(
+        [
+            {"trade_date": 1, "ticker": "A", "pred": 4.0, "realized": 0.0},
+            {"trade_date": 1, "ticker": "B", "pred": None, "realized": 0.0},
+            {"trade_date": 1, "ticker": "C", "pred": 2.0, "realized": 0.0},
+        ]
+    )
+    assert topk_membership(df, pred_col="pred", k=2) == {1: {"A", "C"}}
+
+
+def test_topk_economic_report_nets_turnover_cost_against_the_buy_list_return() -> None:
+    # 4 dates, horizon=2 -> grid = [1, 3]. k=2, and the list swaps one of its two
+    # names between rebalances -> turnover 0.5.
+    df = _topk_frame(
+        {
+            1: {"A": 4.0, "B": 3.0, "C": 2.0, "D": 1.0},  # holds A, B
+            2: {"A": 1.0, "B": 2.0, "C": 3.0, "D": 4.0},  # not on the grid
+            3: {"A": 4.0, "B": 1.0, "C": 3.0, "D": 2.0},  # holds A, C
+            4: {"A": 1.0, "B": 2.0, "C": 3.0, "D": 4.0},  # not on the grid
+        },
+        {
+            1: {"A": 0.10, "B": 0.06},
+            3: {"A": 0.04, "C": 0.02},
+        },
+    )
+
+    report = topk_economic_report(
+        df, pred_col="pred", realized_col="realized", horizon=2, k=2, cost_bps_roundtrip=100.0
+    )
+
+    assert report.k == 2
+    assert report.n_rebalances == 2
+    assert report.mean_names_held == pytest.approx(2.0)
+    assert report.turnover == pytest.approx(0.5)
+    assert report.grid_topk_mean_return == pytest.approx((0.08 + 0.03) / 2)
+    assert report.cost_adjusted_return == pytest.approx(report.grid_topk_mean_return - 0.005)
+
+
+def test_topk_report_holds_names_whose_label_has_not_closed_yet() -> None:
+    # B is held on both rebalances but its label is still null on date 3, so it
+    # counts toward turnover and mean_names_held, not toward the realized mean.
+    rows = [
+        {"trade_date": 1, "ticker": "A", "pred": 4.0, "realized": 0.10},
+        {"trade_date": 1, "ticker": "B", "pred": 3.0, "realized": 0.20},
+        {"trade_date": 1, "ticker": "C", "pred": 1.0, "realized": 0.0},
+        {"trade_date": 2, "ticker": "A", "pred": 4.0, "realized": 0.0},
+        {"trade_date": 2, "ticker": "B", "pred": 3.0, "realized": None},
+        {"trade_date": 2, "ticker": "C", "pred": 1.0, "realized": 0.0},
+    ]
+    df = pl.DataFrame(rows, strict=False)
+
+    report = topk_economic_report(
+        df, pred_col="pred", realized_col="realized", horizon=1, k=2, cost_bps_roundtrip=0.0
+    )
+
+    assert report.turnover == pytest.approx(0.0)
+    assert report.mean_names_held == pytest.approx(2.0)
+    assert report.mean_names_scored == pytest.approx(1.5)
+    assert report.grid_topk_mean_return == pytest.approx((0.15 + 0.0) / 2)
+
+
+def test_topk_rejects_a_non_positive_k() -> None:
+    df = _topk_frame({1: {"A": 1.0}})
+    with pytest.raises(ValueError, match="k must be >= 1"):
+        topk_membership(df, pred_col="pred", k=0)
