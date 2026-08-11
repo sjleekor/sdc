@@ -84,11 +84,33 @@ _PHASE_A_FIXED_PROTOCOL_VALUES = {
 }
 _EVIDENCE_GRADE_KEYS = {"evaluation_order", "A", "B", "C", "D", "R"}
 
+# 04_specific_plan_B.md §2.1/§2.4 — frozen before any Phase B outcome is computed.
+_PHASE_B_FIXED_PROTOCOL_VALUES = {
+    "primary_candidate_count_max": 38,
+    "phase_a_primary_count": 75,
+    "readiness_freeze_before_label_join": True,
+    "preflight_blocked_role": "blocked_exploratory",
+    "post_freeze_blocked_p_for_bh": 1.0,
+    "receipt_value_pairing_required": "verified_same_receipt",
+    "receipt_value_pairing_error_tolerance": 0,
+}
+_PHASE_B_EVENT_BUCKETS = [[0, 3], [3, 5], [5, 10], [10, 20], [20, 40], [40, 60]]
+
 
 def validate_config(raw: dict[str, Any]) -> None:
     required = {
-        "schema_version", "horizons", "buckets", "families", "quality", "sample",
-        "stats", "decision", "placebo", "discovery", "evidence_grade",
+        "schema_version",
+        "horizons",
+        "buckets",
+        "families",
+        "quality",
+        "sample",
+        "stats",
+        "decision",
+        "placebo",
+        "discovery",
+        "evidence_grade",
+        "phase_b",
     }
     missing = required - raw.keys()
     if missing:
@@ -109,6 +131,15 @@ def validate_config(raw: dict[str, Any]) -> None:
         raise ValueError(f"evidence_grade missing keys: {sorted(missing_grade_keys)}")
     if raw["evidence_grade"]["evaluation_order"] != ["R", "C", "A", "B", "D"]:
         raise ValueError("evidence_grade.evaluation_order must check R/C before A/B/D")
+    for key, expected in _PHASE_B_FIXED_PROTOCOL_VALUES.items():
+        actual = raw["phase_b"].get(key)
+        if actual != expected:
+            raise ValueError(
+                f"phase_b.{key} must be the fixed Phase B protocol value {expected!r}, "
+                f"got {actual!r}"
+            )
+    if raw["phase_b"].get("event_buckets") != _PHASE_B_EVENT_BUCKETS:
+        raise ValueError("phase_b.event_buckets differs from the preregistered event grid")
     family_names = {f.get("family") for f in raw["families"]}
     sparse_families = raw["stats"].get("sparse_primary_grid_families", [])
     unknown_sparse = [f for f in sparse_families if f not in family_names]
@@ -142,6 +173,8 @@ def validate_config(raw: dict[str, Any]) -> None:
         mapping = family.get("variant_columns", {})
         if not {"native_t", "lag1"}.issubset(mapping):
             raise ValueError(f"{family['family']}: native_t and lag1 mappings are required")
+        if "event_buckets" in family and family["event_buckets"] != _PHASE_B_EVENT_BUCKETS:
+            raise ValueError(f"{family['family']}: event_buckets differs from the frozen grid")
         if (
             family.get("role") == "ready"
             and family.get("family") != "flow_individual_netbuy_to_volume"
@@ -163,11 +196,22 @@ def validate_config(raw: dict[str, Any]) -> None:
     if fdr_count != 75:
         raise ValueError(f"global primary hypothesis count must be 75, got {fdr_count}")
     short_count = sum(
-        len(f["primary_horizon_set"]) + len(bucket_primary_cells(f, raw["buckets"]))
-        for f in short
+        len(f["primary_horizon_set"]) + len(bucket_primary_cells(f, raw["buckets"])) for f in short
     )
     if short_count != 28:
         raise ValueError(f"short exploratory cell count must be 28, got {short_count}")
+    phase_b_families = [f for f in families if f.get("phase") == "B"]
+    phase_b_count = sum(
+        (
+            len(f["event_buckets"])
+            if "event_buckets" in f
+            else len(f["primary_horizon_set"]) + len(bucket_primary_cells(f, raw["buckets"]))
+        )
+        for f in phase_b_families
+    )
+    max_candidates = raw["phase_b"]["primary_candidate_count_max"]
+    if phase_b_count != max_candidates:
+        raise ValueError(f"Phase B candidate count must be {max_candidates}, got {phase_b_count}")
 
 
 def load_config(path: Path | str = CONFIG_PATH) -> HorizonScanConfig:

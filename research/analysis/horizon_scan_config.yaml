@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 horizons: [1, 2, 3, 5, 10, 20, 40, 60, 120]
 buckets: [[0, 5], [5, 10], [10, 20], [20, 40], [40, 60], [60, 120]]
 
@@ -113,6 +113,64 @@ evidence_grade:
   C: exploratory_or_secondary_or_available_sign_flip
   D: no_signal_or_wrong_sign_or_robustness_fail
   R: reference_only
+
+# Phase B (04_specific_plan_B.md) B-0 contract. Frozen before any label/IC/
+# p-value is computed — see horizon_scan_phase_b.py.
+phase_b:
+  primary_candidate_count_max: 38
+  phase_a_primary_count: 75
+  readiness_freeze_before_label_join: true
+  preflight_blocked_role: blocked_exploratory
+  post_freeze_blocked_p_for_bh: 1.0
+  event_buckets: [[0, 3], [3, 5], [5, 10], [10, 20], [20, 40], [40, 60]]
+  # §1.1 condition 3 — pre-existing A0 raw dependency Phase B inherits as-is.
+  # The two new raw tables (dart_filing_receipt_raw, dart_capital_change_raw)
+  # are NOT in this hard-required list: their absence blocks only the specific
+  # candidates that depend on them (via readiness_dependencies), not the run.
+  required_raw_tables:
+    - daily_ohlcv
+    - dart_financial_statement_raw
+    - dart_share_count_raw
+    - dart_shareholder_return_raw
+    - dart_xbrl_fact_raw
+    - dart_xbrl_document
+    - dart_corp_master
+    - stock_master
+    - stock_master_snapshot
+    - stock_master_snapshot_items
+  receipt_value_pairing_required: verified_same_receipt
+  receipt_value_pairing_error_tolerance: 0
+  sue_without_original_filing_source: blocked_exploratory
+  issuance_without_action_source: blocked_exploratory
+  # §5.4 SUE cohort statistics (B-7 core scan). event_primary_sample mirrors
+  # what fin_sue_event.is_primary_constant_sample already enforces; the
+  # market diagnostic threshold is frozen here but its per-market-only IC is
+  # a segment diagnostic left to B-8/B-9, not computed by B-7.
+  event_primary_cohort_scope: pooled_market_neutral_ranks
+  event_primary_sample: constant_60_session_endpoint
+  event_nw_gap_policy: calendar_session_distance
+  min_events_per_market_contribution: 10
+  min_events_per_cohort_total: 30
+  min_events_per_cohort_market_diagnostic: 30
+  min_event_cohorts: 8
+  min_independent_filing_windows: 12
+  grade_a_min_independent_filing_windows: 20
+  # §6 B-8 robustness/null experiments.
+  nonoverlap_min_dates: {default: 20, cumulative_120: 12, bucket_60_120: 12}
+  nonoverlap_valid_offset_ratio_min: 0.80
+  nonoverlap_expected_sign_offset_ratio_min: 0.60
+  event_cluster_confirm_p_max: 0.10
+  event_issuer_bootstrap_repeats: 999
+  event_filing_cycle_bootstrap_repeats: 999
+  event_issuer_bootstrap_seed: 20260802
+  event_filing_cycle_bootstrap_seed: 20260803
+  # §6 B-8 SUE point 5 — event formation ordinal non-overlap diagnostic.
+  # Continuous cells derive their non-overlap stride from the feature's own
+  # horizon width; SUE cohorts have no such natural width, so this splits
+  # the pooled cohort dates into 3 ordinal-interleaved subsamples (each
+  # cohort's formation-date rank mod 3) — chosen so a subsample can still
+  # clear min_event_cohorts (8) even for the sparsest ready cell.
+  event_ordinal_nonoverlap_stride: 3
 
 # primary_horizon_set is preregistered. include_bucket_primary records whether
 # the matching bucket cells enter the global primary count; secondary features
@@ -362,7 +420,7 @@ families:
     exploratory_horizon_set: [20, 40]
     include_bucket_primary: true
     fdr_include: false
-    readiness_dependencies: [feat_fin_pit, label_scan]
+    readiness_dependencies: [feat_fin_scan_daily, label_scan]
     official_feature_variant: native_t
     variant_columns: {native_t: fin_log_mcap, lag1: fin_log_mcap_lag1}
   - family: fin_value_z
@@ -375,7 +433,7 @@ families:
     exploratory_horizon_set: [20, 40]
     include_bucket_primary: true
     fdr_include: false
-    readiness_dependencies: [feat_fin_pit, label_scan]
+    readiness_dependencies: [feat_fin_scan_daily, label_scan]
     official_feature_variant: native_t
     variant_columns: {native_t: fin_value_z, lag1: fin_value_z_lag1}
   - family: fin_gross_profitability
@@ -386,11 +444,11 @@ families:
     features:
       - {column: fin_gross_profitability, role: primary}
       - {column: fin_operating_profitability, role: secondary}
-    primary_horizon_set: [20, 60, 120]
-    exploratory_horizon_set: [1, 5, 10, 40]
+    primary_horizon_set: [20, 40, 60, 120]
+    exploratory_horizon_set: [1, 5, 10]
     include_bucket_primary: true
     fdr_include: false
-    readiness_dependencies: [feat_fin_pit, label_scan]
+    readiness_dependencies: [feat_fin_scan_daily, label_scan]
     official_feature_variant: native_t
     variant_columns: {native_t: fin_gross_profitability, lag1: fin_gross_profitability_lag1}
   - family: fin_asset_growth_yoy
@@ -403,7 +461,7 @@ families:
     exploratory_horizon_set: [20, 40]
     include_bucket_primary: true
     fdr_include: false
-    readiness_dependencies: [feat_fin_pit, label_scan]
+    readiness_dependencies: [feat_fin_scan_daily, label_scan]
     official_feature_variant: native_t
     variant_columns: {native_t: fin_asset_growth_yoy, lag1: fin_asset_growth_yoy_lag1}
   - family: fin_accruals_to_assets
@@ -416,20 +474,21 @@ families:
     exploratory_horizon_set: [20, 40]
     include_bucket_primary: true
     fdr_include: false
-    readiness_dependencies: [feat_fin_pit, label_scan]
+    readiness_dependencies: [feat_fin_scan_daily, label_scan]
     official_feature_variant: native_t
     variant_columns: {native_t: fin_accruals_to_assets, lag1: fin_accruals_to_assets_lag1}
   - family: fin_sue
     phase: B
     fdr_family: event
     role: phase_b_blocked
-    expected_sign: null
+    expected_sign: "+"
     features: [{column: fin_sue, role: primary}]
-    primary_horizon_set: [1, 2, 3, 5, 10, 20, 40, 60]
-    exploratory_horizon_set: [120]
+    primary_horizon_set: []
+    exploratory_horizon_set: []
     include_bucket_primary: false
     fdr_include: false
-    readiness_dependencies: [feat_fin_pit, event_time, label_scan]
+    event_buckets: [[0, 3], [3, 5], [5, 10], [10, 20], [20, 40], [40, 60]]
+    readiness_dependencies: [dart_filing_receipt_raw, dart_xbrl_fact_raw, fin_sue_event]
     official_feature_variant: lag1
     variant_columns: {native_t: fin_sue, lag1: fin_sue_lag1}
   - family: ev_net_share_issuance_yoy
@@ -442,7 +501,7 @@ families:
     exploratory_horizon_set: [20, 40]
     include_bucket_primary: true
     fdr_include: false
-    readiness_dependencies: [feat_event, dim_stock_pit_daily, label_scan]
+    readiness_dependencies: [dart_capital_change_raw, feat_event_scan_daily, label_scan]
     official_feature_variant: native_t
     variant_columns: {native_t: ev_net_share_issuance_yoy, lag1: ev_net_share_issuance_yoy_lag1}
   - family: ev_payout_yield
@@ -455,6 +514,6 @@ families:
     exploratory_horizon_set: [20, 40]
     include_bucket_primary: true
     fdr_include: false
-    readiness_dependencies: [feat_event, label_scan]
+    readiness_dependencies: [feat_event_scan_daily, label_scan]
     official_feature_variant: native_t
     variant_columns: {native_t: ev_payout_yield, lag1: ev_payout_yield_lag1}

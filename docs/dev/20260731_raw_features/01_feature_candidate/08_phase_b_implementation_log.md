@@ -1,0 +1,413 @@
+# 08. Phase B 구현 진행 기록 (B-PR1 ~ B-PR15)
+
+## 0. 목적과 범위
+
+이 문서는 [04_specific_plan_B.md](./04_specific_plan_B.md) §6(작업 패키지 B-0~B-10)을
+§10이 정한 리뷰 단위(B-PR1~B-PR9, +B-PR10, +B-PR11, +B-PR12, +B-PR13, +B-PR14, +B-PR15)로
+나눠 실제로 구현한 내용을 기록한다. plan 문서 자체는 사전등록 계약이라 그대로 두고, 이 문서에는
+각 PR이 만든 파일, 핵심 설계 결정·편차, 테스트 개수를 남긴다. 다음에 이어서 작업할 때(같은
+사람이든 다른 사람이든) 바로 파악할 수 있게 하는 게 목적이다.
+
+기준 시점: 2026-08-10, 브랜치 `refactor/parquet-compute-reproducible`.
+`uv run pytest tests/unit` 819개 통과, 회귀 없음.
+
+2026-08-11 재확인: 같은 브랜치에서 `uv run pytest tests/unit -q` 819개 그대로 통과.
+이 문서가 처음 저장된 뒤(2026-08-10 13:59) 실제로 Phase A 재실행·Phase AB 결합 run이
+발행됐다 — 발행물 목록과 지금 무엇이 막혀 있는지는 §3, 이어서 할 일은 §4를 보면 된다.
+Phase B 코드는 **아직 커밋되지 않았다**(전부 working tree 상태).
+
+## 1. 전체 상태 요약
+
+| PR | 대응 작업 패키지 | 상태 |
+|---|---|---|
+| B-PR1 | B-0 config 확장·preflight | 완료 |
+| B-PR2 | B-1 filing receipt·capital action raw | 완료 |
+| B-PR3 | B-2 `stock_metric_vintage_fact` | 완료 |
+| B-PR4 | B-3 standalone quarter·TTM (`fin_quarterly_metric_vintage`) | 완료 |
+| B-PR5 | B-4 `feat_fin_scan_daily` | 완료 |
+| B-PR6 | B-5 issuance·payout (`feat_event_scan_daily`) | 완료 |
+| B-PR7 | B-6 SUE event mart (`fin_sue_event`) | 완료 |
+| B-PR8 | B-7 continuous·event core scan + B-9 결합 BH 핵심부 | 완료 |
+| B-PR9 | B-8 강건성·null 실험 + B-9 나머지 + B-10 | **부분 완료** — B-8의 screen_pass 하드게이트 부분만 완료, 나머지는 §4 "남은 작업" 참고 |
+| B-PR10 | B-9 step 1-2 (실제 lake 연결 + 결합 BH) | 완료 |
+| B-PR11 | B-9 screen_pass 9개 조건 통합 판정 | 완료 |
+| B-PR12 | B-9 evidence grade(A/B/C/D/NE) 결정 로직 | 완료 |
+| B-PR13 | rank-correlation 진단(B-9) + SUE event-ordinal non-overlap(B-8) | 완료 |
+| B-PR14 | 결합 단면 permutation(B-8) | 완료 |
+| B-PR15 | B-10 Stage 1 — readiness_matrix + robustness summary 아카이브 | 완료 |
+
+## 2. B-PR별 상세
+
+### B-PR1 — contract (B-0)
+
+**만든/고친 파일**
+- `research/analysis/horizon_scan_config.yaml` — `schema_version: 4`, `phase_b:` 섹션 추가(최대 38 candidate, event bucket 등)
+- `research/analysis/horizon_scan_config.py` — `_PHASE_B_FIXED_PROTOCOL_VALUES`, `_PHASE_B_EVENT_BUCKETS` 검증 로직
+- `research/analysis/horizon_scan_phase_b.py` (신규) — candidate registry(`phase_b_candidate_cells`/`build_phase_b_candidate_registry`), readiness freeze(`build_phase_b_readiness_rows`/`write_phase_b_readiness_freeze`), run spec(`build_phase_b_run_spec`), receipt-value pairing preflight(`check_receipt_value_pairing`)
+- `research/analysis/horizon_scan_run_spec.py` — `content_hash_exclude_names` 옵션 추가(하위호환)
+- `tests/unit/test_horizon_scan_phase_b.py` (신규, 23개)
+
+**핵심 결정**
+- readiness 판정은 "outcome-blind" — label/return/IC/p-value를 읽는 파라미터 자체가 존재하지 않도록 구조적으로 강제(테스트로 고정).
+- 연속 32 + SUE 6 = 38 candidate 정확히 일치를 config validate 단계에서 검증.
+
+### B-PR2 — filing receipt·capital action raw (B-1)
+
+**만든/고친 파일**
+- `sql/postgres_ddl.sql` — `dart_filing_receipt_raw`, `dart_capital_change_raw` 신규 테이블
+- `src/krx_collector/domain/enums.py`, `domain/models.py` — 신규 RunType 3종, 도메인 모델 추가
+- `src/krx_collector/ports/filing_receipt.py` (신규), `ports/share_info.py`(`CapitalChangeProvider`)
+- `src/krx_collector/adapters/opendart_filings/` (신규) — `OpenDartFilingReceiptProvider`
+- `src/krx_collector/adapters/opendart_share_info/provider.py` — `fetch_capital_change()`
+- `src/krx_collector/adapters/opendart_common/policy.py`/`__init__.py` — `CAPITAL_CHANGE_POLICY`, `FILING_RECEIPT_POLICY`
+- `src/krx_collector/service/sync_dart_filings.py` (신규), `service/sync_dart_share_info.py`, `service/sync_dart_xbrl.py`(`sync_dart_xbrl_receipt_targeted`)
+- `src/krx_collector/infra/db_postgres/repositories.py`, `remote_sync.py` — upsert/조회 메서드, `TableSyncSpec` 2건 추가
+- `src/krx_collector/cli/app.py` — `dart sync-filings`, `dart backfill-xbrl-receipts` 서브커맨드
+- `src/krx_collector/service/profiling/catalog.py`, `research/etl/config.py`, `bin/raw-parquet-export-all.sh` — 신규 raw 테이블 등록
+- `docs/database.md`(13/14절 신규, 15절 재번호), `docs/operations.md`, `CLAUDE.md`
+- 테스트: `test_opendart_share_info.py`, `test_opendart_xbrl.py`(확장), `test_opendart_filings.py`(신규)
+
+**핵심 결정**
+- 원공시(original) 판정은 `dart_filing_receipt_raw`의 `report_nm` "정정" 포함 여부로만 하고, raw에 남은 최소 rcept_no를 원공시로 간주하지 않는다(§3.5 원칙의 근거가 되는 raw).
+
+**부수 수정(요청에 따라)**
+- `tests/integration/test_profiling_pipeline.py` — 이번 세션과 무관한 기존 버그(폐기된 `metric_catalog`/`operating_metric_fact` 참조)를 발견해 고침. `git stash`로 세션 이전부터 있던 버그임을 확인.
+- `test_remote_db_sync.py`, `test_research_config.py` — 신규 raw 테이블 2개 추가로 하드코딩된 개수(13→15, 12→14) 갱신.
+
+### B-PR3 — vintage foundation (B-2)
+
+**만든 파일**
+- `research/etl/marts/metric_vintages.py` (신규) — `stock_metric_vintage_fact`. grain `(ticker, metric_code, statement_period_end, fs_basis, rcept_no)`, `rcept_no`를 독립 컬럼으로 보존(legacy `metrics_normalize.py`는 승자 하나로 collapse).
+- `tests/unit/test_metric_vintages.py` (신규, 9개)
+
+**핵심 결정**
+- `metrics_normalize.py`(golden-parity 고정 코드)와 코드 공유하지 않음 — 매핑 규칙(`metric_rules.py`)만 재사용, SQL은 독립 작성. Phase B의 모든 mart가 이 원칙을 따른다.
+- `complete_original_and_revisions` 상태는 절대 내지 않음(전체 receipt 스캔 없이는 "더 이상 정정 없음"을 증명 불가).
+
+### B-PR4 — standalone quarter·TTM (B-3)
+
+**만든 파일**
+- `research/etl/marts/financial_quarters.py` (신규) — `fin_quarterly_metric_vintage`. `direct_interim`/`cumulative_reported`/`instant`/`weighted_share` 4종 metric kind별 분기 환산 + TTM.
+- `tests/unit/test_financial_quarters.py` (신규, 10개)
+
+**핵심 결정**
+- "N분기 전" 값은 `LAG(n)`이 아니라 정확한 `seq_key` self-join으로 구함(결측 분기가 있을 때 `LAG`이 잘못된 분기를 끌어오는 문제를 원천 차단).
+
+### B-PR5 — daily financial feature (B-4)
+
+**만든 파일**
+- `research/etl/features/fin_scan.py` (신규) — `feat_fin_scan_daily`. 규모/가치/수익성/자산성장/발생액 5개 family.
+- `tests/unit/test_research_fin_scan.py` (신규, 8개)
+
+**핵심 결정**
+- "날짜당 하나의 fs_basis" 원칙 — `net_income`이 CFS 값을 가지면 그 날짜의 모든 metric을 CFS로, 아니면 OFS로 통일 선택(accruals처럼 여러 metric을 한 식에 섞을 때 basis가 섞이지 않게).
+
+### B-PR6 — issuance·payout (B-5)
+
+**만든 파일**
+- `research/etl/features/event_scan.py` (신규) — `feat_event_scan_daily`. `irdsSttus` 발행/소각 사유 분류, 배당 소스 정규화.
+- `tests/unit/test_research_event_scan.py` (신규, 9개)
+
+### B-PR7 — SUE event mart (B-6)
+
+**만든 파일**
+- `research/etl/features/sue_event.py` (신규) — `fin_sue_event`. grain `(ticker, original_rcept_no, event_formation_date, market)` — Phase B에서 유일하게 event-time인 mart.
+- `tests/unit/test_research_sue_event.py` (신규, 5개)
+
+**핵심 결정 / 발견한 버그**
+- comparative EPS는 §4.6의 1차 방법(같은 filing 안 "전년 동기" XBRL context 재구성)이 아니라 2차 방법(`as_was_lag4q`, B-3의 `value_lag_4q`)만 사용 — 이 리포의 XBRL 파싱이 concept당 값 1개만 캡처하는 구조상 1차 방법은 불가능.
+- **실제 버그**: `weighted_avg_shares`는 XBRL 기반이라 B-2에서 항상 `fs_basis=''`인데, `controlling_net_income`은 실제 `CFS`/`OFS` 값을 가진다. 처음 짠 SQL이 두 metric을 `fs_basis` 일치로 조인해 영원히 매칭이 안 되는 버그였음 — shares 쪽 조인에서 `fs_basis` 조건을 제거해 해결.
+- 60세션 정정 오염 체크는 캘린더 일수가 아니라 `d_idx`(세션 인덱스) 거리로 판정.
+
+### B-PR8 — continuous·event core scan + 결합 BH 핵심부 (B-7 + B-9 일부)
+
+**만든 파일**
+- `research/analysis/horizon_scan_phase_b_scan.py` (신규)
+- `tests/unit/test_horizon_scan_phase_b_scan.py` (신규, 15개)
+- `horizon_scan_config.yaml`에 §5.4 SUE 코호트 파라미터 추가(`min_events_per_market_contribution: 10`, `min_events_per_cohort_total: 30`, `min_event_cohorts: 8` 등)
+
+**핵심 결정**
+- 연속 7개 family(32셀)는 Phase A의 `scan_cell`/`run_registry_scan`을 **그대로 재사용** — `feat_fin_scan_daily`/`feat_event_scan_daily`를 기존 `analysis_panel`에 LEFT JOIN한 `analysis_panel_phase_b` 뷰만 새로 만들면 됨.
+- SUE(6셀)는 grain이 달라 새 코호트 알고리즘 구현: `(event_formation_date, market)` 안에서 tie-aware 퍼센타일 순위 변환 → market당 10개 이상일 때만 풀링 → 날짜별 풀링 30개 이상일 때 그 날짜의 Spearman IC 계산 → 날짜별 IC 시퀀스에 gap-aware NW(글로벌 세션 인덱스 기준). 결과 필드명은 연속 셀과 통일(`n_dates`=코호트 수, `n_obs*`=코호트-market 그룹 크기).
+- `apply_phase_b_only_bh`/`apply_combined_ab_bh` — 기존 `apply_global_bh`를 그대로 재사용(hypothesis_id 기반이라 A/B 구분 없이 동작).
+
+### B-PR9 — 강건성·null 실험(부분) + B-9 나머지 + B-10 (진행 중)
+
+**만든 파일**
+- `research/analysis/horizon_scan_phase_b_robustness.py` (신규)
+- `tests/unit/test_horizon_scan_phase_b_robustness.py` (신규, 13개)
+- `horizon_scan_phase_b_scan.py` 리팩터 — `_pool_cohort_ranks`/`_aggregate_cohort_rows`로 분리(동작 동일, 기존 15개 테스트 그대로 통과). bootstrap이 "코호트 수 미달" 게이트 없이 같은 순위·풀링 로직을 재사용하기 위함.
+- `horizon_scan_config.yaml`에 `nonoverlap_min_dates` override, bootstrap 반복수/시드(999회), `event_cluster_confirm_p_max: 0.10` 추가
+
+**완료된 부분 (screen_pass 하드게이트)**
+- 연속 non-overlap offset 진단 — Phase A `run_nonoverlap_offsets` 재사용, h=120 계열만 `nonoverlap_min_dates` 20→12 override. 판정: `valid_offset_ratio>=0.80` AND `offset_sign_agreement_ratio>=0.60`.
+- 연속 temporal placebo — Phase A `run_temporal_placebo`가 panel/registry에 완전히 독립적이라 **수정 없이 그대로 호출**.
+- SUE issuer cluster bootstrap / filing-cycle block bootstrap (신규 구현, Phase A에는 대응 코드 없음) — 티커 또는 `(bsns_year,reprt_code)` 단위 복원추출 → `_pool_cohort_ranks` 재사용해 리샘플 코호트 IC 재계산 → percentile-method 양측 bootstrap p-value로 확인. 시드는 `derive_replicate_seed` 재사용(재시작 가능).
+
+### B-PR10 — Phase B 실행 파이프라인 + A+B 결합 BH 연결 (B-9 step 1-2)
+
+**만든/고친 파일**
+- `research/analysis/horizon_scan_phase_b_run.py` (신규) — `register_phase_b_marts`(5개 mart를 의존 순서대로 best-effort materialize, `duckdb.Error`는 "이 mart는 지금 못 만든다"로 흡수), `run_phase_b_core`(readiness freeze → continuous/event scan → phase-B-only BH → `phase=B/.../run_id=.../` atomic publish), `load_phase_a_primary_rows`(§2.3 rule 5: config_hash·content_hash·75-id population 검증), `run_combined_ab`(Phase A+B 결합 BH → `phase=AB/.../run_id=.../` atomic publish)
+- `research/analysis/horizon_scan_phase_b_scan.py` — `build_phase_b_panel_sql`/`register_phase_b_panel`이 `fin_scan_view`/`event_scan_view`를 `None`으로 받아 해당 LEFT JOIN을 생략할 수 있도록 확장(한쪽 mart만 materialize된 부분가용 상태에서 다른 쪽 family까지 덩달아 막히지 않게)
+- `research/analysis/horizon_scan.py` — `--phase {A,B,AB}` CLI 확장(`B`/`AB`는 신규 모듈로 위임)
+- `tests/unit/test_horizon_scan_phase_b_run.py` (신규, 10개), `test_horizon_scan_phase_b_scan.py`에 panel None-처리 테스트 2개 추가
+- `tests/integration/test_horizon_scan_phase_b_smoke.py` (신규) — 실제 로컬 lake 대상 self-skip 통합 테스트
+
+**핵심 결정**
+- 디렉터리 nesting은 plan §7.1 ASCII 다이어그램(`config=<hash>/phase=B/`)이 아니라 `run_phase_a`가 실제로 쓰는 `phase=<X>/snapshot_date=/source=/config_hash=/run_id=/` 순서를 그대로 따름 — plan 문서가 `run_phase_a` 구현보다 먼저 쓰여 순서가 어긋나 있었음.
+- **중요한 실제 데이터 상태**: 로컬 lake에 이번 세션에 추가한 `dart_filing_receipt_raw`/`dart_capital_change_raw` parquet가 아직 없음(prod 수집·export 전) — `stock_metric_vintage_fact`가 `dart_filing_receipt_raw`를 참조하므로 오늘은 Phase B 38개 후보 전부 `blocked_exploratory`(`M_B_ready=0`)로 정상 동결됨. 코드 버그가 아니라 outcome-blind 설계가 의도한 그대로이며, prod가 두 raw 테이블을 수집하면 코드 변경 없이 일부 셀이 ready로 전환된다.
+- **또 다른 실제 상태** (→ 2026-08-10 재실행으로 **해소됨**, §3.1 참고): 당시 이미 발행된 유일한 Phase A 공식 run(`run_id=20260803T063659-93effdb0`)은 이 세션에서 `horizon_scan_config.yaml`에 Phase B 섹션을 추가하기 **이전**에 실행된 것이라, 그 run의 `run_spec.json["config_hash"]`가 지금 로드한 config의 `config_hash`와 다르다. `load_phase_a_primary_rows`는 이걸 정확히 거부한다(§2.3 "Phase A 결과를 본 뒤 B family/horizon을 바꾼 config는 confirmatory 결합 검정으로 인정하지 않는다") — 실제 새 confirmatory 결합 결과를 얻으려면 현재 config로 Phase A를 다시 공식 실행해야 하고, 이는 이번 PR의 범위 밖(수 시간 걸리는 별도의 의도적 실행)이다.
+- `register_phase_b_marts`의 try/except 단위는 mart 하나씩 — `dart_capital_change_raw`만 없고 `dart_filing_receipt_raw`는 있는 경우 `feat_event_scan_daily`만 못 만들고 나머지(fin_scan/sue_event)는 정상 진행되는 걸 unit test로 고정.
+- **실제 lake로 처음 돌려서 발견한 버그**: `register_phase_b_panel`은 기존 `analysis_panel` 뷰 위에 LEFT JOIN하는데, 처음 구현에서 `run_phase_b_core`가 `analysis_panel`을 등록하지 않았고 `available_assets`에도 `dim_stock_pit_daily`/`dim_price_quality_daily` 2개만 넣어서 `label_scan`(및 나머지 A0 mart)이 항상 "없음"으로 잡혀 모든 continuous family가 실제 이유와 무관하게 blocked 처리됐다. `REQUIRED_A0_MARTS`(7개) 전체 등록 + `register_analysis_panel(con)` 호출 + `assert_a0_manifest_matches` preflight로 고쳤고, 실제 lake에서 재확인해 `missing_dependencies`가 이제 `dart_filing_receipt_raw`/`dart_capital_change_raw`와 그 하위 mart로만 정확히 좁혀지는 걸 확인했다. 이 버그는 unit test(synthetic mart stub)로는 안 잡히고 실제 lake 통합 테스트로만 잡혔다 — synthetic 테스트가 `analysis_panel`을 미리 만들어주는 방식이었기 때문.
+
+### B-PR11 — screen_pass 9개 조건 통합 판정 (B-9 §9)
+
+**만든/고친 파일**
+- `research/analysis/horizon_scan_phase_b_scan.py` — `compute_phase_b_period_sign_pass`(규칙 4: n<=1 하드 실패, Phase A `compute_period_sign_pass`와 다른 부분), `compute_phase_b_screen_pass`(9개 규칙 통합, Phase A `horizon_scan_report.compute_screen_pass`와 같은 모양)
+- `research/analysis/horizon_scan_phase_b_run.py` — `compute_phase_b_gate_updates`(신규, `run_phase_b_core`에서 분리) — 규칙 3(tradable)/5(available)는 4-combo persist 후 `compute_tradable_pass`/`compute_available_direction_pass`(Phase A `horizon_scan_runner.py`) 재사용, 규칙 4는 Phase B 전용 period-segment view(`_register_phase_b_period_segment_view`/`_compute_phase_b_period_ics`, Phase A `horizon_scan.py`의 동명 함수를 순환참조 회피 위해 복제) 신규 등록, 규칙 7/8은 B-PR9가 이미 만든 `horizon_scan_phase_b_robustness.py`의 오케스트레이션되지 않은 함수(`run_phase_b_continuous_nonoverlap`/`run_phase_b_temporal_placebo`/`run_issuer_cluster_bootstrap`/`run_filing_cycle_block_bootstrap`/`evaluate_sue_cluster_confirmation`)를 처음으로 실제 ready 셀에 오케스트레이션. `run_phase_b_core`는 continuous 4-combo 전체를 `horizon_ic.parquet`에 쓰도록 변경(Phase A `run_phase_a`의 `output_rows` 패턴과 동일 — discovery combo만 BH/게이트 필드를 가짐).
+- `run_combined_ab`에 규칙 1(`q_fdr_global_ab<0.10`+sign, `primary_discovery_ab`에 이미 folded됨) 계산과 최종 `compute_phase_b_screen_pass` 호출 추가 — `combined_ab_primary_hypotheses.parquet`에 `screen_pass`/`failed_gates` 컬럼, `manifest.json`에 `phase_b_screen_pass_count` 추가. Phase A의 75개는 이 함수 대상이 아님(family 카드에 자체 screen_pass가 있음).
+- `tests/unit/test_horizon_scan_phase_b_scan.py`(+13, `compute_phase_b_period_sign_pass`/`compute_phase_b_screen_pass`), `tests/unit/test_horizon_scan_phase_b_run.py`(+3, `compute_phase_b_gate_updates`를 mock으로 wiring만 검증 + 기존 `run_combined_ab` happy-path 테스트에 screen_pass 검증 추가), `tests/integration/test_horizon_scan_phase_b_smoke.py`(+1, `run_combined_ab`를 실제 lake 대상으로도 실행)
+
+**핵심 결정**
+- `compute_phase_b_gate_updates`를 `run_phase_b_core`에서 분리한 이유는 순전히 테스트성 — 실제 DuckDB 연결·disk 기반 `LakeConfig` 없이 이미 등록된 `con` + synthetic scanned_rows만으로 유닛테스트하기 위함(B-PR10과 같은 이유로 `register_phase_b_marts`의 전체 materialize 체인을 unit test에서 재현하지 않기로 한 결정과 일관됨). 실제 게이트 계산 로직(`run_phase_b_continuous_nonoverlap` 등 호출)은 monkeypatch로 검증하고, combo 추출·병합 로직만 실제로 실행해 검증한다.
+- 규칙 1(`q_fdr_global_ab`)은 결합 q-value가 필요해 `run_combined_ab`에서만 계산 가능 — 나머지 8개는 `run_phase_b_core`가 `phase_b_primary_hypotheses.parquet`에 미리 계산해 저장해두고, `run_combined_ab`는 그 컬럼을 그대로 읽어 `apply_global_bh`가 모든 입력 필드를 그대로 복사해준다는 점을 이용한다(추가 merge 불필요).
+- 규칙 9(CA/availability/holdout 정책 일치)는 오늘 시점엔 항상 참으로 둔다 — `run_phase_b_core`/`run_combined_ab` 둘 다 디버그/holdout 오버라이드를 아예 노출하지 않으므로(B-PR10에서 의도적으로 안 만듦) 정책이 어긋날 방법 자체가 없다. 나중에 디버그 오버라이드가 생기면 그때 진짜 게이트가 된다.
+- 오늘 실제 lake는 `M_B_ready=0`이라 이번에 추가한 오케스트레이션 코드(period segment, nonoverlap+temporal placebo, SUE cluster bootstrap)가 전부 `if continuous_scanned_rows:`/`if event_scanned_rows:` 가드에 걸려 실행되지 않는다 — 실제 lake 통합 테스트로는 "크래시 안 함"만 확인 가능하고, 실제 로직 검증은 mock 기반 unit test(`compute_phase_b_gate_updates`)로 했다.
+
+### B-PR12 — evidence grade A/B/C/D/NE 결정 로직 (B-9 §9)
+
+**만든/고친 파일**
+- `research/analysis/horizon_scan_phase_b_scan.py` — `PIT_INDUSTRY_CAPPED_FAMILIES`(`{fin_value_z, fin_gross_profitability, fin_accruals_to_assets}` 상수), `compute_phase_b_evidence_grade`(Phase A `assign_evidence_grade`와 같은 순서: role 게이트 → available sign flip/robustness 실패는 C로 우선 라우팅 → screen_pass 분기(offset 전부 evaluable + PIT-capped family 아님 + 유효 기간 2개 아님 → A, 그 외 screen_pass면 B) → 그 외 D)
+- `research/analysis/horizon_scan_phase_b_run.py` — `compute_phase_b_gate_updates`가 non-overlap 결과에서 `offset_status`("complete"/"some_insufficient")도 같이 persist하도록 한 줄 추가. `run_combined_ab`에 `compute_phase_b_screen_pass` 호출 직후 `compute_phase_b_evidence_grade` 호출 추가 — `combined_ab_primary_hypotheses.parquet`에 `evidence_grade` 컬럼, `manifest.json`에 `phase_b_evidence_grade_counts`(`{"A":n,"B":n,"C":n,"D":n}`) 추가.
+- `tests/unit/test_horizon_scan_phase_b_scan.py`(+8, `compute_phase_b_evidence_grade` 각 등급/캡 케이스), `tests/unit/test_horizon_scan_phase_b_run.py`(offset_status 필드 검증 1줄 추가 + `run_combined_ab` happy-path에 evidence_grade/등급 카운트 검증 추가), `tests/integration/test_horizon_scan_phase_b_smoke.py`(manifest에 `phase_b_evidence_grade_counts` 키 존재 확인 1줄 추가)
+
+**핵심 결정**
+- `failed_gates`(B-PR11의 `compute_phase_b_screen_pass` 출력)를 그대로 재사용해 "왜 실패했는지"를 판정 — `"available_direction_pass"`/`"robustness_pass"`가 실패 목록에 있으면 D가 아니라 C로 분류(Phase A가 `available_sign_flip`을 screen_pass 분기보다 먼저 체크하는 것과 같은 우선순위).
+- **정직하게 남긴 제약**: plan이 "B" 사유로 나열한 industry/source/segment/offset 4가지 중 **offset**(non-overlap 진단)만 실제 데이터가 있다. source(mapping_fallback_ratio 등)/segment 진단은 아직 아무 데도 구현이 안 돼 있어(§7.1에 필드만 정의됨, B-8 나머지·B-10 항목) 이번 "비치명 경고" 판정에는 반영하지 않았다 — 없는 신호를 있는 척 만들지 않고, 그 진단들이 생기면 그때 추가하도록 코드 docstring에 명시.
+- PIT-industry 상한 대상 family는 config에 마커 필드가 없어 코드 상수로 하드코딩(§9 근거를 주석에 남김) — 나중에 PIT industry가 실제로 생기면 이 상수/캡 자체를 제거해야 함.
+
+### B-PR13 — rank-correlation 진단(B-9) + SUE event-ordinal non-overlap(B-8)
+
+**만든/고친 파일**
+- `research/analysis/horizon_scan_phase_b_diagnostics.py`(신규) — `compute_phase_b_rank_correlation`(Phase A ready continuous family × Phase B ready continuous family의 primary feature 쌍마다 날짜×시장 Spearman 상관을 `research/etl/metrics.py`의 기존 `per_date_market_rank_ic`/`daily_market_weighted_ic`로 계산 — 신규 통계 로직 없음, SQL eligibility만 신규), `run_sue_event_ordinal_nonoverlap`(SUE ready 셀의 pooled cohort를 formation-date ordinal로 `event_ordinal_nonoverlap_stride`(신규 config, 3)개 subsample로 쪼개 `_pool_cohort_ranks`/`_aggregate_cohort_rows`(B-PR8/9가 이미 만든 함수)로 재집계, `compute_nonoverlap_robustness_pass`(B-PR9)로 게이트 판정 — screen_pass 하드게이트 아님, 카드/진단 정보).
+- `research/analysis/horizon_scan_config.yaml` — `phase_b.event_ordinal_nonoverlap_stride: 3` 추가(사전등록값, 근거는 B-PR9의 다른 non-overlap 값들과 나란히 주석에 남김).
+- `research/analysis/horizon_scan_phase_b_scan.py` — `compute_phase_b_evidence_grade`에 `n_independent_filing_windows`/`grade_a_min_independent_filing_windows` 파라미터 추가(§6 B-8 SUE 5번 "코호트가 부족하면 grade A 금지" — `n_independent_filing_windows`는 B-7 core scan(`scan_event_cohort_cell`)이 이미 계산해두던 값이라 새 통계 불필요, 기존 config `grade_a_min_independent_filing_windows`(20)와 비교만 추가).
+- `research/analysis/horizon_scan_phase_b_run.py` — `compute_phase_b_gate_updates`의 SUE 루프에 `run_sue_event_ordinal_nonoverlap` 호출 추가(`event_ordinal_nonoverlap_pass`/`event_ordinal_offset_status` 저장, `robustness_required`/`robustness_pass`는 안 건드림 — 그건 여전히 규칙 7/8 cluster confirmation 전용). `run_phase_b_core`에 rank-correlation 계산 + `core/primary_feature_rank_correlation.parquet` 저장 추가(ready continuous family가 없으면 파일 자체를 안 씀). `run_combined_ab`의 `compute_phase_b_evidence_grade` 호출에 filing-windows 인자 전달 + Phase B 산출물의 rank-correlation parquet를 phase=AB로 그대로 복사(재계산 없음).
+- 테스트: `tests/unit/test_horizon_scan_phase_b_diagnostics.py`(신규, 7개), `test_horizon_scan_phase_b_scan.py`(+3, filing-windows 캡), `test_horizon_scan_phase_b_run.py`(+4, SUE ordinal mock 배선 + rank-correlation 파일 복사/스킵 2케이스), `test_horizon_scan_phase_b_smoke.py`(+2, rank-correlation 파일 존재가 ready_continuous 상태와 일치하는지, phase=AB 복사 일관성).
+
+**핵심 결정**
+- rank-correlation의 eligibility 조건(`in_broad`/`NOT ca_mask`/`common_formation_120d`/`common_survivor_120d`)은 `horizon_scan_runner.build_formation_sql`을 그대로 재사용하지 못했다 — 그 함수는 항상 horizon-shift된 label 컬럼과 조인하는 구조라 "동시점 feature-vs-feature" 상관에는 안 맞음. 대신 같은 조건을 새 SQL에 그대로 복사해 재사용(로직은 동일, 함수는 새로 씀).
+- 대상 pair는 Phase A ready continuous family(12개) × Phase B **ready**(blocked 아닌) continuous family의 primary feature만 — SUE는 grain이 daily가 아니라 제외.
+- SUE ordinal non-overlap의 stride 값(3)은 사전등록 필요한 새 파라미터라 config에 명시적으로 추가(다른 diagnostic 임계값처럼 코드에 숨기지 않음).
+- 이번 PR도 오늘 실제 lake `M_B_ready=0`이라 두 진단 모두 실행 경로만 검증되고(크래시 없음, 파일 유무 일관성), 실제 값 계산은 mock/synthetic 테스트로 검증했다.
+
+### B-PR14 — 결합 단면 permutation (B-8)
+
+**만든/고친 파일**
+- `research/analysis/horizon_scan_phase_b_scan.py` — `_pool_cohort_ranks`의 날짜별 pooling 뒷부분을 `_pool_qualifying_by_date(qualifying, *, min_events_per_cohort_total)`로 추출(순수 리팩터, 동작 동일 — 기존 SUE/bootstrap/ordinal 테스트 그대로 통과). 실제 `qualifying` 프레임을 이미 갖고 있는 permutation 루프가 SQL을 다시 안 날리고 rank만 다시 섞어 재풀링할 수 있게 하기 위함.
+- `research/analysis/horizon_scan_phase_b_joint_permutation.py`(신규) — `_permute_qualifying_sue_ranks`(`(event_formation_date, market)` 그룹 안에서만 `sue_pctrank`를 섞고 `excess_pctrank`는 고정 — "frozen rank vector 치환"), `_scan_sue_null_row`(SUE 셀 하나의 replicate 1개 null row, 최소 코호트 수 게이트 없음 — bootstrap/ordinal과 같은 원칙), `run_combined_cross_sectional_permutation`(continuous는 Phase A `run_cross_sectional_permutation`의 fetch-once/permute-and-rescan 부품(`fetch_broad_common_survivor_frame`/`permute_within_groups`/`_scan_registry_once`)을 그대로 재사용, SUE는 `_pool_cohort_ranks`로 `qualifying`을 한 번만 얻고 매 replicate `_permute_qualifying_sue_ranks`+`_pool_qualifying_by_date`+`_aggregate_cohort_rows`로 재집계, 둘을 합쳐 `apply_global_bh` 한 번으로 replicate당 discovery count 산출. `p_empirical_count`는 여기서 계산하지 않음 — 아직 실제 발견 수를 모름).
+- `research/analysis/horizon_scan_phase_b_run.py` — `run_phase_b_core`에 `continuous_scanned_rows or event_scanned_rows`일 때만 Phase A 75개(`build_primary_hypothesis_registry(config)`) + Phase B ready continuous를 합친 registry와 ready SUE 셀로 `run_combined_cross_sectional_permutation` 호출 → `core/permutation_summary.parquet` 저장. `run_combined_ab`에 그 parquet가 있으면 읽어 `real_discovery_count`(이미 계산된 `combined`의 `primary_discovery_ab` 합) 대비 `empirical_discovery_count_p`(재사용)로 `manifest.json`에 `combined_cross_sectional_permutation: {real_discovery_count, n_replicates, p_empirical_count}` 추가 — 파일이 없으면 이 필드 자체를 생략.
+- 테스트: `tests/unit/test_horizon_scan_phase_b_joint_permutation.py`(신규, 9개), `test_horizon_scan_phase_b_run.py`(+2, permutation summary present/absent wiring), `test_horizon_scan_phase_b_smoke.py`(+1 신규 + `test_run_combined_ab_against_real_published_phase_a_run` 확장, permutation 파일 존재가 ready 상태와 일치하는지 + manifest 필드 유무).
+
+**핵심 결정**
+- **어디서 실행하는가가 핵심 설계 결정**이었다 — `run_combined_ab`는 B-PR10부터 디스크의 두 발행물만 읽는 순수 함수로 의도적으로 설계돼 있어 lake 재접속 없이 어떤 두 published run이든 결합 가능해야 한다. 하지만 null discovery count 자체는 진짜 발견 수 없이도 계산 가능(치환된 데이터를 재스캔·재BH해서 세기만 하면 됨)하므로, null 분포 계산은 이미 connection·panel을 쥐고 있는 `run_phase_b_core`에서 하고, 진짜 발견 수와의 비교(`empirical_discovery_count_p`)만 `run_combined_ab`가 그 parquet를 읽는 순수 계산으로 나중에 한다 — 기존 아키텍처 경계를 유지.
+- continuous 쪽 "frozen rank vector 치환"은 새 로직이 필요 없었다 — `permute_within_groups`로 원값을 date×market 그룹 안에서 섞은 뒤 다시 rank-IC를 계산하는 것은, 이미 계산된 rank를 그룹 안에서 직접 치환하는 것과 통계적으로 동일하다(rank 변환은 같은 치환을 feature·label 양쪽에 동일 적용하면 불변). Phase A의 기존 permutation 부품을 그대로 재사용하고 registry만 넓혔다.
+- SUE 쪽은 진짜 새로 만들었다 — 코호트 내부 순수 치환(bootstrap의 복원추출과 다름)이 이 리포에 없던 개념. 매 replicate SQL을 다시 안 날리고 `_pool_cohort_ranks`로 한 번만 얻은 `qualifying`을 재사용해 `sue_pctrank`만 섞는 방식으로 비용을 줄였다.
+- SUE 셀은 continuous와 달리 코호트 구조가 셀마다 독립이라 **셀마다 별도 seed**(`derive_replicate_seed(placebo_kind=f"combined_sue_rank_permutation:{hypothesis_id}", ...)`)를 쓴다 — continuous는 하나의 공유 panel이라 replicate당 seed 하나로 충분하지만, SUE는 issuer/filing-cycle bootstrap이 이미 세운 전례(`{cluster_kind}:{hypothesis_id}`)를 따랐다.
+- 오늘 실제 lake는 `M_B_ready=0`이라 이번 permutation도 실행되지 않는다(`continuous_scanned_rows or event_scanned_rows` 가드) — 실제 CLI `--phase B` 재실행으로 크래시 없음과 `permutation_summary.parquet` 부재(정상)를 확인했고, `--phase AB`는 유일한 발행 Phase A run이 config-stale이라 §2.3 rule 5가 정확히 거부하는 것(B-PR10부터 있던 기존 상태)까지 확인했다. 실제 로직 검증은 synthetic DuckDB 코호트 + mock 기반 unit test로 했다.
+
+### B-PR15 — B-10 Stage 1: readiness_matrix + robustness summary 아카이브
+
+B-10 전체("family별 결론 카드, `03b_horizon_scan_results.md` 보고서, `readiness_matrix.*`/
+`*_quality.parquet`/`*_coverage.parquet`/robustness `*_summary.parquet` 등 §7.1 나머지
+artifact")는 한 PR에 넣기엔 너무 크고 성격도 다양해(값 재사용 vs 신규 SQL 진단 vs family 카드
+서술 vs 아직 없는 §5.5 segment 진단) B-8/B-9처럼 여러 단계로 쪼갰다. 이번 Stage 1은 그중
+**새 통계 로직이 전혀 없는, 이미 계산된 값을 디스크에 남기는 배선**만 다룬다.
+
+**만든/고친 파일**
+- `research/analysis/horizon_scan_phase_b_run.py` — `compute_phase_b_gate_updates`의 반환
+  타입을 `dict[str, dict]` 단독에서 `tuple[dict[str, dict], dict[str, list[dict]]]`로 확장
+  (`{"nonoverlap_rows": [...], "temporal_placebo_rows": [...], "issuer_bootstrap_rows": [...],
+  "filing_cycle_bootstrap_rows": [...]}`) — `run_phase_b_continuous_nonoverlap`/
+  `run_phase_b_temporal_placebo`/`run_issuer_cluster_bootstrap`/
+  `run_filing_cycle_block_bootstrap`가 cell마다 이미 반환하던 전체 row를 버리지 않고 그대로
+  쌓기만 함(호출 순서·게이트 판정 로직 자체는 전혀 안 바뀜). 신규 `_render_readiness_matrix_md`
+  (readiness_rows를 family/feature/h_start/h_end 정렬로 렌더링하는 순수 함수). `run_phase_b_core`에
+  `readiness_matrix.parquet`/`.md`를 **항상**(ready 셀 유무와 무관) 쓰는 블록, `phase_b_diagnostics`의
+  4개 리스트를 각각 비어있지 않을 때만 `{name}_summary.parquet`로 쓰는 블록 추가.
+- 테스트: `tests/unit/test_horizon_scan_phase_b_run.py` — 기존 3개 `compute_phase_b_gate_updates`
+  테스트를 새 튜플 반환에 맞게 고치고 diagnostics 내용 검증 추가, `_render_readiness_matrix_md`
+  신규 테스트(+1, 정렬·전체 row 포함 확인). `tests/integration/test_horizon_scan_phase_b_smoke.py`(+2) —
+  `readiness_matrix.parquet`/`.md`가 항상(38 row) 존재하는지, 4개 summary parquet의 존재가
+  "continuous는 `select_phase_b_long_horizon_cells`가 뽑는 nw_lag>=59 셀 존재, SUE는 ready
+  SUE 셀 존재"와 정확히 일치하는지.
+
+**핵심 결정**
+- `nonoverlap_summary.parquet`/`temporal_placebo_summary.parquet`/`issuer_bootstrap_summary.parquet`/
+  `filing_cycle_bootstrap_summary.parquet`는 **신규 계산이 전혀 없다** — 이 4개 로버스트니스 함수는
+  이미 cell마다 전체 상세 row를 반환하는데, 지금까지 `compute_phase_b_gate_updates`가 그중
+  `nonoverlap_robustness_pass`/`offset_status`/`temporal_null_pass`/`p_temporal_nw`/
+  `issuer_bootstrap_p`/`filing_cycle_bootstrap_p` 몇 개 필드만 `gate_updates`에 뽑아 쓰고
+  나머지(예: `n_offsets_total`/`n_offsets_valid`/`offset_sign_agreement_ratio`,
+  `n_clusters`/`n_valid_replicates`/`bootstrap_mean`)는 버리고 있었다. 이번 PR은 그 버려지던
+  값을 그대로 살려 별도 parquet에 담기만 한다.
+- `issuer_bootstrap_rows`/`filing_cycle_bootstrap_rows`에서 `replicate_ic_means`(최대 999개
+  원소 리스트)는 의도적으로 제외 — "summary" 파일 취지에 안 맞고, 필요하면 나중 단계에서
+  별도 replicate-level artifact로 다룰 수 있다.
+- `readiness_matrix.parquet`/`.md`는 이 세션이 만든 나머지 모든 Phase B 진단 artifact와 달리
+  **항상** 써진다 — ready 셀 존재 여부에 대한 진단이 아니라 38개 candidate 전체(ready+blocked)의
+  readiness freeze 자체를 사람이 보기 편한 형태로 다시 쓴 것이기 때문. 다른 파일들의 "ready
+  상태에 따라 존재 여부가 갈리는" 패턴과 다르다는 점을 통합 테스트 docstring에 명시했다.
+- 오늘 실제 lake는 `M_B_ready=0`이라 4개 summary parquet는 여전히 전부 안 써진다(`long_cells`/
+  `ready_events`가 항상 비어 있음) — `readiness_matrix.parquet`/`.md`만 새로 발행되는 것을 실제
+  CLI `--phase B` 재실행으로 확인했다.
+
+## 3. 현재 실행 상태 — 발행된 run과 데이터 블로커
+
+(2026-08-11 확인. 이 절은 코드가 아니라 **디스크에 실제로 있는 것**을 적는다.)
+
+### 3.1 발행된 official run
+
+| phase | run_id | config_hash | 결과 |
+|---|---|---|---|
+| A (구) | `20260803T063659-93effdb0` | `1d208258…` | Phase B 섹션 추가 **이전** config. 05·06 문서가 인용하는 run |
+| A (신) | `20260810T141014-7212fe82` | `e55c3046…` | 현재 config로 재실행. **family 17개 등급이 구 run과 완전히 동일**(A 6, C 4, D 6, R 1, A 목록도 같음) |
+| B | `20260810T134333-66c929e0` | `e55c3046…` | B-PR15 이전 |
+| B | `20260810T135845-e04c00c7` | `e55c3046…` | 최신. `core/`에 `phase_b_primary_hypotheses.parquet` + `readiness_matrix.{parquet,md}` |
+| AB | `20260810T194651-e04c00c7` | `e55c3046…` | `m_ab=75`, `phase_b_screen_pass_count=0`, `phase_b_evidence_grade_counts={A:0,B:0,C:0,D:0}` |
+
+경로는 모두
+`research/output/horizon_scan/phase=<X>/snapshot_date=2026-08-09/source=sj2_remote/config_hash=<hash>/run_id=<id>/`.
+
+즉 B-PR10이 "범위 밖"으로 남겼던 **현재 config Phase A 재실행은 이미 끝났고**(§2 B-PR10의
+"또 다른 실제 상태" 항목은 이제 해소됨), `load_phase_a_primary_rows`의 config/content hash
+검증도 통과해 phase=AB run이 정상 발행됐다. 다만 `M_B_ready=0`이라 결합 결과에 Phase B 셀이
+하나도 안 들어갔고, AB run의 실질 내용은 Phase A 75개 + `phase_a_card_overlay.parquet`뿐이다.
+
+### 3.2 왜 아직 `M_B_ready=0`인가
+
+`run_id=20260810T135845-e04c00c7/core/readiness_matrix.md`(Phase B 기준 정본) 기준, 38개
+candidate 전부 `blocked_exploratory` / `blocked_missing_dependency`다. family별 실제 결손은
+이렇게 좁혀져 있다.
+
+| family | 셀 수 | missing_dependencies |
+|---|---:|---|
+| fin_log_mcap / fin_value_z / fin_gross_profitability / fin_asset_growth_yoy / fin_accruals_to_assets | 각 4 | `feat_fin_scan_daily` |
+| fin_sue | 6 | `dart_filing_receipt_raw`, `fin_sue_event` |
+| ev_net_share_issuance_yoy | 4 | `dart_capital_change_raw`, `feat_event_scan_daily` |
+| ev_payout_yield | 4 | `feat_event_scan_daily` |
+
+뿌리는 하나다 — 로컬 lake
+`data_lake/raw_postgres/snapshot_date=2026-08-09/source=sj2_remote/`에
+**`dart_filing_receipt_raw`와 `dart_capital_change_raw` 디렉터리가 아예 없다**. 이 둘이
+없으면 `stock_metric_vintage_fact`(→ `feat_fin_scan_daily`, `fin_sue_event`)와
+`feat_event_scan_daily`가 materialize되지 않아 나머지가 전부 연쇄로 막힌다.
+`dart_xbrl_fact_raw`는 2.5GB로 정상 존재한다(루트의
+`research/output/horizon_scan/readiness_matrix.md`는 Phase A run이 쓰는 **다른** 파일이고
+blocked family의 의존 목록 전체를 나열하는 형식이라 `dart_xbrl_fact_raw`도 같이 찍힌다 —
+Phase B 판정은 run 안의 `core/readiness_matrix.md`를 봐야 한다).
+
+parquet가 없는 이유는 코드가 아니라 배포 체인이다.
+
+```text
+Phase B 코드가 전부 uncommitted (56개 변경/신규 파일, 마지막 커밋은 a03872e)
+  → 릴리즈·이미지 빌드 없음 (prod는 여전히 ghcr.io/sjleekor/sdc:v0.8.16)
+  → prod에 dart sync-filings / capital-change 수집 자체가 존재하지 않음
+  → 두 raw 테이블이 prod DB에 없음
+  → raw-parquet-export-all.sh가 내보낼 것이 없음 (export 목록 등록은 B-PR2에서 이미 끝남)
+  → M_B_ready = 0
+```
+
+즉 **지금 막힌 것은 통계도 로직도 아니고 수집이다.**
+
+## 4. 남은 작업
+
+작업 패키지 관점 진척도: B-0 ~ B-9 완료(단 §5.5 segment 진단 제외), B-10은 Stage 1만 완료.
+
+### 4.1 선행 조건 — 데이터 수집 (코드 작업 아님, 이게 지금 크리티컬 패스)
+
+순서대로 해야 한다. 1~3은 아직 아무것도 안 됐다.
+
+1. **커밋 + 릴리즈** — Phase B 변경분을 커밋하고 `sdc-release` 스킬로 버전 범프·태그·prod
+   compose 갱신. 이걸 해야 prod가 `dart sync-filings`를 알게 된다.
+2. **prod 백필** — sj2-server에서 연도별로 수집. `bin/dart-backfill-all-years.sh`에는 아직
+   **안 엮여 있으니**(B-PR2 시점 그대로) 당분간 수동 실행이다.
+   ```bash
+   krx-collector dart sync-filings --years 2015,2016,...,2026   # dart_filing_receipt_raw
+   krx-collector dart sync-share-info --year <YYYY>             # dart_capital_change_raw 동반 수집
+   ```
+   OpenDART 일일 한도에 걸리면 exit 75로 끊기고 다음 실행에서 이어진다(기존 정책 그대로).
+3. **raw export 재실행** — `bin/raw-parquet-export-all.sh`(두 테이블은 이미 export 목록과
+   `research/etl/config.py`에 등록돼 있다) → 새 `snapshot_date` 발행.
+4. **Phase B 재실행** — `--phase B`. 이때 처음으로 `M_B_ready>0`이 되고, B-PR11~B-PR15가
+   만든 오케스트레이션(period segment, non-overlap, temporal placebo, issuer/filing-cycle
+   bootstrap, SUE ordinal, rank-correlation, 결합 permutation)이 **처음으로 실제 실행된다**.
+   지금까지 이 경로들은 mock/synthetic 테스트로만 검증됐다 — 실제 데이터로 처음 도는 순간
+   B-PR10 때처럼 통합 단계에서만 드러나는 버그가 나올 수 있다고 보는 게 맞다.
+5. **Phase A 재실행 여부 판단** — 새 snapshot으로 B를 돌리면 A도 같은 snapshot으로 다시
+   돌려야 결합 BH가 성립한다(§2.3 rule 5). `20260810T141014-7212fe82`는
+   `snapshot_date=2026-08-09` 기준이다.
+6. **Phase AB 재실행** — 그래야 `q_fdr_global_ab`·`screen_pass`·`evidence_grade`가 처음으로
+   진짜 값을 갖는다. 지금 발행된 AB run은 B가 0개인 상태의 껍데기다.
+
+### 4.2 B-9 나머지
+- evidence grade의 "source/segment 비치명 경고" — B-PR12 "정직하게 남긴 제약" 참고. mapping_fallback_ratio/revision_ratio/segment 진단이 생기면 `compute_phase_b_evidence_grade`의 "B" 조건에 추가해야 함.
+
+### 4.3 B-10 나머지 (Stage 2~5)
+- **Stage 2** — `filing_receipt_quality.parquet`/`receipt_value_pairing_quality.parquet`/
+  `capital_change_quality.parquet`/`stock_metric_vintage_quality.parquet`/
+  `quarterly_metric_quality.parquet`/`feature_coverage.parquet`/`event_coverage.parquet`:
+  raw/mart 위에 새 SQL 진단(row 수, null 비율, pairing 상태 등)이 필요 — 신규 로직.
+- **Stage 3** — `daily_ic.parquet`/`cohort_ic.parquet`: `scan_cell`/`scan_event_cohort_cell`이
+  지금 요약 통계만 반환하고 날짜별/코호트별 원시 IC 시퀀스는 버리므로, Phase A와 공유하는
+  코드(`per_date_market_rank_ic` 등)의 내부를 건드려야 함 — 더 침습적, 별도 계획 필요.
+- **Stage 4** — `family_summary.parquet`/`family_cards.md`: 위 모든 진단을 합쳐 family별
+  결론을 서술하는 진짜 "카드" — 카드 포맷/문구 결정이 필요.
+- **Stage 5** — `03b_horizon_scan_results.md`(phase=B), phase=AB 쪽 리포트, atomic publish
+  범위 확장.
+- §5.5 segment/freshness 진단(8개 축) — B-PR12가 이미 명시적으로 미룬 부분, 아직 스코프 밖.
+
+### 4.4 이 문서 밖 — Phase A 트랙에 남은 것
+
+[07_phase1_acceptance_gate.md](07_phase1_acceptance_gate.md) §6이 조건부 채택으로 판정하며
+남긴 두 가지. Phase B와 독립이라 순서에 상관없이 할 수 있다.
+
+- **k=100 top-k 비용 확인** — 이번 게이트는 decile 단위 economic_report만 봤다.
+  `predict.py`의 실제 매수 리스트(k=100) 기준 turnover·거래비용 차감 후에도 개선이
+  남는지 확인해야 조건이 풀린다. 아직 안 함.
+- **h=60 holdout 재평가** — 지금 holdout(2026-06-11~07-31)은 데이터 끝이라 60일 라벨이
+  아예 없다. 2026년 10~11월쯤 데이터가 쌓인 뒤 **새 구간으로 한 번만** 연다(이번 구간
+  재사용 금지).
+
+### 4.5 완료된 후속 조치 (기록용)
+
+- ~~현재 config로 Phase A 공식 재실행~~ → 2026-08-10 완료(`20260810T141014-7212fe82`),
+  등급 결과는 구 run과 동일. §3.1 참고.
+- ~~`run_combined_ab`를 실제 두 발행물로 실행~~ → 2026-08-10 완료
+  (`20260810T194651-e04c00c7`). 단 B가 0개라 내용은 비어 있다.
+
+## 5. 재현
+
+```bash
+uv run pytest tests/unit -q                                    # 전체 유닛 테스트 (2026-08-10 기준, B-PR15 포함 819개)
+uv run pytest tests/unit/test_horizon_scan_phase_b*.py -v       # Phase B 전용 테스트만
+uv run pytest tests/integration/test_horizon_scan_phase_b_smoke.py -v  # 실제 로컬 lake 대상(no-DB 환경은 self-skip)
+uv run python -m research.analysis.horizon_scan --phase B       # 실제 Phase B run 발행
+uv run python -m research.analysis.horizon_scan --phase AB \
+  --phase-a-run-dir <phase=A run 경로> --phase-b-run-dir <phase=B run 경로>
+```
+
+마지막으로 실제 실행한 `--phase AB` 인자(§3.1의 두 run):
+
+```bash
+BASE=research/output/horizon_scan
+HASH=e55c3046c113a9168d2b64fcbc87124c2fa1783b7682acc0852a718cd800dd3b
+uv run python -m research.analysis.horizon_scan --phase AB \
+  --phase-a-run-dir "$BASE/phase=A/snapshot_date=2026-08-09/source=sj2_remote/config_hash=$HASH/run_id=20260810T141014-7212fe82" \
+  --phase-b-run-dir "$BASE/phase=B/snapshot_date=2026-08-09/source=sj2_remote/config_hash=$HASH/run_id=20260810T135845-e04c00c7"
+```
+
+이어서 작업할 때 **가장 먼저 볼 것**: §3.2(왜 막혔나) → §4.1(순서대로 무엇을 해야 하나).
+코드부터 이어서 쓰고 싶다면 데이터 없이도 가능한 것은 §4.3 Stage 2·Stage 4 정도다
+(Stage 3은 Phase A 공유 코드 내부를 건드려야 해서 별도 계획이 필요하고, 나머지는 전부
+실제 ready 셀이 생겨야 검증이 가능하다).

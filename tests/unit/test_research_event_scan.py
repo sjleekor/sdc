@@ -1,0 +1,487 @@
+from __future__ import annotations
+
+from datetime import date
+
+import duckdb
+from research.etl.features.event_scan import EVENT_SCAN_TABLE, register_event_scan_daily_view
+from research.etl.marts.financial_quarters import register_fin_quarterly_metric_vintage_view
+from research.etl.marts.metric_vintages import register_stock_metric_vintage_fact_view
+
+
+def _weekdays_in(year: int, month: int) -> list[date]:
+    days = []
+    day = 1
+    while True:
+        try:
+            d = date(year, month, day)
+        except ValueError:
+            break
+        if d.weekday() < 5:
+            days.append(d)
+        day += 1
+    return days
+
+
+_TRADING_DAYS = [d for month in range(1, 13) for d in _weekdays_in(2023, month)] + [
+    d for month in range(1, 13) for d in _weekdays_in(2024, month)
+]
+
+
+def _base_con() -> duckdb.DuckDBPyConnection:
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE TABLE dart_corp_master (ticker VARCHAR, market VARCHAR, corp_code VARCHAR)")
+    con.execute(
+        "CREATE TABLE dart_financial_statement_raw ("
+        "corp_code VARCHAR, ticker VARCHAR, bsns_year INTEGER, reprt_code VARCHAR, "
+        "fs_div VARCHAR, sj_div VARCHAR, account_id VARCHAR, account_nm VARCHAR, "
+        "ord INTEGER, thstrm_amount DECIMAL(30,4), currency VARCHAR, rcept_no VARCHAR, "
+        "thstrm_add_amount DECIMAL(30,4), frmtrm_q_amount DECIMAL(30,4))"
+    )
+    con.execute(
+        "CREATE TABLE dart_share_count_raw ("
+        "corp_code VARCHAR, ticker VARCHAR, bsns_year INTEGER, reprt_code VARCHAR, "
+        "rcept_no VARCHAR, se VARCHAR, istc_totqy BIGINT, tesstk_co BIGINT, "
+        "now_to_isu_stock_totqy BIGINT, now_to_dcrs_stock_totqy BIGINT, stlm_dt DATE)"
+    )
+    con.execute(
+        "CREATE TABLE dart_capital_change_raw ("
+        "corp_code VARCHAR, ticker VARCHAR, bsns_year INTEGER, reprt_code VARCHAR, "
+        "rcept_no VARCHAR, isu_dcrs_de DATE, isu_dcrs_stle VARCHAR, "
+        "isu_dcrs_stock_knd VARCHAR, isu_dcrs_qy BIGINT)"
+    )
+    con.execute(
+        "CREATE TABLE dart_shareholder_return_raw ("
+        "corp_code VARCHAR, ticker VARCHAR, bsns_year INTEGER, reprt_code VARCHAR, "
+        "rcept_no VARCHAR, statement_type VARCHAR, row_name VARCHAR, stock_knd VARCHAR, "
+        "dim1 VARCHAR, dim2 VARCHAR, dim3 VARCHAR, metric_code VARCHAR, "
+        "value_numeric DECIMAL(30,4), value_text VARCHAR, stlm_dt DATE)"
+    )
+    con.execute(
+        "CREATE TABLE dart_xbrl_fact_raw ("
+        "corp_code VARCHAR, ticker VARCHAR, bsns_year INTEGER, reprt_code VARCHAR, "
+        "rcept_no VARCHAR, concept_id VARCHAR, concept_name VARCHAR, context_id VARCHAR, "
+        "context_type VARCHAR, period_start DATE, period_end DATE, instant_date DATE, "
+        "dimensions VARCHAR, value_numeric DECIMAL(30,4), label_ko VARCHAR)"
+    )
+    con.execute(
+        "CREATE TABLE dart_filing_receipt_raw "
+        "(corp_code VARCHAR, rcept_no VARCHAR, report_nm VARCHAR)"
+    )
+    con.execute(
+        "CREATE TABLE dim_stock_pit_daily ("
+        "trade_date DATE, ticker VARCHAR, market VARCHAR, market_cap_pit DOUBLE, "
+        "shares_is_available BOOLEAN, shares_invalid_flag BOOLEAN)"
+    )
+    con.execute(
+        "CREATE TABLE dim_price_quality_daily ("
+        "trade_date DATE, ticker VARCHAR, market VARCHAR, is_halted BOOLEAN, "
+        "valid_session_idx BIGINT)"
+    )
+    con.execute("INSERT INTO dart_corp_master VALUES ('005930', 'KOSPI', '00126380')")
+    return con
+
+
+def _insert_share_count(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    bsns_year: int,
+    reprt_code: str,
+    rcept_no: str,
+    istc_totqy: int,
+    now_to_isu: int,
+    now_to_dcrs: int,
+    stlm_dt: date,
+) -> None:
+    con.execute(
+        "INSERT INTO dart_share_count_raw VALUES " "('00126380','005930',?,?,?,'합계',?,0,?,?,?)",
+        [bsns_year, reprt_code, rcept_no, istc_totqy, now_to_isu, now_to_dcrs, stlm_dt],
+    )
+
+
+def _insert_capital_change(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    bsns_year: int,
+    reprt_code: str,
+    rcept_no: str,
+    isu_dcrs_de: date,
+    isu_dcrs_stle: str,
+    isu_dcrs_qy: int,
+) -> None:
+    con.execute(
+        "INSERT INTO dart_capital_change_raw VALUES " "('00126380','005930',?,?,?,?,?,'보통주',?)",
+        [bsns_year, reprt_code, rcept_no, isu_dcrs_de, isu_dcrs_stle, isu_dcrs_qy],
+    )
+
+
+def _insert_dividend_row(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    bsns_year: int,
+    rcept_no: str,
+    row_name: str,
+    value_numeric: float | None,
+    value_text: str = "",
+) -> None:
+    con.execute(
+        "INSERT INTO dart_shareholder_return_raw VALUES "
+        "('00126380','005930',?,'11011',?,'dividend',?,'보통주','','','','thstrm',?,?,NULL)",
+        [bsns_year, rcept_no, row_name, value_numeric, value_text],
+    )
+
+
+def _insert_shares_instant(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    bsns_year: int,
+    rcept_no: str,
+    issued: int,
+    treasury: int,
+) -> None:
+    con.execute(
+        "INSERT INTO dart_share_count_raw VALUES "
+        "('00126380','005930',?,'11011',?,'합계',?,?,NULL,NULL,NULL)",
+        [bsns_year, rcept_no, issued, treasury],
+    )
+
+
+def _insert_pit(con: duckdb.DuckDBPyConnection, *, trade_date: date, market_cap: float) -> None:
+    con.execute(
+        "INSERT INTO dim_stock_pit_daily VALUES (?, '005930', 'KOSPI', ?, TRUE, FALSE)",
+        [trade_date, market_cap],
+    )
+    con.execute(
+        "INSERT INTO dim_price_quality_daily VALUES (?, '005930', 'KOSPI', FALSE, 1)",
+        [trade_date],
+    )
+
+
+def _register(con: duckdb.DuckDBPyConnection) -> None:
+    register_stock_metric_vintage_fact_view(con, trading_days=_TRADING_DAYS)
+    register_fin_quarterly_metric_vintage_view(con)
+    register_event_scan_daily_view(con, trading_days=_TRADING_DAYS)
+
+
+def _row(con: duckdb.DuckDBPyConnection, trade_date: date) -> tuple | None:
+    return con.execute(
+        f"SELECT * FROM {EVENT_SCAN_TABLE} WHERE ticker='005930' AND trade_date=?",
+        [trade_date],
+    ).fetchone()
+
+
+def _columns(con: duckdb.DuckDBPyConnection) -> list[str]:
+    return [row[0] for row in con.execute(f"DESCRIBE {EVENT_SCAN_TABLE}").fetchall()]
+
+
+def test_economic_issuance_is_identified_and_counted() -> None:
+    con = _base_con()
+    _insert_share_count(
+        con,
+        bsns_year=2022,
+        reprt_code="11011",
+        rcept_no="20230310000001",
+        istc_totqy=1000,
+        now_to_isu=500,
+        now_to_dcrs=0,
+        stlm_dt=date(2022, 12, 31),
+    )
+    _insert_share_count(
+        con,
+        bsns_year=2023,
+        reprt_code="11011",
+        rcept_no="20240310000002",
+        istc_totqy=1100,
+        now_to_isu=600,
+        now_to_dcrs=0,
+        stlm_dt=date(2023, 12, 31),
+    )
+    _insert_capital_change(
+        con,
+        bsns_year=2023,
+        reprt_code="11011",
+        rcept_no="20240310000002",
+        isu_dcrs_de=date(2023, 6, 15),
+        isu_dcrs_stle="유상증자(일반공모)",
+        isu_dcrs_qy=100,
+    )
+    _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+    _register(con)
+
+    cols = _columns(con)
+    idx = {c: i for i, c in enumerate(cols)}
+    row = _row(con, date(2024, 3, 15))
+    assert row[idx["issuance_identity_ok"]] is True
+    assert row[idx["issuance_classification_complete"]] is True
+    assert row[idx["ev_net_share_issuance_yoy"]] == 100 / 1000
+
+
+def test_mechanical_action_is_excluded_from_economic_issuance() -> None:
+    con = _base_con()
+    _insert_share_count(
+        con,
+        bsns_year=2022,
+        reprt_code="11011",
+        rcept_no="20230310000001",
+        istc_totqy=1000,
+        now_to_isu=500,
+        now_to_dcrs=0,
+        stlm_dt=date(2022, 12, 31),
+    )
+    # A 2:1 stock split doubles shares mechanically -- not economic issuance.
+    _insert_share_count(
+        con,
+        bsns_year=2023,
+        reprt_code="11011",
+        rcept_no="20240310000002",
+        istc_totqy=2000,
+        now_to_isu=1500,
+        now_to_dcrs=0,
+        stlm_dt=date(2023, 12, 31),
+    )
+    _insert_capital_change(
+        con,
+        bsns_year=2023,
+        reprt_code="11011",
+        rcept_no="20240310000002",
+        isu_dcrs_de=date(2023, 6, 15),
+        isu_dcrs_stle="주식분할",
+        isu_dcrs_qy=1000,
+    )
+    _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+    _register(con)
+
+    cols = _columns(con)
+    idx = {c: i for i, c in enumerate(cols)}
+    row = _row(con, date(2024, 3, 15))
+    assert row[idx["issuance_identity_ok"]] is True
+    assert row[idx["ev_net_share_issuance_yoy"]] == 0.0
+
+
+def test_unclassified_reason_blocks_issuance_feature() -> None:
+    con = _base_con()
+    _insert_share_count(
+        con,
+        bsns_year=2022,
+        reprt_code="11011",
+        rcept_no="20230310000001",
+        istc_totqy=1000,
+        now_to_isu=500,
+        now_to_dcrs=0,
+        stlm_dt=date(2022, 12, 31),
+    )
+    _insert_share_count(
+        con,
+        bsns_year=2023,
+        reprt_code="11011",
+        rcept_no="20240310000002",
+        istc_totqy=1100,
+        now_to_isu=600,
+        now_to_dcrs=0,
+        stlm_dt=date(2023, 12, 31),
+    )
+    _insert_capital_change(
+        con,
+        bsns_year=2023,
+        reprt_code="11011",
+        rcept_no="20240310000002",
+        isu_dcrs_de=date(2023, 6, 15),
+        isu_dcrs_stle="기타",
+        isu_dcrs_qy=100,
+    )
+    _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+    _register(con)
+
+    cols = _columns(con)
+    idx = {c: i for i, c in enumerate(cols)}
+    row = _row(con, date(2024, 3, 15))
+    assert row[idx["issuance_classification_complete"]] is False
+    assert row[idx["ev_net_share_issuance_yoy"]] is None
+
+
+def test_identity_mismatch_blocks_issuance_feature() -> None:
+    con = _base_con()
+    _insert_share_count(
+        con,
+        bsns_year=2022,
+        reprt_code="11011",
+        rcept_no="20230310000001",
+        istc_totqy=1000,
+        now_to_isu=500,
+        now_to_dcrs=0,
+        stlm_dt=date(2022, 12, 31),
+    )
+    _insert_share_count(
+        con,
+        bsns_year=2023,
+        reprt_code="11011",
+        rcept_no="20240310000002",
+        istc_totqy=1100,
+        now_to_isu=600,
+        now_to_dcrs=0,
+        stlm_dt=date(2023, 12, 31),
+    )
+    # Capital-change rows under-report the actual increase -> identity fails.
+    _insert_capital_change(
+        con,
+        bsns_year=2023,
+        reprt_code="11011",
+        rcept_no="20240310000002",
+        isu_dcrs_de=date(2023, 6, 15),
+        isu_dcrs_stle="유상증자(일반공모)",
+        isu_dcrs_qy=50,
+    )
+    _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+    _register(con)
+
+    cols = _columns(con)
+    idx = {c: i for i, c in enumerate(cols)}
+    row = _row(con, date(2024, 3, 15))
+    assert row[idx["issuance_identity_ok"]] is False
+    assert row[idx["ev_net_share_issuance_yoy"]] is None
+
+
+def test_dividend_direct_total_row_is_preferred_when_present() -> None:
+    con = _base_con()
+    _insert_dividend_row(
+        con,
+        bsns_year=2023,
+        rcept_no="20240310000001",
+        row_name="현금배당금총액(백만원)",
+        value_numeric=10,
+    )
+    _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+    _register(con)
+
+    cols = _columns(con)
+    idx = {c: i for i, c in enumerate(cols)}
+    row = _row(con, date(2024, 3, 15))
+    assert row[idx["dividend_source"]] == "direct_total"
+    assert row[idx["cash_dividends_total"]] == 10 * 1_000_000
+
+
+def test_dividend_falls_back_to_dps_proxy_when_total_row_missing() -> None:
+    con = _base_con()
+    _insert_dividend_row(
+        con,
+        bsns_year=2023,
+        rcept_no="20240310000001",
+        row_name="주당 현금배당금(원)",
+        value_numeric=500,
+    )
+    _insert_shares_instant(
+        con, bsns_year=2023, rcept_no="20240310000002", issued=1000, treasury=100
+    )
+    _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+    _register(con)
+
+    cols = _columns(con)
+    idx = {c: i for i, c in enumerate(cols)}
+    row = _row(con, date(2024, 3, 15))
+    assert row[idx["dividend_source"]] == "dps_proxy"
+    assert row[idx["cash_dividends_total"]] == 500 * (1000 - 100)
+
+
+def test_explicit_dash_normalizes_to_zero_not_null() -> None:
+    con = _base_con()
+    _insert_dividend_row(
+        con,
+        bsns_year=2023,
+        rcept_no="20240310000001",
+        row_name="주당 현금배당금(원)",
+        value_numeric=None,
+        value_text="-",
+    )
+    _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+    _register(con)
+
+    cols = _columns(con)
+    idx = {c: i for i, c in enumerate(cols)}
+    row = _row(con, date(2024, 3, 15))
+    assert row[idx["cash_dividends_total"]] == 0
+
+
+def test_payout_yield_combines_dividends_and_buyback() -> None:
+    con = _base_con()
+    _insert_dividend_row(
+        con,
+        bsns_year=2023,
+        rcept_no="20240310000001",
+        row_name="현금배당금총액(백만원)",
+        value_numeric=1,
+    )
+    # treasury_share_acquisition_amount is cumulative_reported (CF-sourced):
+    # each filing's thstrm_amount is cumulative-through-that-quarter, so 4
+    # equal 5-unit standalone quarters means Q1=5, Q2=10, Q3=15, Q4(annual)=20.
+    for reprt_code, amount, rcept_no in [
+        ("11013", 5, "20230410000001"),
+        ("11012", 10, "20230810000001"),
+        ("11014", 15, "20231110000001"),
+        ("11011", 20, "20240310000002"),
+    ]:
+        con.execute(
+            "INSERT INTO dart_financial_statement_raw "
+            "(corp_code, ticker, bsns_year, reprt_code, fs_div, sj_div, account_id, "
+            "account_nm, ord, thstrm_amount, currency, rcept_no) VALUES "
+            "('00126380','005930',2023,?,'CFS','CF','dart_AcquisitionOfTreasuryShares','',1,?,'KRW',?)",
+            [reprt_code, amount, rcept_no],
+        )
+    _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+    _register(con)
+
+    cols = _columns(con)
+    idx = {c: i for i, c in enumerate(cols)}
+    row = _row(con, date(2024, 3, 15))
+    assert row[idx["buyback_cash_ttm"]] == 20
+    dividends = 1 * 1_000_000
+    assert row[idx["ev_payout_yield"]] == (dividends + 20) / 1_000_000_000
+
+
+def test_lag1_variant_and_grain_uniqueness() -> None:
+    con = _base_con()
+    _insert_share_count(
+        con,
+        bsns_year=2022,
+        reprt_code="11011",
+        rcept_no="20230310000001",
+        istc_totqy=1000,
+        now_to_isu=500,
+        now_to_dcrs=0,
+        stlm_dt=date(2022, 12, 31),
+    )
+    _insert_share_count(
+        con,
+        bsns_year=2023,
+        reprt_code="11011",
+        rcept_no="20240310000002",
+        istc_totqy=1100,
+        now_to_isu=600,
+        now_to_dcrs=0,
+        stlm_dt=date(2023, 12, 31),
+    )
+    _insert_capital_change(
+        con,
+        bsns_year=2023,
+        reprt_code="11011",
+        rcept_no="20240310000002",
+        isu_dcrs_de=date(2023, 6, 15),
+        isu_dcrs_stle="유상증자(일반공모)",
+        isu_dcrs_qy=100,
+    )
+    _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+    _insert_pit(con, trade_date=date(2024, 3, 18), market_cap=1_000_000_000)
+    _register(con)
+
+    dupes = con.execute(
+        f"SELECT trade_date, ticker, market, COUNT(*) "
+        f"FROM {EVENT_SCAN_TABLE} GROUP BY 1, 2, 3 HAVING COUNT(*) > 1"
+    ).fetchall()
+    assert dupes == []
+
+    cols = _columns(con)
+    idx = {c: i for i, c in enumerate(cols)}
+    row_prior = _row(con, date(2024, 3, 15))
+    row_next = _row(con, date(2024, 3, 18))
+    assert (
+        row_next[idx["ev_net_share_issuance_yoy_lag1"]]
+        == row_prior[idx["ev_net_share_issuance_yoy"]]
+    )

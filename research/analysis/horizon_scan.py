@@ -32,6 +32,7 @@ from research.analysis.horizon_scan_permutation import (
     run_temporal_placebo,
     select_long_horizon_hypotheses,
 )
+from research.analysis.horizon_scan_phase_b_run import run_combined_ab, run_phase_b_core
 from research.analysis.horizon_scan_readiness import (
     build_primary_hypothesis_registry,
     build_short_exploratory_registry,
@@ -210,8 +211,11 @@ def compute_family_delay_gate(
     ic_lag1 = lag1_cell["ic_mean"] if lag1_cell["status"] == "valid" else None
     p_nw_lag1 = lag1_cell["p_nw"] if lag1_cell["status"] == "valid" else None
     return compute_delay_pass(
-        ic_native=native_ic, ic_lag1=ic_lag1, p_nw_lag1=p_nw_lag1,
-        min_retention=min_retention, p_max=p_max,
+        ic_native=native_ic,
+        ic_lag1=ic_lag1,
+        p_nw_lag1=p_nw_lag1,
+        min_retention=min_retention,
+        p_max=p_max,
     )
 
 
@@ -243,13 +247,16 @@ def build_family_result(
     cum_rows = [r for r in family_bh_rows if r["scan_type"] == "cum"]
     bucket_rows = [r for r in family_bh_rows if r["scan_type"] == "bucket"]
     decay = compute_decay_summary(
-        cum_rows, bucket_rows, expected_sign=expected_sign,
+        cum_rows,
+        bucket_rows,
+        expected_sign=expected_sign,
         half_life_fraction=float(config.raw["decision"]["half_life_fraction"]),
     )
 
     by_key = {
         (r["hypothesis_id"], r["universe"], r["sample_kind"]): r
-        for r in all_rows if r["family"] == fam_name
+        for r in all_rows
+        if r["family"] == fam_name
     }
 
     cell_gates: dict[str, dict[str, Any]] = {}
@@ -300,7 +307,9 @@ def build_family_result(
         representative = (cum_rows or bucket_rows or [None])[0]
 
     period_gate = {
-        "valid_subperiods": 0, "sign_consistent_subperiods": 0, "period_sign_pass": False,
+        "valid_subperiods": 0,
+        "sign_consistent_subperiods": 0,
+        "period_sign_pass": False,
     }
     offset_summary: dict[str, Any] | None = None
     if representative is not None:
@@ -347,9 +356,7 @@ def build_family_result(
     all_offsets_evaluable = bool(offset_summary and offset_summary["offset_status"] == "complete")
     has_nonfatal_warning = (period_gate["valid_subperiods"] < 3) or not all_offsets_evaluable
     grade = assign_evidence_grade(
-        role="reference" if role == "reference_only" else (
-            "ready" if role == "ready" else role
-        ),
+        role="reference" if role == "reference_only" else ("ready" if role == "ready" else role),
         screen_pass=family_screen_pass,
         has_nonfatal_warning=has_nonfatal_warning,
         all_offsets_evaluable=all_offsets_evaluable,
@@ -390,10 +397,17 @@ def build_family_result(
     lag1_ic = None
     if representative is not None:
         lag1_cell = scan_cell(
-            con, panel_view="analysis_panel", feature_col=family["variant_columns"]["lag1"],
-            scan_type=representative["scan_type"], h_start=representative["h_start"],
-            h_end=representative["h_end"], universe="broad", sample_kind="common_survivor",
-            expected_sign=expected_sign, compute_spread=False, **scan_kwargs,
+            con,
+            panel_view="analysis_panel",
+            feature_col=family["variant_columns"]["lag1"],
+            scan_type=representative["scan_type"],
+            h_start=representative["h_start"],
+            h_end=representative["h_end"],
+            universe="broad",
+            sample_kind="common_survivor",
+            expected_sign=expected_sign,
+            compute_spread=False,
+            **scan_kwargs,
         )
         lag1_ic = lag1_cell["ic_mean"] if lag1_cell["status"] == "valid" else None
 
@@ -415,8 +429,10 @@ def build_family_result(
         secondary_features=secondary_features,
         expected_sign=expected_sign,
         observed_sign=(
-            "+" if (representative and (representative.get("ic_mean") or 0) >= 0) else "-"
-        ) if representative else None,
+            ("+" if (representative and (representative.get("ic_mean") or 0) >= 0) else "-")
+            if representative
+            else None
+        ),
         decay_summary=decay,
         pattern_auto=pattern,
         primary_discoveries=discoveries,
@@ -446,9 +462,7 @@ def build_family_result(
         exploratory_short_regime=role == "exploratory_short_regime",
         warnings=(["insufficient_offset_coverage"] if not all_offsets_evaluable else []),
         limitations=(
-            ["survival_bias_unresolved"]
-            if any(r["h_end"] >= 60 for r in family_bh_rows)
-            else []
+            ["survival_bias_unresolved"] if any(r["h_end"] >= 60 for r in family_bh_rows) else []
         ),
     )
     return {
@@ -475,9 +489,7 @@ def run_phase_a(
     command_line: list[str],
 ) -> Path:
     config = load_config(CONFIG_PATH)
-    base = LakeConfig(
-        source=source, data_lake_root=data_lake_root or LakeConfig().data_lake_root
-    )
+    base = LakeConfig(source=source, data_lake_root=data_lake_root or LakeConfig().data_lake_root)
     lake, resolution = resolve_config(
         base, required_inputs=REQUIRED_RAW_INPUTS, snapshot_date=snapshot_date
     )
@@ -494,13 +506,19 @@ def run_phase_a(
 
     started_at = kst_now_iso()
     run_spec = build_run_spec(
-        config, manifest,
-        snapshot_date=resolution.snapshot_date, source=resolution.source,
-        resolution_auto_selected=resolution.auto_selected, smoke_family=smoke_family,
-        permutation_repeats_override=permutations, include_holdout=include_holdout,
-        holdout_start_override=holdout_start, repo_root=REPO_ROOT,
+        config,
+        manifest,
+        snapshot_date=resolution.snapshot_date,
+        source=resolution.source,
+        resolution_auto_selected=resolution.auto_selected,
+        smoke_family=smoke_family,
+        permutation_repeats_override=permutations,
+        include_holdout=include_holdout,
+        holdout_start_override=holdout_start,
+        repo_root=REPO_ROOT,
         code_paths=sorted(Path(__file__).parent.glob("horizon_scan*.py")),
-        command_line=command_line, started_at=started_at,
+        command_line=command_line,
+        started_at=started_at,
     )
 
     con = connect(lake)
@@ -526,7 +544,8 @@ def run_phase_a(
     ]
     bh_rows = (
         apply_global_bh(broad_common_survivor, q_threshold=q_threshold)
-        if broad_common_survivor else []
+        if broad_common_survivor
+        else []
     )
     real_discovery_count = sum(1 for r in bh_rows if r["primary_discovery"])
 
@@ -539,14 +558,21 @@ def run_phase_a(
     )
 
     permutation_result: dict[str, Any] = {
-        "replicate_summaries": [], "real_discovery_count": real_discovery_count,
-        "p_empirical_count": None, "n_replicates": 0,
+        "replicate_summaries": [],
+        "real_discovery_count": real_discovery_count,
+        "p_empirical_count": None,
+        "n_replicates": 0,
     }
     if primary_registry and permutation_repeats > 0:
         permutation_result = run_cross_sectional_permutation(
-            con, panel_view="analysis_panel", primary_registry=primary_registry,
-            real_discovery_count=real_discovery_count, config_hash=config.config_hash,
-            n_replicates=permutation_repeats, q_threshold=q_threshold, **scan_kwargs,
+            con,
+            panel_view="analysis_panel",
+            primary_registry=primary_registry,
+            real_discovery_count=real_discovery_count,
+            config_hash=config.config_hash,
+            n_replicates=permutation_repeats,
+            q_threshold=q_threshold,
+            **scan_kwargs,
         )
 
     temporal_result: dict[str, Any] = {"replicate_meta": [], "per_cell": {}, "n_replicates": 0}
@@ -554,15 +580,21 @@ def run_phase_a(
     if long_registry and temporal_repeats > 0:
         real_t_nw_by_id = {r["hypothesis_id"]: r["t_nw"] for r in broad_common_survivor}
         temporal_result = run_temporal_placebo(
-            con, panel_view="analysis_panel", long_horizon_registry=long_registry,
-            real_t_nw_by_id=real_t_nw_by_id, config_hash=config.config_hash,
+            con,
+            panel_view="analysis_panel",
+            long_horizon_registry=long_registry,
+            real_t_nw_by_id=real_t_nw_by_id,
+            config_hash=config.config_hash,
             n_replicates=temporal_repeats,
             min_shift_sessions=int(config.raw["placebo"]["temporal_min_shift_sessions"]),
-            p_max=float(config.raw["placebo"]["temporal_p_max"]), **scan_kwargs,
+            p_max=float(config.raw["placebo"]["temporal_p_max"]),
+            **scan_kwargs,
         )
 
     canary = run_lookahead_canary(
-        con, sample_start=scan_kwargs["sample_start"], min_names=scan_kwargs["min_names"],
+        con,
+        sample_start=scan_kwargs["sample_start"],
+        min_names=scan_kwargs["min_names"],
         min_dates_per_cell=scan_kwargs["min_dates_per_cell"],
     )
 
@@ -579,9 +611,15 @@ def run_phase_a(
 
     family_results = {
         f["family"]: build_family_result(
-            con, config, f, all_rows=all_rows + short_rows, bh_rows_by_family=bh_rows_by_family,
-            period_view=period_view, period_ids=period_ids,
-            temporal_per_cell=temporal_result["per_cell"], scan_kwargs=scan_kwargs,
+            con,
+            config,
+            f,
+            all_rows=all_rows + short_rows,
+            bh_rows_by_family=bh_rows_by_family,
+            period_view=period_view,
+            period_ids=period_ids,
+            temporal_per_cell=temporal_result["per_cell"],
+            scan_kwargs=scan_kwargs,
         )
         for f in phase_a_families
     }
@@ -607,14 +645,22 @@ def run_phase_a(
             cumulative_curves[combo_label] = [
                 {"h_end": r["h_end"], "ic_mean": r["ic_mean"]}
                 for r in (all_rows + short_rows)
-                if r["family"] == fam_name and r["scan_type"] == "cum"
-                and r["universe"] == universe and r["sample_kind"] == sample_kind
+                if r["family"] == fam_name
+                and r["scan_type"] == "cum"
+                and r["universe"] == universe
+                and r["sample_kind"] == sample_kind
             ]
         render_family_plots(
-            family=fam_name, output_dir=plots_dir, cumulative_curves=cumulative_curves,
-            bucket_rows=result["bucket_rows"], expected_sign=card["expected_sign"],
-            native_rows=cumulative_curves["broad_common_survivor"], lag1_rows=[],
-            period_rows=[], segment_rows=[], coverage_rows=[],
+            family=fam_name,
+            output_dir=plots_dir,
+            cumulative_curves=cumulative_curves,
+            bucket_rows=result["bucket_rows"],
+            expected_sign=card["expected_sign"],
+            native_rows=cumulative_curves["broad_common_survivor"],
+            lag1_rows=[],
+            period_rows=[],
+            segment_rows=[],
+            coverage_rows=[],
             offset_summary=result["offset_summary"] or {"offsets": []},
         )
 
@@ -631,9 +677,11 @@ def run_phase_a(
     # written as-is, with those BH-only fields absent (never a NULL 0 stand-in).
     bh_by_id = {r["hypothesis_id"]: r for r in bh_rows}
     output_rows = [
-        bh_by_id.get(r["hypothesis_id"], r)
-        if r["universe"] == "broad" and r["sample_kind"] == "common_survivor"
-        else r
+        (
+            bh_by_id.get(r["hypothesis_id"], r)
+            if r["universe"] == "broad" and r["sample_kind"] == "common_survivor"
+            else r
+        )
         for r in all_rows
     ] + short_rows
     if output_rows:
@@ -651,9 +699,12 @@ def run_phase_a(
     flow_cards = [c for c in cards if c["domain"] == "flow"]
     report_context = {
         "run_identity": {
-            "run_id": run_spec["run_id"], "snapshot_date": run_spec["snapshot_date"],
-            "source": run_spec["source"], "config_hash": run_spec["config_hash"],
-            "official": run_spec["official"], "started_at": run_spec["started_at"],
+            "run_id": run_spec["run_id"],
+            "snapshot_date": run_spec["snapshot_date"],
+            "source": run_spec["source"],
+            "config_hash": run_spec["config_hash"],
+            "official": run_spec["official"],
+            "started_at": run_spec["started_at"],
             "finished_at": kst_now_iso(),
         },
         "preflight": {"status": "ok"},
@@ -670,9 +721,11 @@ def run_phase_a(
             "common_formation_end": str(common_formation_end),
         },
         "bh_summary": {
-            "n_hypotheses": len(primary_registry), "n_valid": len(bh_rows),
+            "n_hypotheses": len(primary_registry),
+            "n_valid": len(bh_rows),
             "n_bh_pass": sum(1 for r in bh_rows if r["bh_pass"]),
-            "n_primary_discovery": real_discovery_count, "q_threshold": q_threshold,
+            "n_primary_discovery": real_discovery_count,
+            "q_threshold": q_threshold,
         },
         "short_exploratory_summary": {
             "n_cells": len(short_registry),
@@ -687,11 +740,13 @@ def run_phase_a(
             "n_replicates": temporal_result["n_replicates"],
             "per_cell": temporal_result["per_cell"],
         },
-        "price_cards": price_cards, "flow_cards": flow_cards,
+        "price_cards": price_cards,
+        "flow_cards": flow_cards,
         "warnings": [f"{c['family']}: {w}" for c in cards for w in c["warnings"]],
         "acceptance_gate": [
             f"{c['family']}: band={c['candidate_horizon_band']} grade={c['evidence_grade']}"
-            for c in cards if c["screen_pass"]
+            for c in cards
+            if c["screen_pass"]
         ],
         "deferred_candidates": [
             f"{c['family']}: pattern={c['pattern_auto']}" for c in cards if not c["screen_pass"]
@@ -710,7 +765,7 @@ def run_phase_a(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--phase", default="A", choices=["A"])
+    parser.add_argument("--phase", default="A", choices=["A", "B", "AB"])
     parser.add_argument("--snapshot-date", default=None)
     parser.add_argument("--source", default=REMOTE_SOURCE)
     parser.add_argument("--data-lake-root", type=Path, default=None)
@@ -718,17 +773,51 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--permutations", type=int, default=None)
     parser.add_argument("--include-holdout", action="store_true")
     parser.add_argument("--holdout-start", default=None)
+    parser.add_argument("--output-root", type=Path, default=Path("research/output/horizon_scan"))
     parser.add_argument(
-        "--output-root", type=Path, default=Path("research/output/horizon_scan")
+        "--phase-a-run-dir",
+        type=Path,
+        default=None,
+        help="--phase AB only: a published phase=A run directory to combine",
+    )
+    parser.add_argument(
+        "--phase-b-run-dir",
+        type=Path,
+        default=None,
+        help="--phase AB only: a published phase=B run directory to combine",
     )
     args = parser.parse_args(argv)
-    published = run_phase_a(
-        snapshot_date=args.snapshot_date, source=args.source,
-        data_lake_root=args.data_lake_root, smoke_family=args.smoke_family,
-        permutations=args.permutations, include_holdout=args.include_holdout,
-        holdout_start=args.holdout_start, output_root=args.output_root,
-        command_line=["horizon_scan", *(argv or [])],
-    )
+    command_line = ["horizon_scan", *(argv or [])]
+
+    if args.phase == "A":
+        published = run_phase_a(
+            snapshot_date=args.snapshot_date,
+            source=args.source,
+            data_lake_root=args.data_lake_root,
+            smoke_family=args.smoke_family,
+            permutations=args.permutations,
+            include_holdout=args.include_holdout,
+            holdout_start=args.holdout_start,
+            output_root=args.output_root,
+            command_line=command_line,
+        )
+    elif args.phase == "B":
+        published = run_phase_b_core(
+            snapshot_date=args.snapshot_date,
+            source=args.source,
+            data_lake_root=args.data_lake_root,
+            output_root=args.output_root,
+            command_line=command_line,
+        )
+    else:
+        if args.phase_a_run_dir is None or args.phase_b_run_dir is None:
+            parser.error("--phase AB requires --phase-a-run-dir and --phase-b-run-dir")
+        published = run_combined_ab(
+            phase_a_run_dir=args.phase_a_run_dir,
+            phase_b_run_dir=args.phase_b_run_dir,
+            output_root=args.output_root,
+            command_line=command_line,
+        )
     print(published)
     return 0
 

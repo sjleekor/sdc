@@ -81,9 +81,7 @@ def assert_family_registry_complete(config: HorizonScanConfig) -> None:
         raise PreflightError(f"Phase A family role counts must be {expected}, found {counts}")
 
 
-def assert_holdout_untouched(
-    *, include_holdout: bool, holdout_start_override: str | None
-) -> None:
+def assert_holdout_untouched(*, include_holdout: bool, holdout_start_override: str | None) -> None:
     """§1.1: `--include-holdout`/`--holdout-start` are debug-only, never official."""
     if include_holdout or holdout_start_override is not None:
         raise PreflightError(
@@ -305,6 +303,7 @@ def publish_run(
     *,
     run_spec: dict[str, Any],
     required_artifacts: tuple[str, ...] = REQUIRED_RUN_ARTIFACTS,
+    content_hash_exclude_names: frozenset[str] = _CONTENT_HASH_EXCLUDE_NAMES,
 ) -> Path:
     """Atomic tmp-dir-then-rename publish (§A-9: "임시 run directory에 쓴 뒤
     ... 최종 directory로 rename한다. `_SUCCESS.json`은 마지막에 기록한다").
@@ -313,13 +312,18 @@ def publish_run(
     whole tree in one filesystem operation (so a concurrent reader never sees
     a final directory that exists but is incomplete), then writes
     ``_SUCCESS.json`` into the now-final directory last.
+
+    ``content_hash_exclude_names`` defaults to Phase A's provenance-file set;
+    a caller whose run-spec filename differs (e.g. Phase B's
+    ``phase_b_run_spec.json``) must pass its own set or the timestamp fields
+    inside that file would leak into the reproducibility hash.
     """
     missing = [name for name in required_artifacts if not (tmp_run_dir / name).is_file()]
     if missing:
         raise RuntimeError(f"cannot publish an incomplete run: missing {missing}")
     if final_run_dir.exists():
         raise FileExistsError(f"run directory already exists and is immutable: {final_run_dir}")
-    content_hash = compute_run_content_hash(tmp_run_dir)
+    content_hash = compute_run_content_hash(tmp_run_dir, exclude_names=content_hash_exclude_names)
     final_run_dir.parent.mkdir(parents=True, exist_ok=True)
     tmp_run_dir.rename(final_run_dir)
     success = {
