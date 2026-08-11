@@ -23,7 +23,8 @@ def _con() -> duckdb.DuckDBPyConnection:
         ('A', 2023, '11011', '20240102000001', '합계', 1000, NULL, 700, DATE '2023-12-31'),
         ('A', 2023, '11011', '20240104000001', '합계', 2000, 100, NULL, DATE '2023-12-31'),
         ('A', 2022, '11011', '20240106000001', '합계', 3000, 100, 2800, DATE '2022-12-31')
-        ) AS t(ticker,bsns_year,reprt_code,rcept_no,se,istc_totqy,tesstk_co,distb_stock_co,stlm_dt)"""
+        ) AS t(ticker,bsns_year,reprt_code,rcept_no,se,istc_totqy,tesstk_co,
+        distb_stock_co,stlm_dt)"""
     )
     return con
 
@@ -38,7 +39,9 @@ def test_valid_session_skips_halt_and_preserves_full_panel() -> None:
         (3,),
     ]
     con.execute(f"CREATE VIEW panel AS {build_full_panel_sql()}")
-    halt = con.execute("SELECT is_halted, valid_session_idx FROM panel WHERE trade_date=DATE '2024-01-04'").fetchone()
+    halt = con.execute(
+        "SELECT is_halted, valid_session_idx FROM panel WHERE trade_date=DATE '2024-01-04'"
+    ).fetchone()
     assert halt == (True, None)
 
 

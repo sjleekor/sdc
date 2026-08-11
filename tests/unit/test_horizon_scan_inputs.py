@@ -17,7 +17,9 @@ def _write_table(root: Path, table: str, query: str) -> None:
 
 
 def test_a0_builder_writes_success_manifest_after_all_marts(tmp_path: Path) -> None:
-    raw = tmp_path / "raw_postgres" / "snapshot_date=2024-03-01" / "source=sj2_remote" / "_manifests"
+    raw = (
+        tmp_path / "raw_postgres" / "snapshot_date=2024-03-01" / "source=sj2_remote" / "_manifests"
+    )
     raw.mkdir(parents=True)
     (raw / "_SUCCESS.json").write_text(
         json.dumps({"tables": {table: {} for table in REQUIRED_RAW_INPUTS}}), encoding="utf-8"
@@ -29,7 +31,9 @@ def test_a0_builder_writes_success_manifest_after_all_marts(tmp_path: Path) -> N
     _write_table(
         tmp_path,
         "daily_ohlcv",
-        "SELECT * FROM (VALUES " + prices + ") t(trade_date,ticker,market,open,high,low,close,volume)",
+        "SELECT * FROM (VALUES "
+        + prices
+        + ") t(trade_date,ticker,market,open,high,low,close,volume)",
     )
     flows = []
     for i in range(1, 21):
