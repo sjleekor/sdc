@@ -614,7 +614,7 @@ def _synthetic_phase_b_ready_rows() -> list[dict]:
     ]
 
 
-def test_run_combined_ab_happy_path(tmp_path: Path, config) -> None:
+def test_run_combined_ab_happy_path(tmp_path: Path, config, monkeypatch) -> None:
     phase_a_dir = _fake_phase_a_run(tmp_path, config)
     ready_rows = _synthetic_phase_b_ready_rows()
     phase_b_dir = _fake_phase_b_run(tmp_path, config, ready_rows=ready_rows)
@@ -659,7 +659,11 @@ def test_run_combined_ab_happy_path(tmp_path: Path, config) -> None:
     assert manifest["phase_b_screen_pass_count"] == 1
     assert manifest["phase_b_evidence_grade_counts"] == {"A": 1, "B": 0, "C": 0, "D": 1}
 
-    # republishing to the same run_id must refuse to overwrite (immutability)
+    # Republishing to the same run_id must refuse to overwrite (immutability).
+    # ab_run_id is derived from kst_now_iso() at second precision, so pin the
+    # clock to the first publish's timestamp — otherwise this assertion only
+    # holds when both calls happen to land inside the same wall-clock second.
+    monkeypatch.setattr(phase_b_run, "kst_now_iso", lambda: manifest["generated_at"])
     with pytest.raises(FileExistsError):
         run_combined_ab(
             phase_a_run_dir=phase_a_dir,
