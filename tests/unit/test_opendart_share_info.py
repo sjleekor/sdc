@@ -177,6 +177,62 @@ def test_parse_capital_change_response() -> None:
     assert row.isu_dcrs_de == date(2025, 6, 30)
 
 
+def _capital_change_payload(**overrides: str) -> dict[str, object]:
+    row = {
+        "rcept_no": "20260310002820",
+        "corp_cls": "Y",
+        "corp_code": "00126380",
+        "corp_name": "삼성전자",
+        "isu_dcrs_de": "2010.06.15",
+        "isu_dcrs_stle": "유상증자(주주배정)",
+        "isu_dcrs_stock_knd": "보통주",
+        "isu_dcrs_qy": "1,000,000",
+        "isu_dcrs_mstvdv_fval_amount": "500",
+        "isu_dcrs_mstvdv_fval_amount2": "70,000",
+        "stlm_dt": "2025-12-31",
+    }
+    row.update(overrides)
+    return {"status": "000", "message": "정상", "list": [row]}
+
+
+def test_parse_capital_change_accepts_dot_separated_isu_dcrs_de() -> None:
+    # irdsSttus returns this field as YYYY.MM.DD, unlike stlm_dt which is ISO.
+    corp = _sample_corp()
+
+    result = parse_capital_change_response(_capital_change_payload(), corp, 2025, "11011")
+
+    assert result.error is None
+    assert len(result.records) == 1
+    assert result.records[0].isu_dcrs_de == date(2010, 6, 15)
+    assert result.records[0].stlm_dt == date(2025, 12, 31)
+
+
+def test_parse_capital_change_accepts_compact_isu_dcrs_de() -> None:
+    corp = _sample_corp()
+
+    result = parse_capital_change_response(
+        _capital_change_payload(isu_dcrs_de="20100615"), corp, 2025, "11011"
+    )
+
+    assert result.records[0].isu_dcrs_de == date(2010, 6, 15)
+
+
+def test_parse_capital_change_keeps_row_when_a_date_is_unparseable() -> None:
+    # A response is parsed as a whole, so a bad date must not discard the row.
+    corp = _sample_corp()
+
+    result = parse_capital_change_response(
+        _capital_change_payload(isu_dcrs_de="해당사항 없음"), corp, 2025, "11011"
+    )
+
+    assert result.error is None
+    assert len(result.records) == 1
+    row = result.records[0]
+    assert row.isu_dcrs_de is None
+    assert row.isu_dcrs_qy == 1000000
+    assert row.raw_payload["isu_dcrs_de"] == "해당사항 없음"
+
+
 def test_open_dart_share_info_provider_maps_no_data_result() -> None:
     corp = _sample_corp()
     provider = OpenDartShareInfoProvider(

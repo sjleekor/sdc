@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
 from krx_collector.adapters.opendart_common import (
@@ -70,13 +70,32 @@ def _parse_int(value: object) -> int | None:
     return int(decimal_value)
 
 
+_DATE_FORMATS = ("%Y-%m-%d", "%Y%m%d")
+
+
 def _parse_date(value: object) -> date | None:
+    """Parse an OpenDART date field.
+
+    ``stlm_dt`` arrives ISO (``2025-03-31``), but irdsSttus returns
+    ``isu_dcrs_de`` dot-separated (``2010.06.15``), so normalise the separator
+    before parsing. Unparseable values log and yield NULL rather than raising:
+    a response is parsed as a whole, so one bad field would otherwise discard
+    every row for that (corp, year, report) — and the original string is kept
+    verbatim in ``raw_payload`` either way.
+    """
     if value is None:
         return None
     text = str(value).strip()
     if not text or text == "-":
         return None
-    return date.fromisoformat(text)
+    normalized = text.replace(".", "-").replace("/", "-")
+    for date_format in _DATE_FORMATS:
+        try:
+            return datetime.strptime(normalized, date_format).date()
+        except ValueError:
+            continue
+    logger.warning("Unparseable OpenDART date %r; storing NULL", text)
+    return None
 
 
 def parse_stock_count_response(
