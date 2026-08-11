@@ -952,7 +952,10 @@ def _handle_dart_sync_filings(args: argparse.Namespace) -> None:
         print(f"❌ OpenDART filing receipt sync failed: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    provider = OpenDartFilingReceiptProvider(request_executor=request_executor)
+    provider = OpenDartFilingReceiptProvider(
+        request_executor=request_executor,
+        page_delay_seconds=args.rate_limit_seconds,
+    )
     storage = PostgresStorage(settings.db_dsn)
     result = sync_dart_filings(
         filing_receipt_provider=provider,

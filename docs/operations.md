@@ -162,6 +162,11 @@ uv run krx-collector dart sync-filings --tickers 005930 --years 2025
 커맨드입니다 — 현재는 필요할 때 수동으로 실행합니다. `dart sync-share-info`는 기존 주식수/배당/
 자사주 raw와 함께 `dart_capital_change_raw`(증자·감자 현황)도 같은 실행에서 수집합니다.
 
+`dart sync-filings`는 다른 OpenDART 커맨드와 달리 (corp, 연도) 윈도우 하나가 여러 페이지로
+나뉘어 옵니다. `--rate-limit-seconds`는 윈도우 사이와 **페이지 사이 모두**에 적용되므로, 공시가
+많은 발행사에서도 요청 간격이 다른 수집기와 같게 유지됩니다. 대량 백필에서는 이 값을 기본값
+0.2보다 높여(예: 0.5) 평균 호출률을 낮추는 것을 권장합니다.
+
 원공시 receipt를 지정해 XBRL을 다시 받아야 할 때(예: 기존 raw가 정정본만 captured한 경우)는
 `dart backfill-xbrl-receipts --targets-file <jsonl>`을 사용합니다. 어떤 receipt가 백필 대상인지
 찾는 것은 이 커맨드의 범위가 아니며 `dart_filing_receipt_raw` 위에서 별도로 분석해야 합니다.

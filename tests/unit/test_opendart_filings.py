@@ -31,6 +31,20 @@ def _sample_corp() -> DartCorp:
     )
 
 
+def _provider(
+    executor: FakeOpenDartExecutor,
+    sleeps: list[float] | None = None,
+    page_delay_seconds: float = 0.2,
+) -> OpenDartFilingReceiptProvider:
+    """Build a provider that records its page delays instead of sleeping."""
+    recorded = sleeps if sleeps is not None else []
+    return OpenDartFilingReceiptProvider(
+        request_executor=executor,
+        page_delay_seconds=page_delay_seconds,
+        sleep_fn=recorded.append,
+    )
+
+
 def _page_payload(
     *, page_no: int, total_page: int, total_count: int, rcept_nos: list[str]
 ) -> bytes:
@@ -98,7 +112,7 @@ def test_provider_single_page() -> None:
     executor = FakeOpenDartExecutor(
         [_page_payload(page_no=1, total_page=1, total_count=1, rcept_nos=["r1"])]
     )
-    provider = OpenDartFilingReceiptProvider(request_executor=executor)
+    provider = _provider(executor)
 
     result = provider.fetch_filing_receipts(corp, date(2026, 1, 1), date(2026, 12, 31))
 
@@ -115,7 +129,7 @@ def test_provider_paginates_across_pages() -> None:
             _page_payload(page_no=2, total_page=2, total_count=2, rcept_nos=["r2"]),
         ]
     )
-    provider = OpenDartFilingReceiptProvider(request_executor=executor)
+    provider = _provider(executor)
 
     result = provider.fetch_filing_receipts(corp, date(2026, 1, 1), date(2026, 12, 31))
 
@@ -125,12 +139,65 @@ def test_provider_paginates_across_pages() -> None:
     assert executor.calls[1].params["page_no"] == "2"
 
 
+def test_provider_sleeps_between_pages_but_not_after_the_last() -> None:
+    corp = _sample_corp()
+    executor = FakeOpenDartExecutor(
+        [
+            _page_payload(page_no=1, total_page=3, total_count=3, rcept_nos=["r1"]),
+            _page_payload(page_no=2, total_page=3, total_count=3, rcept_nos=["r2"]),
+            _page_payload(page_no=3, total_page=3, total_count=3, rcept_nos=["r3"]),
+        ]
+    )
+    sleeps: list[float] = []
+    provider = _provider(executor, sleeps, page_delay_seconds=0.5)
+
+    result = provider.fetch_filing_receipts(corp, date(2026, 1, 1), date(2026, 12, 31))
+
+    assert result.error is None
+    assert len(executor.calls) == 3
+    # Three pages leave two gaps; the window returns without a trailing sleep.
+    assert sleeps == [0.5, 0.5]
+
+
+def test_provider_does_not_sleep_after_a_failing_page() -> None:
+    corp = _sample_corp()
+    executor = FakeOpenDartExecutor(
+        [
+            _page_payload(page_no=1, total_page=3, total_count=3, rcept_nos=["r1"]),
+            b'{"status":"800","message":"server error"}',
+        ]
+    )
+    sleeps: list[float] = []
+    provider = _provider(executor, sleeps, page_delay_seconds=0.5)
+
+    provider.fetch_filing_receipts(corp, date(2026, 1, 1), date(2026, 12, 31))
+
+    # Only the gap before the failing page 2 — the error path returns at once.
+    assert sleeps == [0.5]
+
+
+def test_provider_page_delay_can_be_disabled() -> None:
+    corp = _sample_corp()
+    executor = FakeOpenDartExecutor(
+        [
+            _page_payload(page_no=1, total_page=2, total_count=2, rcept_nos=["r1"]),
+            _page_payload(page_no=2, total_page=2, total_count=2, rcept_nos=["r2"]),
+        ]
+    )
+    sleeps: list[float] = []
+    provider = _provider(executor, sleeps, page_delay_seconds=0.0)
+
+    provider.fetch_filing_receipts(corp, date(2026, 1, 1), date(2026, 12, 31))
+
+    assert sleeps == []
+
+
 def test_provider_maps_no_data_on_first_page() -> None:
     corp = _sample_corp()
     executor = FakeOpenDartExecutor(
         ['{"status":"013","message":"조회된 데이타가 없습니다."}'.encode()]
     )
-    provider = OpenDartFilingReceiptProvider(request_executor=executor)
+    provider = _provider(executor)
 
     result = provider.fetch_filing_receipts(corp, date(2026, 1, 1), date(2026, 12, 31))
 
@@ -147,7 +214,7 @@ def test_provider_drops_partial_records_on_mid_pagination_error() -> None:
             b'{"status":"800","message":"server error"}',
         ]
     )
-    provider = OpenDartFilingReceiptProvider(request_executor=executor)
+    provider = _provider(executor)
 
     result = provider.fetch_filing_receipts(corp, date(2026, 1, 1), date(2026, 12, 31))
 

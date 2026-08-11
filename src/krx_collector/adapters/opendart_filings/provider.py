@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import date
 
 from krx_collector.adapters.opendart_common import (
@@ -13,6 +14,7 @@ from krx_collector.adapters.opendart_common import (
 )
 from krx_collector.domain.enums import Source
 from krx_collector.domain.models import DartCorp, DartFilingReceiptLine, DartFilingReceiptResult
+from krx_collector.util.pipeline import sleep_with_jitter
 from krx_collector.util.time import now_kst
 
 logger = logging.getLogger(__name__)
@@ -78,9 +80,13 @@ class OpenDartFilingReceiptProvider:
         self,
         request_executor: OpenDartRequestExecutor,
         timeout_seconds: float = 30.0,
+        page_delay_seconds: float = 0.2,
+        sleep_fn: Callable[[float], None] = sleep_with_jitter,
     ) -> None:
         self._request_executor = request_executor
         self._timeout_seconds = timeout_seconds
+        self._page_delay_seconds = page_delay_seconds
+        self._sleep_fn = sleep_fn
 
     @property
     def request_executor(self) -> OpenDartRequestExecutor:
@@ -119,6 +125,12 @@ class OpenDartFilingReceiptProvider:
         Returns a single aggregated result. If any page fails, the whole
         window is reported as failed (no partial upsert) so a later
         skip-if-present check never mistakes a partial fetch for complete.
+
+        Sleeps ``page_delay_seconds`` *between* pages (never after the last
+        one). Without it a heavy filer's window would burst every page
+        back-to-back, making this the only OpenDART caller whose request rate
+        is not paced 1:1 with its sleep — every other one sleeps once per HTTP
+        request in its service loop.
         """
         all_records: list[DartFilingReceiptLine] = []
         total_count = 0
@@ -153,6 +165,8 @@ class OpenDartFilingReceiptProvider:
                         records=all_records,
                         total_count=total_count,
                     )
+                if self._page_delay_seconds > 0:
+                    self._sleep_fn(self._page_delay_seconds)
                 page_no += 1
         except Exception as exc:
             return DartFilingReceiptResult(
