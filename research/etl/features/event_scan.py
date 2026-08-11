@@ -78,6 +78,25 @@ DPS_ROW_NAME = "주당 현금배당금(원)"
 
 DEFAULT_ISSUANCE_IDENTITY_TOLERANCE = 0
 
+# §4.4.1 — irdsSttus returns the whole since-listing history on every report, so
+# one real capital action appears once per report vintage stored in
+# dart_capital_change_raw. Summing the table as-is multiplies every event by its
+# vintage count and breaks the §4.4 step-4 identity for good. The fix is to pick
+# ONE vintage per ticker and use only its rows: vintages disagree (000040's
+# 4,476,350-share conversion is dated 2021-01-31 in the FY2024 report and
+# 2021-01-13 in the FY2025 one), so unioning them by event identity would leave
+# a corrected event standing twice. Only the annual report carries the history.
+ANNUAL_REPRT_CODE = "11011"
+
+# Which vintage to pick. Both are implemented because the choice between them is
+# decided by measurement, not by preference — see 04_specific_plan_B.md §4.4.1
+# "vintage distance probe" for the pre-registered thresholds. Until that probe
+# reports, LATEST here is a provisional default, not the adopted policy.
+VINTAGE_POLICY_LATEST = "latest_vintage"
+VINTAGE_POLICY_STRICT_PIT = "strict_pit"
+VINTAGE_POLICIES = (VINTAGE_POLICY_LATEST, VINTAGE_POLICY_STRICT_PIT)
+DEFAULT_VINTAGE_POLICY = VINTAGE_POLICY_LATEST
+
 
 def _classification_case(alias: str) -> str:
     def in_list(reasons: frozenset[str]) -> str:
@@ -103,6 +122,55 @@ def _quarter_ordinal_case(col: str) -> str:
     )
 
 
+def _position_vintage_sql(policy: str) -> str:
+    """CTEs picking which capital-change vintage each filing position reads.
+
+    ``latest_vintage`` takes one newest vintage per ticker and uses it for every
+    position; ``strict_pit`` takes, per position, the newest vintage already
+    disclosed by that position's ``available_from``. Positions with no eligible
+    vintage keep a row with NULL vintage keys, so they end up with zero events
+    and fail the identity check rather than silently reading someone else's.
+    """
+    if policy == VINTAGE_POLICY_LATEST:
+        return """
+    selected_vintage AS (
+        SELECT ticker, vintage_bsns_year, vintage_rcept_no, vintage_available_from
+        FROM capital_change_vintages
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY ticker
+            ORDER BY vintage_bsns_year DESC, vintage_disclosed_date DESC NULLS LAST,
+                     vintage_rcept_no DESC
+        ) = 1
+    ),
+    position_vintage AS (
+        SELECT
+            wp.*,
+            sv.vintage_bsns_year AS capital_vintage_bsns_year,
+            sv.vintage_rcept_no AS capital_vintage_rcept_no,
+            sv.vintage_available_from AS capital_vintage_available_from
+        FROM with_prior_year wp
+        LEFT JOIN selected_vintage sv ON sv.ticker = wp.ticker
+    ),"""
+    return """
+    position_vintage AS (
+        SELECT
+            wp.*,
+            v.vintage_bsns_year AS capital_vintage_bsns_year,
+            v.vintage_rcept_no AS capital_vintage_rcept_no,
+            v.vintage_available_from AS capital_vintage_available_from
+        FROM with_prior_year wp
+        LEFT JOIN capital_change_vintages v
+          ON v.ticker = wp.ticker
+         AND v.vintage_available_from IS NOT NULL
+         AND wp.available_from IS NOT NULL
+         AND v.vintage_available_from <= wp.available_from
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY wp.ticker, wp.bsns_year, wp.reprt_code
+            ORDER BY v.vintage_available_from DESC NULLS LAST, v.vintage_rcept_no DESC
+        ) = 1
+    ),"""
+
+
 def build_issuance_sql(
     *,
     share_count_view: str = "dart_share_count_raw",
@@ -110,14 +178,23 @@ def build_issuance_sql(
     corp_view: str = "dart_corp_master",
     calendar_table: str = _CAL_TABLE,
     identity_tolerance: int = DEFAULT_ISSUANCE_IDENTITY_TOLERANCE,
+    vintage_policy: str = DEFAULT_VINTAGE_POLICY,
 ) -> str:
     """One row per (ticker, filing position) with ``ev_net_share_issuance_yoy``.
 
     Uses the exact seq_key-4 self-join pattern from B-3/B-4 (not LAG) so a
     ticker with a gap in its filing history never silently pairs with the
     wrong prior-year filing.
+
+    ``vintage_policy`` selects between the two §4.4.1 candidates — see
+    ``VINTAGE_POLICY_LATEST`` / ``VINTAGE_POLICY_STRICT_PIT``.
     """
+    if vintage_policy not in VINTAGE_POLICIES:
+        raise ValueError(
+            f"unknown vintage_policy {vintage_policy!r}; expected one of {VINTAGE_POLICIES}"
+        )
     quarter_ord = _quarter_ordinal_case("s.reprt_code")
+    position_vintage = _position_vintage_sql(vintage_policy)
     return f"""
     WITH corp AS (
         SELECT ticker, market, corp_code FROM {corp_view}
@@ -162,16 +239,42 @@ def build_issuance_sql(
         LEFT JOIN with_available prev
           ON prev.ticker = cur.ticker AND prev.seq_key = cur.seq_key - 4
     ),
+    capital_change_vintages AS (
+        SELECT
+            ticker, vintage_bsns_year, vintage_rcept_no, vintage_disclosed_date,
+            CASE WHEN vintage_disclosed_date IS NOT NULL
+                 THEN (SELECT MIN(d) FROM {calendar_table} WHERE d > vintage_disclosed_date)
+            END AS vintage_available_from
+        FROM (
+            SELECT DISTINCT
+                cc.ticker,
+                cc.bsns_year AS vintage_bsns_year,
+                cc.rcept_no AS vintage_rcept_no,
+                CASE WHEN cc.rcept_no ~ '^[0-9]{{14}}$'
+                     THEN strptime(left(cc.rcept_no, 8), '%Y%m%d')::DATE END
+                    AS vintage_disclosed_date
+            FROM {capital_change_view} cc
+            JOIN corp c ON c.ticker = cc.ticker
+            WHERE cc.reprt_code = '{ANNUAL_REPRT_CODE}'
+        )
+    ),{position_vintage}
     capital_change_classified AS (
-        SELECT cc.ticker, cc.isu_dcrs_de, cc.isu_dcrs_qy,
-               {_classification_case("cc")} AS action_class
+        SELECT
+            cc.ticker,
+            cc.bsns_year AS vintage_bsns_year,
+            cc.rcept_no AS vintage_rcept_no,
+            cc.isu_dcrs_de, cc.isu_dcrs_qy,
+            {_classification_case("cc")} AS action_class
         FROM {capital_change_view} cc
         JOIN corp c ON c.ticker = cc.ticker
+        WHERE cc.reprt_code = '{ANNUAL_REPRT_CODE}'
+          AND cc.isu_dcrs_de IS NOT NULL
     ),
     issuance_summary AS (
         SELECT
             wp.ticker, wp.market, wp.corp_code, wp.bsns_year, wp.reprt_code,
             wp.seq_key, wp.available_from, wp.istc_totqy, wp.istc_totqy_prior,
+            wp.capital_vintage_bsns_year, wp.capital_vintage_available_from,
             (wp.now_to_isu_prior IS NOT NULL) AS has_prior_year,
             wp.now_to_isu_stock_totqy - wp.now_to_isu_prior AS issuance_delta_1y,
             wp.now_to_dcrs_stock_totqy - wp.now_to_dcrs_prior AS decrease_delta_1y,
@@ -185,15 +288,18 @@ def build_issuance_sql(
                                THEN cc.isu_dcrs_qy END), 0) AS mechanical_decrease_1y,
             COALESCE(SUM(CASE WHEN cc.action_class = 'unclassified'
                                THEN cc.isu_dcrs_qy END), 0) AS unclassified_1y
-        FROM with_prior_year wp
+        FROM position_vintage wp
         LEFT JOIN capital_change_classified cc
           ON cc.ticker = wp.ticker
+         AND cc.vintage_bsns_year = wp.capital_vintage_bsns_year
+         AND cc.vintage_rcept_no = wp.capital_vintage_rcept_no
          AND wp.stlm_dt_prior IS NOT NULL
          AND cc.isu_dcrs_de > wp.stlm_dt_prior AND cc.isu_dcrs_de <= wp.stlm_dt
         GROUP BY
             wp.ticker, wp.market, wp.corp_code, wp.bsns_year, wp.reprt_code, wp.seq_key,
             wp.available_from, wp.istc_totqy, wp.istc_totqy_prior, wp.now_to_isu_prior,
-            wp.now_to_isu_stock_totqy, wp.now_to_dcrs_stock_totqy, wp.now_to_dcrs_prior
+            wp.now_to_isu_stock_totqy, wp.now_to_dcrs_stock_totqy, wp.now_to_dcrs_prior,
+            wp.capital_vintage_bsns_year, wp.capital_vintage_available_from
     )
     SELECT
         *,
@@ -356,6 +462,7 @@ def build_event_scan_daily_sql(
     corp_view: str = "dart_corp_master",
     calendar_table: str = _CAL_TABLE,
     identity_tolerance: int = DEFAULT_ISSUANCE_IDENTITY_TOLERANCE,
+    vintage_policy: str = DEFAULT_VINTAGE_POLICY,
 ) -> str:
     """SQL producing ``feat_event_scan_daily``: issuance + payout, daily PIT."""
     issuance_sql = build_issuance_sql(
@@ -364,6 +471,7 @@ def build_event_scan_daily_sql(
         corp_view=corp_view,
         calendar_table=calendar_table,
         identity_tolerance=identity_tolerance,
+        vintage_policy=vintage_policy,
     )
     payout_sql = build_payout_sql(
         shareholder_return_view=shareholder_return_view,
@@ -451,6 +559,19 @@ def build_event_scan_daily_sql(
     """
 
 
+def register_event_scan_calendar(
+    con: duckdb.DuckDBPyConnection,
+    trading_days: Sequence[date],
+    *,
+    table: str = _CAL_TABLE,
+) -> str:
+    """(Re)create the KRX session table the ``available_from`` lookups read."""
+    con.execute(f"DROP TABLE IF EXISTS {table}")
+    con.execute(f"CREATE TABLE {table} (d DATE)")
+    con.executemany(f"INSERT INTO {table} VALUES (?)", [(d,) for d in trading_days])
+    return table
+
+
 def register_event_scan_daily_view(
     con: duckdb.DuckDBPyConnection,
     *,
@@ -459,9 +580,7 @@ def register_event_scan_daily_view(
     **views: str,
 ) -> str:
     """Register the KRX session calendar table, then a view over the SQL above."""
-    con.execute(f"DROP TABLE IF EXISTS {_CAL_TABLE}")
-    con.execute(f"CREATE TABLE {_CAL_TABLE} (d DATE)")
-    con.executemany(f"INSERT INTO {_CAL_TABLE} VALUES (?)", [(d,) for d in trading_days])
+    register_event_scan_calendar(con, trading_days)
     sql = build_event_scan_daily_sql(**views)
     con.execute(f"CREATE OR REPLACE VIEW {view_name} AS {sql}")
     return view_name
@@ -476,9 +595,7 @@ def materialize_event_scan_daily(
     **views: str,
 ) -> str:
     """Build + register ``feat_event_scan_daily`` as a cached parquet mart."""
-    con.execute(f"DROP TABLE IF EXISTS {_CAL_TABLE}")
-    con.execute(f"CREATE TABLE {_CAL_TABLE} (d DATE)")
-    con.executemany(f"INSERT INTO {_CAL_TABLE} VALUES (?)", [(d,) for d in trading_days])
+    register_event_scan_calendar(con, trading_days)
     materialize(
         con,
         config,

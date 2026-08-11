@@ -719,6 +719,85 @@ coverage 기준을 B-1~B-5 source-only 점검에서 만족하지 못하면 4개 
 `blocked_exploratory`로 readiness freeze하며 결합 BH의 `M_B_ready`에서 제외한다. freeze 뒤
 예상 밖 runtime failure가 난 경우에만 네 셀을 `p_for_bh=1.0`으로 유지한다.
 
+### 4.4.1 capital action list의 vintage 중복과 dedup 규칙 (2026-08-12 계약 보강)
+
+§4.4 1단계는 `irdsSttus` 응답을 `dart_capital_change_raw`에 보존하라고만 정했고, compute에서
+**어느 vintage를 쓸지도 dedup 규칙도 정하지 않았다**. 실데이터에서 이 공백이 드러났다.
+
+`irdsSttus`는 해당 사업연도 사건이 아니라 **상장 이후 누적 이력**을 보고서마다 다시 반환한다.
+raw unique key에 `bsns_year`/`reprt_code`/`rcept_no`가 들어 있어 같은 실사건이 보고서 vintage
+마다 한 벌씩 쌓인다. `event_scan.build_issuance_sql`의 `capital_change_classified`는 ticker
+전체 행을 필터 없이 SUM하므로 §4.4 4단계 identity가 구조적으로 깨지고, 결과적으로
+`ev_net_share_issuance_yoy`가 거의 전부 NULL이 된다. 안전망은 설계대로 작동하지만 feature가
+죽는다. 이는 수집 범위 문제가 아니라 compute 규칙의 공백이다.
+
+관측(prod, 2026-08-12):
+
+- 실제 사건이 든 판은 `bsns_year=2025, reprt_code=11011` 한 벌뿐(765 ticker). 분기·반기보고서
+  행은 전부 `isu_dcrs_stle='-'`, 수량 NULL인 placeholder였다. 표본이 작아 단정하지 않고
+  아래 프로브에서 재확인한다.
+- 두 vintage가 다 있는 `000040`을 대조하면 36건 중 34건이 동일하고, 1건은 **날짜가 정정**됐으며
+  (2021-01-31 → 2021-01-13) 1건은 신규였다. 과거 판이 조용히 고쳐진다.
+
+**dedup 규칙(확정).** raw는 immutable로 두고 compute에서만 축약한다.
+
+1. `reprt_code='11011'` 행만 쓴다. placeholder가 최신 vintage로 뽑혀 이벤트 집합이 비는 것을
+   막는다.
+2. 티커별로 **판(vintage) 하나를 통째로** 고르고 그 판의 행만 쓴다. 여러 판을 event 식별자로
+   union하지 않는다.
+3. 판의 접수일 다음 session을 `vintage_available_from`으로 두고, 판 선택 규칙을 여기에 건다.
+
+2항을 event 단위 union으로 하지 않는 이유는 실측에서 나왔다. `000040`의 같은 전환권행사
+4,476,350주가 2024판에는 2021-01-31, 2025판에는 2021-01-13으로 실려 있다. 날짜나 수량이 정정되면
+같은 사건이 서로 다른 식별자를 갖게 돼 union 뒤에도 두 건으로 남고, §4.4 4단계 identity가 오히려
+더 자주 깨진다. 한 판은 발행사가 자기 share count에 맞춰 정합적으로 작성한 목록이므로 통째로
+쓰는 쪽이 identity 통과 가능성이 높다.
+
+두 선택지는 "어느 판을 고르는가"에서만 갈린다.
+
+- **(a) latest-vintage** — 티커별 최신 판 하나를 전 구간에 쓴다. 전 구간이 계산되지만 filing
+  position보다 나중에 발행된 판의 정정을 소급 적용한다.
+- **(b) strict PIT** — position마다 `vintage_available_from <= position.available_from`인 판 중
+  최신을 고른다. look-ahead가 없는 대신 그 시점 이전 판이 없는 초기 연도가 NULL이 된다.
+
+어느 쪽을 채택할지는 아래 측정으로 정하며, 규칙과 임계값은 결과 확인 전에 고정한다.
+
+#### vintage distance probe — 측정 설계
+
+`dart sync-share-info --bsns-years {2024,2020,2016} --reprt-codes 11011`로 annual vintage 세 벌을
+추가 수집한다. 2025판 기준 거리 1년·5년·9년 세 점이다. 1년 거리만 재면 "2025년 문서로 2016년
+feature를 계산해도 되는가"에 답할 수 없다. `dart_share_count_raw`·shareholder_return은 2015년
+부터 이미 있어 skip되므로 종목당 1요청, 연도당 약 22분이다.
+
+11개 연도를 전부 받지 않는 이유는 그것이 곧 (b)가 요구하는 수집이기 때문이다. 세 벌은 나머지
+8벌의 필요 여부를 판정하는 게이트다.
+
+지표는 두 개다.
+
+1. **feature-changing 불일치율** — 옛 판과 2025판을 종목별로 대조한다. 비교 범위는 옛 판의
+   회계연도 말 이전 사건이다. 추가·삭제·수량 변경·날짜 변경을 모두 세되, 실제로 feature를
+   바꾸는 것은 **`(stlm_dt_prior, stlm_dt]` 창 경계를 넘는 날짜 변경**과 수량·분류 변경뿐이다.
+   이 비율을 거리 1·5·9년별로 보고한다.
+2. **identity 통과율** — 같은 filing position 집합에 (a)/(b)를 각각 적용해 §4.4 4단계 identity를
+   통과하고 `ev_net_share_issuance_yoy`가 non-NULL이 되는 비율을 센다. (b)는 2016판으로
+   2017~2020, 2020판으로 2021~2024, 2024판으로 2025 position을 부분 평가한다.
+
+**판정 기준(결과 확인 전 고정).**
+
+| 9년 거리 feature-changing 불일치율 | 결정 |
+|---|---|
+| 1% 미만 | (a) 채택 |
+| 1~5% | (a) 채택 + `vintage_lookahead_ratio` quality flag, 민감도 병기 |
+| 5% 초과 | (b) 채택, 잔여 8개 연도 vintage 수집 |
+
+우선 규칙 하나를 둔다. **(b)의 identity 통과율이 (a)의 절반 이하이면 불일치율과 무관하게 (a)를
+채택**하고 (b)는 민감도 분석으로만 남긴다. 전 구간이 NULL인 feature는 후보로서 판정 대상이
+되지 못한다.
+
+채택 근거와 측정값은 `08_phase_b_implementation_log.md`에 기록한다. (a)로 정해지면 look-ahead는
+선언된 제약으로 family 카드에 명시한다. `blocked_exploratory` freeze와 마찬가지로 이 결정도
+scan 결과를 보기 전에 끝낸다.
+
 ### 4.5 주주환원
 
 ```text
@@ -1542,6 +1621,7 @@ PR5와 PR6은 PR4 이후 독립 리뷰가 가능하지만 official combined run�
 | next-filing censor로 report mix 변화 | 가짜 event decay | uncensored 60-session 고정표본 primary + reprt_code mix, censored secondary |
 | 공시 군집과 issuer 반복 | naive 유의성 과대 | cohort IC + gap-aware NW + issuer·filing-cycle bootstrap |
 | share split/무상증자를 issuance로 오인 | Q5 신호 오염 | `irdsSttus` 사유 + identity reconciliation, raw YoY fallback 금지 |
+| 누적 이력을 vintage마다 중복 합산 | identity 붕괴로 issuance family 전멸 | §4.4.1 event 단위 dedup + vintage distance probe로 (a)/(b) 사전 확정 |
 | missing buyback을 0 처리 | payout 과대/과소 | explicit zero와 unknown 분리 |
 | 현재 active corp/industry 필터 | 생존·분류 look-ahead | active 필터 금지, current industry backcast 금지 |
 | PIT industry 부재 | value/profitability 해석 혼합 | limitation + 해당 family grade B 상한 |

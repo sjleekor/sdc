@@ -3,7 +3,12 @@ from __future__ import annotations
 from datetime import date
 
 import duckdb
-from research.etl.features.event_scan import EVENT_SCAN_TABLE, register_event_scan_daily_view
+import pytest
+from research.etl.features.event_scan import (
+    EVENT_SCAN_TABLE,
+    build_issuance_sql,
+    register_event_scan_daily_view,
+)
 from research.etl.marts.financial_quarters import register_fin_quarterly_metric_vintage_view
 from research.etl.marts.metric_vintages import register_stock_metric_vintage_fact_view
 
@@ -156,10 +161,10 @@ def _insert_pit(con: duckdb.DuckDBPyConnection, *, trade_date: date, market_cap:
     )
 
 
-def _register(con: duckdb.DuckDBPyConnection) -> None:
+def _register(con: duckdb.DuckDBPyConnection, **views: str) -> None:
     register_stock_metric_vintage_fact_view(con, trading_days=_TRADING_DAYS)
     register_fin_quarterly_metric_vintage_view(con)
-    register_event_scan_daily_view(con, trading_days=_TRADING_DAYS)
+    register_event_scan_daily_view(con, trading_days=_TRADING_DAYS, **views)
 
 
 def _row(con: duckdb.DuckDBPyConnection, trade_date: date) -> tuple | None:
@@ -485,3 +490,187 @@ def test_lag1_variant_and_grain_uniqueness() -> None:
         row_next[idx["ev_net_share_issuance_yoy_lag1"]]
         == row_prior[idx["ev_net_share_issuance_yoy"]]
     )
+
+
+# --- §4.4.1 capital-change vintage selection ------------------------------
+#
+# irdsSttus reprints the whole since-listing history in every report, so one
+# real event is stored once per vintage. These cover the dedup rule and the two
+# candidate policies the vintage distance probe chooses between.
+
+
+def _two_annual_positions(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    prior_year: int,
+    prior_rcept: str,
+    current_year: int,
+    current_rcept: str,
+) -> None:
+    """1000 shares growing to 1100, so a single 100-share issuance reconciles."""
+    _insert_share_count(
+        con,
+        bsns_year=prior_year,
+        reprt_code="11011",
+        rcept_no=prior_rcept,
+        istc_totqy=1000,
+        now_to_isu=500,
+        now_to_dcrs=0,
+        stlm_dt=date(prior_year, 12, 31),
+    )
+    _insert_share_count(
+        con,
+        bsns_year=current_year,
+        reprt_code="11011",
+        rcept_no=current_rcept,
+        istc_totqy=1100,
+        now_to_isu=600,
+        now_to_dcrs=0,
+        stlm_dt=date(current_year, 12, 31),
+    )
+
+
+def test_same_event_in_two_vintages_is_counted_once() -> None:
+    con = _base_con()
+    _two_annual_positions(
+        con,
+        prior_year=2022,
+        prior_rcept="20230310000001",
+        current_year=2023,
+        current_rcept="20240310000002",
+    )
+    # The FY2023 report and the FY2024 report both list the same 2023 issuance.
+    for bsns_year, rcept_no in ((2023, "20240310000002"), (2024, "20250310000003")):
+        _insert_capital_change(
+            con,
+            bsns_year=bsns_year,
+            reprt_code="11011",
+            rcept_no=rcept_no,
+            isu_dcrs_de=date(2023, 6, 15),
+            isu_dcrs_stle="유상증자(일반공모)",
+            isu_dcrs_qy=100,
+        )
+    _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+    _register(con)
+
+    idx = {c: i for i, c in enumerate(_columns(con))}
+    row = _row(con, date(2024, 3, 15))
+    # Summing both copies would give 1000 + 200 != 1100 and NULL the feature.
+    assert row[idx["issuance_identity_ok"]] is True
+    assert row[idx["ev_net_share_issuance_yoy"]] == 100 / 1000
+
+
+def test_quarterly_placeholder_vintage_does_not_blank_the_event_list() -> None:
+    con = _base_con()
+    _two_annual_positions(
+        con,
+        prior_year=2022,
+        prior_rcept="20230310000001",
+        current_year=2023,
+        current_rcept="20240310000002",
+    )
+    _insert_capital_change(
+        con,
+        bsns_year=2023,
+        reprt_code="11011",
+        rcept_no="20240310000002",
+        isu_dcrs_de=date(2023, 6, 15),
+        isu_dcrs_stle="유상증자(일반공모)",
+        isu_dcrs_qy=100,
+    )
+    # Quarterly reports come back as a single '-' placeholder carrying no
+    # history. Newest-first selection must not pick one and see zero events.
+    con.execute(
+        "INSERT INTO dart_capital_change_raw VALUES "
+        "('00126380','005930',2024,'11013','20240515000004',NULL,'-','',NULL)"
+    )
+    _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+    _register(con)
+
+    idx = {c: i for i, c in enumerate(_columns(con))}
+    row = _row(con, date(2024, 3, 15))
+    assert row[idx["issuance_identity_ok"]] is True
+    assert row[idx["ev_net_share_issuance_yoy"]] == 100 / 1000
+
+
+def test_strict_pit_ignores_a_vintage_disclosed_after_the_position() -> None:
+    con = _base_con()
+    _two_annual_positions(
+        con,
+        prior_year=2021,
+        prior_rcept="20220310000001",
+        current_year=2022,
+        current_rcept="20230310000002",
+    )
+    # The 2022 issuance is only listed by the FY2023 report, filed 2024-03-10 --
+    # a year after the FY2022 position it would be used for.
+    _insert_capital_change(
+        con,
+        bsns_year=2023,
+        reprt_code="11011",
+        rcept_no="20240310000003",
+        isu_dcrs_de=date(2022, 6, 15),
+        isu_dcrs_stle="유상증자(일반공모)",
+        isu_dcrs_qy=100,
+    )
+    _insert_pit(con, trade_date=date(2023, 3, 15), market_cap=1_000_000_000)
+
+    _register(con, vintage_policy="latest_vintage")
+    idx = {c: i for i, c in enumerate(_columns(con))}
+    row = _row(con, date(2023, 3, 15))
+    assert row[idx["ev_net_share_issuance_yoy"]] == 100 / 1000
+
+    _register(con, vintage_policy="strict_pit")
+    row = _row(con, date(2023, 3, 15))
+    assert row[idx["issuance_identity_ok"]] is False
+    assert row[idx["ev_net_share_issuance_yoy"]] is None
+
+
+def test_strict_pit_reads_the_figure_the_position_could_actually_see() -> None:
+    con = _base_con()
+    _two_annual_positions(
+        con,
+        prior_year=2021,
+        prior_rcept="20220310000001",
+        current_year=2022,
+        current_rcept="20230310000002",
+    )
+    # Same event, quantity later corrected 100 -> 150 by the FY2023 report.
+    _insert_capital_change(
+        con,
+        bsns_year=2022,
+        reprt_code="11011",
+        rcept_no="20230310000002",
+        isu_dcrs_de=date(2022, 6, 15),
+        isu_dcrs_stle="유상증자(일반공모)",
+        isu_dcrs_qy=100,
+    )
+    _insert_capital_change(
+        con,
+        bsns_year=2023,
+        reprt_code="11011",
+        rcept_no="20240310000003",
+        isu_dcrs_de=date(2022, 6, 15),
+        isu_dcrs_stle="유상증자(일반공모)",
+        isu_dcrs_qy=150,
+    )
+    _insert_pit(con, trade_date=date(2023, 3, 15), market_cap=1_000_000_000)
+
+    # strict_pit reads the FY2022 report the position could see: 1000+100=1100.
+    _register(con, vintage_policy="strict_pit")
+    idx = {c: i for i, c in enumerate(_columns(con))}
+    row = _row(con, date(2023, 3, 15))
+    assert row[idx["issuance_identity_ok"]] is True
+    assert row[idx["ev_net_share_issuance_yoy"]] == 100 / 1000
+
+    # latest_vintage applies the later correction to the older share counts,
+    # so 1000+150 != 1100 and the identity guard blanks the feature.
+    _register(con, vintage_policy="latest_vintage")
+    row = _row(con, date(2023, 3, 15))
+    assert row[idx["issuance_identity_ok"]] is False
+    assert row[idx["ev_net_share_issuance_yoy"]] is None
+
+
+def test_unknown_vintage_policy_is_rejected() -> None:
+    with pytest.raises(ValueError, match="unknown vintage_policy"):
+        build_issuance_sql(vintage_policy="whatever")

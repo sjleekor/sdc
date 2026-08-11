@@ -55,11 +55,20 @@ Grade A 6개 중 `px_amihud_20d`/`px_near_52w_high`는 baseline 모델에 이미
 
 상세: `08_phase_b_implementation_log.md` §3(발행된 run 목록·블로커 체인), §4(남은 작업).
 
+## 4b. T2 진행 (2026-08-12 갱신)
+
+커밋·릴리즈는 끝났다(v0.9.2). prod 백필이 돌고 있다 — filings 11개 연도가 13시 전후 완료,
+이어서 capital vintage probe가 자동으로 시작한다. 상세는 `08` §4.1.1.
+
+백필 중에 새 이슈가 하나 확정됐다. `irdsSttus`가 누적 이력을 보고서마다 다시 주는데 마트가
+그걸 중복 합산해 `ev_net_share_issuance_yoy`가 전부 NULL이 된다. dedup 규칙과, latest-vintage
+대 strict PIT 중 무엇을 쓸지 정하는 측정 설계·판정 기준을 plan §4.4.1에 사전 고정했다.
+
 ## 5. 다음에 할 일 — 이 순서로
 
-1. **[크리티컬 패스]** Phase B 코드 커밋 → `sdc-release`로 릴리즈 → prod에서
-   `dart sync-filings` / `dart sync-share-info` 백필 → `raw-parquet-export-all.sh` →
-   `--phase B` → `--phase A` → `--phase AB` 재실행. 명령과 주의점은 `08` §4.1.
+1. **[크리티컬 패스]** ~~Phase B 코드 커밋 → 릴리즈~~ 완료 → prod 백필(진행 중) →
+   vintage probe 판정(`04_specific_plan_B.md` §4.4.1) → `raw-parquet-export-all.sh` →
+   `--phase B` → `--phase A` → `--phase AB` 재실행. 명령과 주의점은 `08` §4.1·§4.1.1.
 2. **데이터 없이도 가능한 코드 작업**: B-10 Stage 2(품질·커버리지 진단 parquet 7종),
    Stage 4(family 카드). Stage 3은 Phase A 공유 코드 내부를 건드려야 해 별도 계획이 필요하다.
    → `08` §4.3.

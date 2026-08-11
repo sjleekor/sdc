@@ -16,6 +16,11 @@
 발행됐다 — 발행물 목록과 지금 무엇이 막혀 있는지는 §3, 이어서 할 일은 §4를 보면 된다.
 Phase B 코드는 **아직 커밋되지 않았다**(전부 working tree 상태).
 
+2026-08-12 갱신: §4.1의 1번(커밋+릴리즈)은 끝났다 — `b006a19`·`0581912` 커밋 뒤 v0.9.0~v0.9.2를
+릴리즈했고 prod compose도 갱신됐다. 2번(prod 백필)이 진행 중이며, 그 과정에서 capital action
+list의 vintage 중복 문제가 드러나 plan §4.4.1이 계약 보강으로 추가됐다. 현재 상태와 대기 중인
+측정은 §4.1.1을 보면 된다.
+
 ## 1. 전체 상태 요약
 
 | PR | 대응 작업 패키지 | 상태 |
@@ -349,6 +354,54 @@ Phase B 코드가 전부 uncommitted (56개 변경/신규 파일, 마지막 커�
    `snapshot_date=2026-08-09` 기준이다.
 6. **Phase AB 재실행** — 그래야 `q_fdr_global_ab`·`screen_pass`·`evidence_grade`가 처음으로
    진짜 값을 갖는다. 지금 발행된 AB run은 B가 0개인 상태의 껍데기다.
+
+### 4.1.1 진행 상황과 vintage distance probe (2026-08-12)
+
+**끝난 것.** 1번 커밋+릴리즈 완료(v0.9.2). `dart_share_count_raw`는 2015년부터 연도별
+1,726~2,238 ticker로 이미 차 있다 — 즉 filing position 자체는 전 구간에 존재한다.
+
+**돌고 있는 것.**
+
+| 작업 | 내용 | 상태 |
+|---|---|---|
+| A2 | `phase_b_backfill.sh filings "2024 … 2015 2026"` (11개 연도, `dart_filing_receipt_raw`) | 2026-08-12 06:33 시작, 연도당 약 35분, 완료 예상 13시 전후 |
+| capital probe | `phase_b_backfill.sh capital "2024 2020 2016"`, `SDC_PHASE_B_REPRT_CODES=11011` | `opendart` lock 대기 중(`SDC_LOCK_WAIT_SECONDS=32400`). A2 종료 직후 자동 시작, 약 1시간 10분 |
+
+두 작업 모두 `sdc_with_source_lock opendart`를 잡으므로 서로 겹치지 않는다. 데일리 OpenDART
+체인은 04:00 Corp Sync에서 시작해 chain으로 이어지며 lock을 잡지 않으니, 백필이 다음 날
+04:00을 넘기면 데일리 이벤트를 잠시 꺼야 한다. 키 9개(일 18만 요청)라 A2(약 32k) +
+probe(약 7.8k)는 한도에 여유가 있다.
+
+**A3는 축소됐다.** 원래 계획한 "11개 연도 × 4개 보고서" capital 수집은 커버리지를 늘리지
+않는다. 최신 연간보고서 하나가 상장 이후 전체 이력을 주기 때문이다(표본 19종목 확인:
+`000100` 139건 1962~2024, `000050` 5건 1975~2014). 남은 것은 커버리지가 아니라 **어느 vintage를
+쓸 것인가**이고, 그건 plan §4.4.1이 정의한 probe로 판정한다.
+
+**probe가 답할 질문과 판정 기준**은 plan §4.4.1 "vintage distance probe"에 사전 고정돼 있다.
+여기(구현 로그)에는 실행 결과만 기록한다 — 거리 1·5·9년별 feature-changing 불일치율,
+(a)/(b) identity 통과율, 그리고 그 값이 기준표의 어느 칸에 떨어졌는지.
+
+**실행.** 수집이 끝나고 raw export로 새 snapshot이 나오면 아래 한 줄이면 된다. 기준표 판정까지
+스크립트가 적용해 `research/output/vintage_probe/`에 md·json으로 남긴다.
+
+```bash
+uv run python -m research.analysis.capital_change_vintage_probe --snapshot-date YYYY-MM-DD
+```
+
+구현은 `research/etl/vintage_probe.py`(지표 SQL)와
+`research/analysis/capital_change_vintage_probe.py`(러너·판정)에 있다. 지표 ①은 이벤트를 1:1로
+매칭하지 않고 **창별 분류합계**를 비교한다 — 창 안에서 움직인 날짜는 feature를 안 바꾸므로
+일치로, 경계를 넘은 날짜는 두 창이 달라져 불일치로 잡힌다. 정정된 사건을 어떻게 "같은 사건"으로
+볼지 판단할 필요가 없어진다.
+
+두 vintage가 다 있는 `000040` 하나로 도구를 검증했다(거리 1년): 창 9개 중 불일치 0개,
+행 수준 35개 중 1개 불일치(2021-01-31 → 2021-01-13 재기재). 날짜 정정이 창 합계를 안 바꾼다는
+것이 실제로 확인된다. identity 통과율은 latest 5/10, strict 3/10이었다 — 표본이 한 종목이라
+수치 자체는 의미가 없지만, 통과율이 생각보다 낮을 수 있다는 신호다.
+
+측정 결과가 나오기 전에는 `event_scan.build_issuance_sql`의 `capital_change_classified`를
+고치지 않는다. dedup 규칙 자체(§4.4.1 1~3항)는 확정됐으므로 그 부분 구현은 선행해도 되고,
+(a)/(b) 분기만 측정 뒤에 붙인다.
 
 ### 4.2 B-9 나머지
 - evidence grade의 "source/segment 비치명 경고" — B-PR12 "정직하게 남긴 제약" 참고. mapping_fallback_ratio/revision_ratio/segment 진단이 생기면 `compute_phase_b_evidence_grade`의 "B" 조건에 추가해야 함.
