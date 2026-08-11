@@ -407,10 +407,35 @@ uv run python -m research.analysis.capital_change_vintage_probe --snapshot-date 
 - evidence grade의 "source/segment 비치명 경고" — B-PR12 "정직하게 남긴 제약" 참고. mapping_fallback_ratio/revision_ratio/segment 진단이 생기면 `compute_phase_b_evidence_grade`의 "B" 조건에 추가해야 함.
 
 ### 4.3 B-10 나머지 (Stage 2~5)
-- **Stage 2** — `filing_receipt_quality.parquet`/`receipt_value_pairing_quality.parquet`/
-  `capital_change_quality.parquet`/`stock_metric_vintage_quality.parquet`/
-  `quarterly_metric_quality.parquet`/`feature_coverage.parquet`/`event_coverage.parquet`:
-  raw/mart 위에 새 SQL 진단(row 수, null 비율, pairing 상태 등)이 필요 — 신규 로직.
+- **Stage 2** — 7종 중 2종 완료(2026-08-12). 나머지
+  `receipt_value_pairing_quality.parquet`/`stock_metric_vintage_quality.parquet`/
+  `quarterly_metric_quality.parquet`/`feature_coverage.parquet`/`event_coverage.parquet`는
+  아직 신규 로직이 필요하다. 완료분은 `research/etl/phase_b_quality.py`에 있다.
+
+  `filing_receipt_quality` — 접수연도 단위. 수집 커버리지(연도별 receipt·법인 수), 정정
+  구분 두 가지(이 접수가 정정본인지 = report_nm의 `[기재정정]` 계열 마커, 나중에 정정된
+  접수인지 = list.json `rm`의 `정` 플래그), 그리고 **정기보고서이면서 정정본인 건수**를
+  낸다. 마지막 값이 B-1 6항의 receipt-targeted XBRL 백필 규모다. 부분 수집 연도는 행이
+  0으로 채워지지 않고 법인 수가 적게 나오는 것으로 드러난다 — 없는 연도는 아예 행이 없다.
+
+  `capital_change_quality` — (vintage 연도, 보고서 코드) 단위. placeholder와 실이벤트 분리,
+  미분류 `isu_dcrs_stle` 비율, economic/mechanical 건수. annual vintage 행에는 §4.4.1 probe의
+  창 단위 불일치(`compared_windows`/`feature_changing_windows`/`feature_changing_rate`)를
+  붙여, vintage 중복이 일회성 측정이 아니라 상시 산출물이 되게 했다. 비교 대상이 없는
+  최신 vintage와 분기보고서 행은 0이 아니라 NULL이다.
+
+  실데이터 확인(2026-08-12, A2 진행 중 상태):
+
+  | 접수연도 | receipts | 법인 | 정기보고서 | 정기보고서 정정 | 정정본 비율 |
+  |---|---|---|---|---|---|
+  | 2022 | 103,629 | 2,507 | 10,425 | 1,406 | 0.137 |
+  | 2023 | 108,048 | 2,564 | 10,525 | 1,175 | 0.129 |
+  | 2024 | 114,812 | 2,620 | 11,002 | 1,162 | 0.140 |
+  | 2025 | 121,700 | 2,653 | 11,588 | 1,298 | 0.140 |
+
+  **정기보고서 정정이 연 1,150~1,400건**이다. 2022~2025 4개 연도 합이 5,041건으로, B-1이
+  capacity 참고값으로 적어둔 "약 5천 건"과 사실상 일치한다. 이제 추정이 아니라 측정값이다.
+  2021년은 수집 중이라(법인 1,203/약 2,650) 값이 더 올라간다.
 - **Stage 3** — `daily_ic.parquet`/`cohort_ic.parquet`: `scan_cell`/`scan_event_cohort_cell`이
   지금 요약 통계만 반환하고 날짜별/코호트별 원시 IC 시퀀스는 버리므로, Phase A와 공유하는
   코드(`per_date_market_rank_ic` 등)의 내부를 건드려야 함 — 더 침습적, 별도 계획 필요.
