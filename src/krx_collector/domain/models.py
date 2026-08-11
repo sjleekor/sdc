@@ -228,6 +228,58 @@ class DartShareholderReturnLine:
 
 
 @dataclass(frozen=True, slots=True)
+class DartFilingReceiptLine:
+    """Single raw disclosure-receipt row from OpenDART list.json (공시검색)."""
+
+    corp_code: str
+    ticker: str
+    corp_name: str
+    stock_code: str
+    corp_cls: str
+    report_nm: str
+    rcept_no: str
+    flr_nm: str
+    rcept_dt: date | None
+    rm: str
+    source: Source
+    fetched_at: datetime
+    raw_payload: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class DartCapitalChangeLine:
+    """Single raw row from OpenDART irdsSttus (증자(감자)현황)."""
+
+    corp_code: str
+    ticker: str
+    bsns_year: int
+    reprt_code: str
+    rcept_no: str
+    corp_cls: str
+    isu_dcrs_de: date | None
+    isu_dcrs_stle: str
+    isu_dcrs_stock_knd: str
+    isu_dcrs_qy: int | None
+    isu_dcrs_mstvdv_fval_amount: Decimal | None
+    isu_dcrs_mstvdv_fval_amount2: Decimal | None
+    stlm_dt: date | None
+    source: Source
+    fetched_at: datetime
+    raw_payload: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class XbrlBackfillTarget:
+    """One explicit (corp, filing, receipt) target for a receipt-targeted XBRL refetch."""
+
+    ticker: str
+    corp_code: str
+    bsns_year: int
+    reprt_code: str
+    rcept_no: str
+
+
+@dataclass(frozen=True, slots=True)
 class DartXbrlDocument:
     """Metadata for one downloaded OpenDART XBRL ZIP document."""
 
@@ -596,6 +648,41 @@ class DartShareholderReturnResult:
 
 
 @dataclass(slots=True)
+class DartFilingReceiptResult:
+    """Result of fetching one OpenDART disclosure-receipt window (all pages)."""
+
+    corp_code: str = ""
+    ticker: str = ""
+    bgn_de: date | None = None
+    end_de: date | None = None
+    records: list[DartFilingReceiptLine] = field(default_factory=list)
+    total_count: int = 0
+    no_data: bool = False
+    error: str | None = None
+    status_code: str | None = None
+    retryable: bool = False
+    retry_after_seconds: float | None = None
+    exhaustion_reason: str | None = None
+
+
+@dataclass(slots=True)
+class DartCapitalChangeResult:
+    """Result of fetching one OpenDART capital-change (irdsSttus) payload."""
+
+    corp_code: str = ""
+    ticker: str = ""
+    bsns_year: int = 0
+    reprt_code: str = ""
+    records: list[DartCapitalChangeLine] = field(default_factory=list)
+    no_data: bool = False
+    error: str | None = None
+    status_code: str | None = None
+    retryable: bool = False
+    retry_after_seconds: float | None = None
+    exhaustion_reason: str | None = None
+
+
+@dataclass(slots=True)
 class DartXbrlResult:
     """Result of fetching and parsing one OpenDART XBRL document."""
 
@@ -710,15 +797,31 @@ class DartFinancialSyncResult:
 
 @dataclass(slots=True)
 class DartShareInfoSyncResult:
-    """Outcome of syncing share-count and shareholder-return raw rows."""
+    """Outcome of syncing share-count, shareholder-return, and capital-change raw rows."""
 
     share_count_upsert: UpsertResult = field(default_factory=UpsertResult)
     shareholder_return_upsert: UpsertResult = field(default_factory=UpsertResult)
+    capital_change_upsert: UpsertResult = field(default_factory=UpsertResult)
     targets_processed: int = 0
     requests_attempted: int = 0
     requests_skipped: int = 0
     share_count_rows_upserted: int = 0
     shareholder_return_rows_upserted: int = 0
+    capital_change_rows_upserted: int = 0
+    no_data_requests: int = 0
+    errors: dict[str, str] = field(default_factory=dict)
+    opendart_exhaustion_reason: str | None = None
+
+
+@dataclass(slots=True)
+class DartFilingReceiptSyncResult:
+    """Outcome of syncing OpenDART disclosure-receipt history raw rows."""
+
+    upsert: UpsertResult = field(default_factory=UpsertResult)
+    targets_processed: int = 0
+    requests_attempted: int = 0
+    requests_skipped: int = 0
+    rows_upserted: int = 0
     no_data_requests: int = 0
     errors: dict[str, str] = field(default_factory=dict)
     opendart_exhaustion_reason: str | None = None

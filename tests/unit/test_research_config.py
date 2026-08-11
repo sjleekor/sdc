@@ -80,7 +80,7 @@ def test_table_glob_unknown_raises() -> None:
 def test_table_sets_disjoint_and_expected_counts() -> None:
     assert set(RAW_TABLES).isdisjoint(CANONICAL_TABLES)
     assert set(RAW_TABLES).isdisjoint(CONFIG_TABLES)
-    assert len(RAW_TABLES) == 12
+    assert len(RAW_TABLES) == 14
     assert CONFIG_TABLES == ("common_feature_series",)
     assert len(CANONICAL_TABLES) == 5
 

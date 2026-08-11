@@ -20,7 +20,9 @@ from krx_collector.domain.models import (
     CommonFeatureObservation,
     CommonFeatureSeries,
     DailyBar,
+    DartCapitalChangeLine,
     DartCorp,
+    DartFilingReceiptLine,
     DartFinancialStatementLine,
     DartShareCountLine,
     DartShareholderReturnLine,
@@ -383,6 +385,52 @@ class PostgresStorage:
             with conn.cursor() as cur:
                 cur.execute(sql, tuple(params))
                 return {(row[0], row[1], row[2], row[3]) for row in cur.fetchall()}
+
+    def get_existing_dart_capital_change_keys(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int, str]]:
+        """Return (corp_code, bsns_year, reprt_code) tuples already present."""
+        if not bsns_years or not reprt_codes:
+            return set()
+        sql = """
+            SELECT DISTINCT corp_code, bsns_year, reprt_code
+            FROM dart_capital_change_raw
+            WHERE bsns_year = ANY(%s)
+              AND reprt_code = ANY(%s)
+        """
+        params: list[object] = [bsns_years, reprt_codes]
+        if corp_codes:
+            sql += " AND corp_code = ANY(%s)"
+            params.append(corp_codes)
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, tuple(params))
+                return {(row[0], row[1], row[2]) for row in cur.fetchall()}
+
+    def get_existing_dart_filing_receipt_years(
+        self,
+        years: list[int],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int]]:
+        """Return (corp_code, year) pairs with at least one receipt already stored."""
+        if not years:
+            return set()
+        sql = """
+            SELECT DISTINCT corp_code, EXTRACT(YEAR FROM rcept_dt)::int AS year
+            FROM dart_filing_receipt_raw
+            WHERE EXTRACT(YEAR FROM rcept_dt)::int = ANY(%s)
+        """
+        params: list[object] = [years]
+        if corp_codes:
+            sql += " AND corp_code = ANY(%s)"
+            params.append(corp_codes)
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, tuple(params))
+                return {(row[0], row[1]) for row in cur.fetchall()}
 
     def get_existing_dart_xbrl_document_keys(
         self,
@@ -779,6 +827,166 @@ class PostgresStorage:
                         value_text = EXCLUDED.value_text,
                         unit = EXCLUDED.unit,
                         stlm_dt = EXCLUDED.stlm_dt,
+                        source = EXCLUDED.source,
+                        fetched_at = EXCLUDED.fetched_at,
+                        raw_payload = EXCLUDED.raw_payload
+                    """,
+                    args,
+                    page_size=1000,
+                )
+                result.updated = cur.rowcount
+
+        return result
+
+    def upsert_dart_capital_change_raw(
+        self,
+        records: list[DartCapitalChangeLine],
+    ) -> UpsertResult:
+        """Upsert OpenDART capital-change (irdsSttus) raw rows."""
+        if not records:
+            return UpsertResult()
+
+        result = UpsertResult()
+        deduped_records = {
+            (
+                record.corp_code,
+                record.bsns_year,
+                record.reprt_code,
+                record.rcept_no,
+                record.isu_dcrs_de,
+                record.isu_dcrs_stle,
+                record.isu_dcrs_stock_knd,
+            ): record
+            for record in records
+        }
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        record.corp_code,
+                        record.ticker,
+                        record.bsns_year,
+                        record.reprt_code,
+                        record.rcept_no,
+                        record.corp_cls,
+                        record.isu_dcrs_de,
+                        record.isu_dcrs_stle,
+                        record.isu_dcrs_stock_knd,
+                        record.isu_dcrs_qy,
+                        record.isu_dcrs_mstvdv_fval_amount,
+                        record.isu_dcrs_mstvdv_fval_amount2,
+                        record.stlm_dt,
+                        record.source.value,
+                        record.fetched_at,
+                        psycopg2.extras.Json(record.raw_payload),
+                    )
+                    for record in deduped_records.values()
+                ]
+
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO dart_capital_change_raw (
+                        corp_code,
+                        ticker,
+                        bsns_year,
+                        reprt_code,
+                        rcept_no,
+                        corp_cls,
+                        isu_dcrs_de,
+                        isu_dcrs_stle,
+                        isu_dcrs_stock_knd,
+                        isu_dcrs_qy,
+                        isu_dcrs_mstvdv_fval_amount,
+                        isu_dcrs_mstvdv_fval_amount2,
+                        stlm_dt,
+                        source,
+                        fetched_at,
+                        raw_payload
+                    )
+                    VALUES %s
+                    ON CONFLICT (
+                        corp_code, bsns_year, reprt_code, rcept_no,
+                        isu_dcrs_de, isu_dcrs_stle, isu_dcrs_stock_knd
+                    )
+                    DO UPDATE SET
+                        ticker = EXCLUDED.ticker,
+                        corp_cls = EXCLUDED.corp_cls,
+                        isu_dcrs_qy = EXCLUDED.isu_dcrs_qy,
+                        isu_dcrs_mstvdv_fval_amount = EXCLUDED.isu_dcrs_mstvdv_fval_amount,
+                        isu_dcrs_mstvdv_fval_amount2 = EXCLUDED.isu_dcrs_mstvdv_fval_amount2,
+                        stlm_dt = EXCLUDED.stlm_dt,
+                        source = EXCLUDED.source,
+                        fetched_at = EXCLUDED.fetched_at,
+                        raw_payload = EXCLUDED.raw_payload
+                    """,
+                    args,
+                    page_size=1000,
+                )
+                result.updated = cur.rowcount
+
+        return result
+
+    def upsert_dart_filing_receipt_raw(
+        self,
+        records: list[DartFilingReceiptLine],
+    ) -> UpsertResult:
+        """Upsert OpenDART disclosure-receipt raw rows."""
+        if not records:
+            return UpsertResult()
+
+        result = UpsertResult()
+        deduped_records = {(record.corp_code, record.rcept_no): record for record in records}
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        record.corp_code,
+                        record.ticker,
+                        record.corp_name,
+                        record.stock_code,
+                        record.corp_cls,
+                        record.report_nm,
+                        record.rcept_no,
+                        record.flr_nm,
+                        record.rcept_dt,
+                        record.rm,
+                        record.source.value,
+                        record.fetched_at,
+                        psycopg2.extras.Json(record.raw_payload),
+                    )
+                    for record in deduped_records.values()
+                ]
+
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO dart_filing_receipt_raw (
+                        corp_code,
+                        ticker,
+                        corp_name,
+                        stock_code,
+                        corp_cls,
+                        report_nm,
+                        rcept_no,
+                        flr_nm,
+                        rcept_dt,
+                        rm,
+                        source,
+                        fetched_at,
+                        raw_payload
+                    )
+                    VALUES %s
+                    ON CONFLICT (corp_code, rcept_no)
+                    DO UPDATE SET
+                        ticker = EXCLUDED.ticker,
+                        corp_name = EXCLUDED.corp_name,
+                        stock_code = EXCLUDED.stock_code,
+                        corp_cls = EXCLUDED.corp_cls,
+                        report_nm = EXCLUDED.report_nm,
+                        flr_nm = EXCLUDED.flr_nm,
+                        rcept_dt = EXCLUDED.rcept_dt,
+                        rm = EXCLUDED.rm,
                         source = EXCLUDED.source,
                         fetched_at = EXCLUDED.fetched_at,
                         raw_payload = EXCLUDED.raw_payload

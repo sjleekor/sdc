@@ -19,7 +19,9 @@ from krx_collector.domain.models import (
     CommonFeatureObservation,
     CommonFeatureSeries,
     DailyBar,
+    DartCapitalChangeLine,
     DartCorp,
+    DartFilingReceiptLine,
     DartFinancialStatementLine,
     DartShareCountLine,
     DartShareholderReturnLine,
@@ -165,6 +167,41 @@ class Storage(Protocol):
         records: list[DartShareholderReturnLine],
     ) -> UpsertResult:
         """Upsert OpenDART dividend / treasury-stock raw rows."""
+        ...
+
+    def get_existing_dart_capital_change_keys(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int, str]]:
+        """Return (corp_code, bsns_year, reprt_code) tuples already present."""
+        ...
+
+    def upsert_dart_capital_change_raw(
+        self,
+        records: list[DartCapitalChangeLine],
+    ) -> UpsertResult:
+        """Upsert OpenDART capital-change (irdsSttus) raw rows."""
+        ...
+
+    def get_existing_dart_filing_receipt_years(
+        self,
+        years: list[int],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int]]:
+        """Return (corp_code, year) pairs with at least one receipt already stored.
+
+        ``year`` is the calendar year of ``rcept_dt``, used as a coarse
+        completion proxy for one fetch window (see ``sync_dart_filings``).
+        """
+        ...
+
+    def upsert_dart_filing_receipt_raw(
+        self,
+        records: list[DartFilingReceiptLine],
+    ) -> UpsertResult:
+        """Upsert OpenDART disclosure-receipt raw rows."""
         ...
 
     def upsert_dart_xbrl_documents(

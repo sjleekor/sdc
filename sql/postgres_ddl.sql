@@ -524,6 +524,64 @@ ALTER TABLE dart_xbrl_fact_raw
 ALTER TABLE dart_xbrl_fact_raw
     ADD COLUMN IF NOT EXISTS raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb;
 
+-- 13) dart_filing_receipt_raw ─ disclosure receipt history from list.json (공시검색)
+CREATE TABLE IF NOT EXISTS dart_filing_receipt_raw (
+    raw_id               BIGSERIAL   PRIMARY KEY,
+    corp_code            TEXT        NOT NULL,
+    ticker               TEXT,
+    corp_name            TEXT        NOT NULL DEFAULT '',
+    stock_code           TEXT        NOT NULL DEFAULT '',
+    corp_cls             TEXT        NOT NULL DEFAULT '',
+    report_nm            TEXT        NOT NULL DEFAULT '',
+    rcept_no             TEXT        NOT NULL,
+    flr_nm               TEXT        NOT NULL DEFAULT '',
+    rcept_dt             DATE,
+    rm                   TEXT        NOT NULL DEFAULT '',
+    source               TEXT        NOT NULL,
+    fetched_at           TIMESTAMPTZ NOT NULL,
+    raw_payload          JSONB       NOT NULL,
+    CONSTRAINT uq_dart_filing_receipt_raw
+        UNIQUE (corp_code, rcept_no)
+);
+
+CREATE INDEX IF NOT EXISTS ix_dart_filing_receipt_raw_lookup
+    ON dart_filing_receipt_raw (ticker, rcept_dt);
+
+CREATE INDEX IF NOT EXISTS ix_dart_filing_receipt_raw_sync_cursor
+    ON dart_filing_receipt_raw (fetched_at, raw_id);
+
+-- 14) dart_capital_change_raw ─ issuance/decrease disclosures from irdsSttus (증자(감자)현황)
+CREATE TABLE IF NOT EXISTS dart_capital_change_raw (
+    raw_id                        BIGSERIAL   PRIMARY KEY,
+    corp_code                     TEXT        NOT NULL,
+    ticker                        TEXT,
+    bsns_year                     INT         NOT NULL,
+    reprt_code                    TEXT        NOT NULL,
+    rcept_no                      TEXT        NOT NULL DEFAULT '',
+    corp_cls                      TEXT        NOT NULL DEFAULT '',
+    isu_dcrs_de                   DATE,
+    isu_dcrs_stle                 TEXT        NOT NULL DEFAULT '',
+    isu_dcrs_stock_knd            TEXT        NOT NULL DEFAULT '',
+    isu_dcrs_qy                   BIGINT,
+    isu_dcrs_mstvdv_fval_amount   NUMERIC(30, 4),
+    isu_dcrs_mstvdv_fval_amount2  NUMERIC(30, 4),
+    stlm_dt                       DATE,
+    source                        TEXT        NOT NULL,
+    fetched_at                    TIMESTAMPTZ NOT NULL,
+    raw_payload                   JSONB       NOT NULL,
+    CONSTRAINT uq_dart_capital_change_raw
+        UNIQUE (
+            corp_code, bsns_year, reprt_code, rcept_no,
+            isu_dcrs_de, isu_dcrs_stle, isu_dcrs_stock_knd
+        )
+);
+
+CREATE INDEX IF NOT EXISTS ix_dart_capital_change_raw_lookup
+    ON dart_capital_change_raw (ticker, bsns_year, reprt_code);
+
+CREATE INDEX IF NOT EXISTS ix_dart_capital_change_raw_sync_cursor
+    ON dart_capital_change_raw (fetched_at, raw_id);
+
 -- 16) krx_security_flow_raw ─ daily investor/short-selling/borrow flow metrics
 CREATE TABLE IF NOT EXISTS krx_security_flow_raw (
     raw_id               BIGSERIAL   PRIMARY KEY,

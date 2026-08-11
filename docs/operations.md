@@ -149,9 +149,22 @@ uv run krx-collector dart sync-xbrl --tickers 005930 --bsns-years 2025 --reprt-c
 
 # 5) 수급 raw 적재 (KRX MDC 직접 호출)
 uv run krx-collector flows sync --tickers 005930 --start 2026-04-17 --end 2026-04-17
+
+# 6) 공시 접수 이력 적재 (Phase B: 원공시/정정 관계, SUE original-event source)
+uv run krx-collector dart sync-filings --tickers 005930 --years 2025
+
+# 7) 증자(감자) 현황은 sync-share-info에 포함되어 함께 수집됨 (irdsSttus)
 ```
 
 재무 metric 정규화와 common daily fact 생성은 PostgreSQL CLI가 아니라 아래 "Parquet compute 파이프라인"에서 DuckDB 마트로 실행합니다.
+
+`dart sync-filings`는 아직 `dart-backfill-all-years.sh`/일일 wrapper에 포함되지 않은 신규
+커맨드입니다 — 현재는 필요할 때 수동으로 실행합니다. `dart sync-share-info`는 기존 주식수/배당/
+자사주 raw와 함께 `dart_capital_change_raw`(증자·감자 현황)도 같은 실행에서 수집합니다.
+
+원공시 receipt를 지정해 XBRL을 다시 받아야 할 때(예: 기존 raw가 정정본만 captured한 경우)는
+`dart backfill-xbrl-receipts --targets-file <jsonl>`을 사용합니다. 어떤 receipt가 백필 대상인지
+찾는 것은 이 커맨드의 범위가 아니며 `dart_filing_receipt_raw` 위에서 별도로 분석해야 합니다.
 
 ### OpenDART 전체 사업연도 백필
 

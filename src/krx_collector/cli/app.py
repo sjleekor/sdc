@@ -370,6 +370,7 @@ def _dart_share_info_actual_attempt_estimate(
     if force:
         existing_share_count_keys: set[tuple[str, int, str]] = set()
         existing_return_keys: set[tuple[str, int, str, str]] = set()
+        existing_capital_change_keys: set[tuple[str, int, str]] = set()
         effective_skip_keys: set[str] = set()
     else:
         bsns_years = sorted({year for year, _ in allowed_pairs})
@@ -381,6 +382,11 @@ def _dart_share_info_actual_attempt_estimate(
             corp_codes=corp_codes,
         )
         existing_return_keys = storage.get_existing_dart_shareholder_return_keys(
+            bsns_years=bsns_years,
+            reprt_codes=reprt_codes,
+            corp_codes=corp_codes,
+        )
+        existing_capital_change_keys = storage.get_existing_dart_capital_change_keys(
             bsns_years=bsns_years,
             reprt_codes=reprt_codes,
             corp_codes=corp_codes,
@@ -405,6 +411,11 @@ def _dart_share_info_actual_attempt_estimate(
                 (corp.corp_code, bsns_year, reprt_code, "treasury_stock")
                 not in existing_return_keys
                 and f"{request_prefix}:treasury_stock" not in effective_skip_keys
+            ):
+                attempts += 1
+            if (
+                (corp.corp_code, bsns_year, reprt_code) not in existing_capital_change_keys
+                and f"{request_prefix}:capital_change" not in effective_skip_keys
             ):
                 attempts += 1
     return attempts
@@ -674,7 +685,7 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
             storage,
             run_type=RunType.DART_SHARE_INFO_SYNC,
             active_corp_count=active_count,
-            requests_per_corp_target=3,
+            requests_per_corp_target=4,
             lookback_years=args.lookback_years,
             reprt_codes=reprt_codes,
             negative_cache_ttl_days=args.negative_cache_ttl_days,
@@ -749,6 +760,7 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
     result = sync_dart_share_info(
         share_count_provider=provider,
         shareholder_return_provider=provider,
+        capital_change_provider=provider,
         storage=storage,
         bsns_years=bsns_years,
         reprt_codes=reprt_codes,
@@ -770,6 +782,7 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
     print(f"   - Requests skipped: {result.requests_skipped}")
     print(f"   - Share count rows upserted: {result.share_count_rows_upserted}")
     print(f"   - Shareholder return rows upserted: {result.shareholder_return_rows_upserted}")
+    print(f"   - Capital change rows upserted: {result.capital_change_rows_upserted}")
     print(f"   - No-data requests: {result.no_data_requests}")
     if result.errors:
         for request_key, error in list(result.errors.items())[:10]:
@@ -916,6 +929,133 @@ def _handle_dart_sync_xbrl(args: argparse.Namespace) -> None:
         for request_key, error in list(result.errors.items())[:10]:
             print(f"   - Error {request_key}: {error}")
     _exit_if_opendart_key_exhausted(result, "OpenDART XBRL sync")
+
+
+def _handle_dart_sync_filings(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector dart sync-filings``."""
+    settings = get_settings()
+    years = [int(value.strip()) for value in args.years.split(",") if value.strip()]
+    tickers = [value.strip() for value in args.tickers.split(",")] if args.tickers else None
+
+    print(
+        f"→ dart sync-filings: years={years}, tickers={tickers}, "
+        f"rate_limit={args.rate_limit_seconds}"
+    )
+
+    from krx_collector.adapters.opendart_filings.provider import OpenDartFilingReceiptProvider
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.sync_dart_filings import sync_dart_filings
+
+    try:
+        request_executor = _build_opendart_request_executor()
+    except Exception as exc:
+        print(f"❌ OpenDART filing receipt sync failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    provider = OpenDartFilingReceiptProvider(request_executor=request_executor)
+    storage = PostgresStorage(settings.db_dsn)
+    result = sync_dart_filings(
+        filing_receipt_provider=provider,
+        storage=storage,
+        years=years,
+        tickers=tickers,
+        rate_limit_seconds=args.rate_limit_seconds,
+        force=args.force,
+    )
+
+    if result.errors:
+        print(
+            f"⚠ Filing receipt sync completed with {len(result.errors)} errors.",
+            file=sys.stderr,
+        )
+    else:
+        print("✅ OpenDART filing receipt sync completed.")
+
+    print(f"   - Targets processed: {result.targets_processed}")
+    print(f"   - Requests attempted: {result.requests_attempted}")
+    print(f"   - Requests skipped: {result.requests_skipped}")
+    print(f"   - Rows upserted: {result.rows_upserted}")
+    print(f"   - No-data requests: {result.no_data_requests}")
+    if result.errors:
+        for request_key, error in list(result.errors.items())[:10]:
+            print(f"   - Error {request_key}: {error}")
+    _exit_if_opendart_key_exhausted(result, "OpenDART filing receipt sync")
+
+
+def _handle_dart_backfill_xbrl_receipts(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector dart backfill-xbrl-receipts``.
+
+    Reads explicit targets from a JSON-lines file — each line an object with
+    ``ticker``, ``corp_code``, ``bsns_year``, ``reprt_code``, ``rcept_no`` —
+    and fetches XBRL for exactly those receipts. Deciding *which* receipts
+    need backfilling (e.g. an original filing not yet captured) is a
+    downstream analysis over ``dart_filing_receipt_raw`` and is not done
+    here; this command only performs the fetch once targets are known.
+    """
+    import json
+
+    settings = get_settings()
+    targets_path = Path(args.targets_file)
+    targets: list[object] = []
+
+    from krx_collector.domain.models import XbrlBackfillTarget
+
+    with targets_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            targets.append(
+                XbrlBackfillTarget(
+                    ticker=str(row["ticker"]),
+                    corp_code=str(row["corp_code"]),
+                    bsns_year=int(row["bsns_year"]),
+                    reprt_code=str(row["reprt_code"]),
+                    rcept_no=str(row["rcept_no"]),
+                )
+            )
+
+    print(f"→ dart backfill-xbrl-receipts: targets={len(targets)} file={targets_path}")
+
+    from krx_collector.adapters.opendart_xbrl.provider import OpenDartXbrlProvider
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.sync_dart_xbrl import sync_dart_xbrl_receipt_targeted
+
+    try:
+        request_executor = _build_opendart_request_executor()
+    except Exception as exc:
+        print(f"❌ OpenDART XBRL receipt backfill failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    provider = OpenDartXbrlProvider(request_executor=request_executor)
+    storage = PostgresStorage(settings.db_dsn)
+    result = sync_dart_xbrl_receipt_targeted(
+        provider=provider,
+        storage=storage,
+        targets=targets,
+        rate_limit_seconds=args.rate_limit_seconds,
+        force=args.force,
+    )
+
+    if result.errors:
+        print(
+            f"⚠ XBRL receipt backfill completed with {len(result.errors)} errors.",
+            file=sys.stderr,
+        )
+    else:
+        print("✅ OpenDART XBRL receipt backfill completed.")
+
+    print(f"   - Targets processed: {result.targets_processed}")
+    print(f"   - Requests attempted: {result.requests_attempted}")
+    print(f"   - Requests skipped: {result.requests_skipped}")
+    print(f"   - Documents upserted: {result.documents_upserted}")
+    print(f"   - Facts upserted: {result.facts_upserted}")
+    print(f"   - No-data requests: {result.no_data_requests}")
+    if result.errors:
+        for request_key, error in list(result.errors.items())[:10]:
+            print(f"   - Error {request_key}: {error}")
+    _exit_if_opendart_key_exhausted(result, "OpenDART XBRL receipt backfill")
 
 
 def _handle_common_seed_catalog(args: argparse.Namespace) -> None:
@@ -2129,6 +2269,58 @@ def build_parser() -> argparse.ArgumentParser:
         help="Days to skip request keys that recently returned no-data.",
     )
     dart_sync_xbrl.set_defaults(handler=_handle_dart_sync_xbrl)
+
+    dart_sync_filings = dart_sub.add_parser(
+        "sync-filings",
+        help="Download OpenDART disclosure-receipt history (공시검색).",
+    )
+    dart_sync_filings.add_argument(
+        "--years",
+        default=str(date.today().year),
+        help="Comma-separated calendar years (default: current year).",
+    )
+    dart_sync_filings.add_argument(
+        "--tickers",
+        default=None,
+        help="Optional comma-separated ticker allowlist.",
+    )
+    dart_sync_filings.add_argument(
+        "--rate-limit-seconds",
+        type=float,
+        default=0.2,
+        help="Seconds between OpenDART requests (default: 0.2).",
+    )
+    dart_sync_filings.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-download even when receipts already exist for a (corp, year) window.",
+    )
+    dart_sync_filings.set_defaults(handler=_handle_dart_sync_filings)
+
+    dart_backfill_xbrl_receipts = dart_sub.add_parser(
+        "backfill-xbrl-receipts",
+        help="Fetch XBRL for an explicit list of (corp, filing, receipt) targets.",
+    )
+    dart_backfill_xbrl_receipts.add_argument(
+        "--targets-file",
+        required=True,
+        help=(
+            "Path to a JSON-lines file of targets, each with ticker, corp_code, "
+            "bsns_year, reprt_code, rcept_no."
+        ),
+    )
+    dart_backfill_xbrl_receipts.add_argument(
+        "--rate-limit-seconds",
+        type=float,
+        default=0.2,
+        help="Seconds between OpenDART requests (default: 0.2).",
+    )
+    dart_backfill_xbrl_receipts.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-fetch even when an XBRL document is already stored for a target.",
+    )
+    dart_backfill_xbrl_receipts.set_defaults(handler=_handle_dart_backfill_xbrl_receipts)
 
     # -- common ---------------------------------------------------------------
     common_parser = subparsers.add_parser(

@@ -58,6 +58,8 @@ RAW_TABLES: tuple[str, ...] = (
     "dart_financial_statement_raw",
     "dart_shareholder_return_raw",
     "dart_share_count_raw",
+    "dart_capital_change_raw",
+    "dart_filing_receipt_raw",
     "dart_xbrl_document",
     "dart_corp_master",
     "stock_master",

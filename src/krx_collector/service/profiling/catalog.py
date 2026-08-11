@@ -241,6 +241,47 @@ DART_SHARE_COUNT_RAW = TableProfileSpec(
     domain_checks=(),
 )
 
+DART_CAPITAL_CHANGE_RAW = TableProfileSpec(
+    table="dart_capital_change_raw",
+    weight=ProfileWeight.FULL,
+    role=ProfileTableRole.RAW,
+    entity_key="corp_code",
+    time_col="bsns_year",
+    natural_key=(
+        "corp_code",
+        "bsns_year",
+        "reprt_code",
+        "rcept_no",
+        "isu_dcrs_de",
+        "isu_dcrs_stle",
+        "isu_dcrs_stock_knd",
+    ),
+    numeric_cols=("isu_dcrs_qy", "isu_dcrs_mstvdv_fval_amount", "isu_dcrs_mstvdv_fval_amount2"),
+    category_cols=("reprt_code", "corp_cls", "isu_dcrs_stle", "source"),
+    top_n_cols=("isu_dcrs_stle", "isu_dcrs_stock_knd"),
+    null_cols=("isu_dcrs_qy", "isu_dcrs_mstvdv_fval_amount", "isu_dcrs_de", "stlm_dt"),
+    ingest_col="fetched_at",
+    cost_class=CostClass.CHEAP,
+    sampling=SamplingPolicy(sample_pct=None),
+    domain_checks=(),
+)
+
+DART_FILING_RECEIPT_RAW = TableProfileSpec(
+    table="dart_filing_receipt_raw",
+    weight=ProfileWeight.FULL,
+    role=ProfileTableRole.RAW,
+    entity_key="corp_code",
+    time_col="rcept_dt",
+    natural_key=("corp_code", "rcept_no"),
+    category_cols=("corp_cls", "source"),
+    top_n_cols=("report_nm", "flr_nm"),
+    null_cols=("corp_name", "stock_code", "report_nm", "rcept_dt", "rm"),
+    ingest_col="fetched_at",
+    cost_class=CostClass.CHEAP,
+    sampling=SamplingPolicy(sample_pct=None),
+    domain_checks=(),
+)
+
 DART_XBRL_DOCUMENT = TableProfileSpec(
     table="dart_xbrl_document",
     weight=ProfileWeight.FULL,
@@ -350,6 +391,8 @@ _CATALOG: tuple[TableProfileSpec, ...] = (
     DART_XBRL_FACT_RAW,
     DART_SHAREHOLDER_RETURN_RAW,
     DART_SHARE_COUNT_RAW,
+    DART_CAPITAL_CHANGE_RAW,
+    DART_FILING_RECEIPT_RAW,
     DART_XBRL_DOCUMENT,
     # Wave 3: masters / config (light weight)
     COMMON_FEATURE_SERIES,

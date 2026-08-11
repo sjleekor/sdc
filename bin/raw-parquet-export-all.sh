@@ -301,6 +301,8 @@ raw_id_tables=(
   dart_financial_statement_raw
   dart_shareholder_return_raw
   dart_share_count_raw
+  dart_capital_change_raw
+  dart_filing_receipt_raw
 )
 
 date_month_tables=(

@@ -3,12 +3,15 @@ from decimal import Decimal
 
 from krx_collector.adapters.opendart_share_info.provider import (
     OpenDartShareInfoProvider,
+    parse_capital_change_response,
     parse_dividend_response,
     parse_stock_count_response,
     parse_treasury_stock_response,
 )
 from krx_collector.domain.enums import Market, RunStatus, Source
 from krx_collector.domain.models import (
+    DartCapitalChangeLine,
+    DartCapitalChangeResult,
     DartCorp,
     DartShareCountLine,
     DartShareCountResult,
@@ -141,6 +144,39 @@ def test_parse_treasury_stock_response() -> None:
     assert ending.value_numeric == Decimal("91828987")
 
 
+def test_parse_capital_change_response() -> None:
+    corp = _sample_corp()
+    payload = {
+        "status": "000",
+        "message": "정상",
+        "list": [
+            {
+                "rcept_no": "20260310002820",
+                "corp_cls": "Y",
+                "corp_code": "00126380",
+                "corp_name": "삼성전자",
+                "isu_dcrs_de": "2025-06-30",
+                "isu_dcrs_stle": "유상증자(일반공모)",
+                "isu_dcrs_stock_knd": "보통주",
+                "isu_dcrs_qy": "1,000,000",
+                "isu_dcrs_mstvdv_fval_amount": "500",
+                "isu_dcrs_mstvdv_fval_amount2": "70,000",
+                "stlm_dt": "2025-12-31",
+            }
+        ],
+    }
+
+    result = parse_capital_change_response(payload, corp, 2025, "11011")
+
+    assert result.error is None
+    assert len(result.records) == 1
+    row = result.records[0]
+    assert row.isu_dcrs_stle == "유상증자(일반공모)"
+    assert row.isu_dcrs_qy == 1000000
+    assert row.isu_dcrs_mstvdv_fval_amount == Decimal("500")
+    assert row.isu_dcrs_de == date(2025, 6, 30)
+
+
 def test_open_dart_share_info_provider_maps_no_data_result() -> None:
     corp = _sample_corp()
     provider = OpenDartShareInfoProvider(
@@ -163,6 +199,7 @@ class MockShareInfoProvider:
         self.share_count_calls = 0
         self.dividend_calls = 0
         self.treasury_stock_calls = 0
+        self.capital_change_calls = 0
 
     def fetch_share_count(
         self,
@@ -258,14 +295,50 @@ class MockShareInfoProvider:
             no_data=True,
         )
 
+    def fetch_capital_change(
+        self,
+        corp: DartCorp,
+        bsns_year: int,
+        reprt_code: str,
+    ) -> DartCapitalChangeResult:
+        self.capital_change_calls += 1
+        return DartCapitalChangeResult(
+            corp_code=corp.corp_code,
+            ticker=corp.ticker or "",
+            bsns_year=bsns_year,
+            reprt_code=reprt_code,
+            records=[
+                DartCapitalChangeLine(
+                    corp_code=corp.corp_code,
+                    ticker=corp.ticker or "",
+                    bsns_year=bsns_year,
+                    reprt_code=reprt_code,
+                    rcept_no="20260310002820",
+                    corp_cls="Y",
+                    isu_dcrs_de=date(2025, 6, 30),
+                    isu_dcrs_stle="유상증자(일반공모)",
+                    isu_dcrs_stock_knd="보통주",
+                    isu_dcrs_qy=1000000,
+                    isu_dcrs_mstvdv_fval_amount=Decimal("500"),
+                    isu_dcrs_mstvdv_fval_amount2=Decimal("70000"),
+                    stlm_dt=date(2025, 12, 31),
+                    source=Source.OPENDART,
+                    fetched_at=now_kst(),
+                    raw_payload={"isu_dcrs_stle": "유상증자(일반공모)"},
+                )
+            ],
+        )
+
 
 class MockShareInfoStorage:
     def __init__(self) -> None:
         self.runs: list[IngestionRun] = []
         self.share_count_rows: list[DartShareCountLine] = []
         self.return_rows: list[DartShareholderReturnLine] = []
+        self.capital_change_rows: list[DartCapitalChangeLine] = []
         self.existing_share_count_requests: set[tuple[str, int, str]] = set()
         self.existing_return_requests: set[tuple[str, int, str, str]] = set()
+        self.existing_capital_change_requests: set[tuple[str, int, str]] = set()
 
     def record_run(self, run: IngestionRun) -> None:
         self.runs.append(run)
@@ -308,6 +381,20 @@ class MockShareInfoStorage:
             and (corp_codes is None or key[0] in corp_codes)
         }
 
+    def get_existing_dart_capital_change_keys(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int, str]]:
+        return {
+            key
+            for key in self.existing_capital_change_requests
+            if key[1] in bsns_years
+            and key[2] in reprt_codes
+            and (corp_codes is None or key[0] in corp_codes)
+        }
+
     def upsert_dart_share_count_raw(self, records: list[DartShareCountLine]) -> UpsertResult:
         self.share_count_rows.extend(records)
         return UpsertResult(updated=len(records))
@@ -317,6 +404,13 @@ class MockShareInfoStorage:
         records: list[DartShareholderReturnLine],
     ) -> UpsertResult:
         self.return_rows.extend(records)
+        return UpsertResult(updated=len(records))
+
+    def upsert_dart_capital_change_raw(
+        self,
+        records: list[DartCapitalChangeLine],
+    ) -> UpsertResult:
+        self.capital_change_rows.extend(records)
         return UpsertResult(updated=len(records))
 
 
@@ -419,3 +513,66 @@ def test_sync_dart_share_info_skips_sleep_when_all_sub_requests_cached(monkeypat
     )
 
     assert sleep_calls == []
+
+
+def test_sync_dart_share_info_omits_capital_change_when_provider_not_given() -> None:
+    storage = MockShareInfoStorage()
+    provider = MockShareInfoProvider()
+
+    result = sync_dart_share_info(
+        share_count_provider=provider,
+        shareholder_return_provider=provider,
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+    )
+
+    assert result.requests_attempted == 3
+    assert provider.capital_change_calls == 0
+    assert storage.capital_change_rows == []
+    assert result.capital_change_rows_upserted == 0
+
+
+def test_sync_dart_share_info_with_capital_change_counts_results() -> None:
+    storage = MockShareInfoStorage()
+    provider = MockShareInfoProvider()
+
+    result = sync_dart_share_info(
+        share_count_provider=provider,
+        shareholder_return_provider=provider,
+        capital_change_provider=provider,
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+    )
+
+    assert result.errors == {}
+    assert result.requests_attempted == 4
+    assert provider.capital_change_calls == 1
+    assert result.capital_change_rows_upserted == 1
+    assert len(storage.capital_change_rows) == 1
+
+
+def test_sync_dart_share_info_skips_existing_capital_change_request() -> None:
+    storage = MockShareInfoStorage()
+    storage.existing_capital_change_requests.add(("00126380", 2025, "11011"))
+    provider = MockShareInfoProvider()
+
+    result = sync_dart_share_info(
+        share_count_provider=provider,
+        shareholder_return_provider=provider,
+        capital_change_provider=provider,
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+    )
+
+    assert result.requests_attempted == 3
+    assert result.requests_skipped == 1
+    assert provider.capital_change_calls == 0

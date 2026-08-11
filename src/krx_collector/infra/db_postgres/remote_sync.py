@@ -106,6 +106,8 @@ PIPELINE_FULL_REFRESH_TABLE_NAMES: tuple[str, ...] = (
     "dart_financial_statement_raw",
     "dart_share_count_raw",
     "dart_shareholder_return_raw",
+    "dart_capital_change_raw",
+    "dart_filing_receipt_raw",
     "dart_xbrl_document",
     "dart_xbrl_fact_raw",
     # model-facing common feature layer. Only the raw observations + the shared
@@ -524,6 +526,115 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
             "LIMIT 1"
         ),
         cursor_indexes=(19, 0),
+        json_columns=("raw_payload",),
+        preserve_remote_surrogate_columns=("raw_id",),
+        copy_merge_enabled=True,
+    ),
+    TableSyncSpec(
+        name="dart_capital_change_raw",
+        select_list=(
+            "raw_id, corp_code, ticker, bsns_year, reprt_code, rcept_no, corp_cls, "
+            "isu_dcrs_de, isu_dcrs_stle, isu_dcrs_stock_knd, isu_dcrs_qy, "
+            "isu_dcrs_mstvdv_fval_amount, isu_dcrs_mstvdv_fval_amount2, stlm_dt, "
+            "source, fetched_at, raw_payload"
+        ),
+        from_clause="dart_capital_change_raw",
+        order_columns=("fetched_at", "raw_id"),
+        insert_columns=(
+            "raw_id",
+            "corp_code",
+            "ticker",
+            "bsns_year",
+            "reprt_code",
+            "rcept_no",
+            "corp_cls",
+            "isu_dcrs_de",
+            "isu_dcrs_stle",
+            "isu_dcrs_stock_knd",
+            "isu_dcrs_qy",
+            "isu_dcrs_mstvdv_fval_amount",
+            "isu_dcrs_mstvdv_fval_amount2",
+            "stlm_dt",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        conflict_columns=(
+            "corp_code",
+            "bsns_year",
+            "reprt_code",
+            "rcept_no",
+            "isu_dcrs_de",
+            "isu_dcrs_stle",
+            "isu_dcrs_stock_knd",
+        ),
+        update_columns=(
+            "ticker",
+            "corp_cls",
+            "isu_dcrs_qy",
+            "isu_dcrs_mstvdv_fval_amount",
+            "isu_dcrs_mstvdv_fval_amount2",
+            "stlm_dt",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        local_cursor_sql=(
+            "SELECT fetched_at, raw_id "
+            "FROM dart_capital_change_raw "
+            "ORDER BY fetched_at DESC, raw_id DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(15, 0),
+        json_columns=("raw_payload",),
+        preserve_remote_surrogate_columns=("raw_id",),
+        copy_merge_enabled=True,
+    ),
+    TableSyncSpec(
+        name="dart_filing_receipt_raw",
+        select_list=(
+            "raw_id, corp_code, ticker, corp_name, stock_code, corp_cls, report_nm, "
+            "rcept_no, flr_nm, rcept_dt, rm, source, fetched_at, raw_payload"
+        ),
+        from_clause="dart_filing_receipt_raw",
+        order_columns=("fetched_at", "raw_id"),
+        insert_columns=(
+            "raw_id",
+            "corp_code",
+            "ticker",
+            "corp_name",
+            "stock_code",
+            "corp_cls",
+            "report_nm",
+            "rcept_no",
+            "flr_nm",
+            "rcept_dt",
+            "rm",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        conflict_columns=("corp_code", "rcept_no"),
+        update_columns=(
+            "ticker",
+            "corp_name",
+            "stock_code",
+            "corp_cls",
+            "report_nm",
+            "flr_nm",
+            "rcept_dt",
+            "rm",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        local_cursor_sql=(
+            "SELECT fetched_at, raw_id "
+            "FROM dart_filing_receipt_raw "
+            "ORDER BY fetched_at DESC, raw_id DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(12, 0),
         json_columns=("raw_payload",),
         preserve_remote_surrogate_columns=("raw_id",),
         copy_merge_enabled=True,

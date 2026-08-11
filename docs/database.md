@@ -270,6 +270,60 @@ OpenDART XBRL instance에서 추출한 fact raw 저장용 테이블입니다.
 **고유키(Unique):** `(corp_code, bsns_year, reprt_code, rcept_no, context_id, concept_id)`
 **인덱스(Index):** `(ticker, bsns_year, reprt_code, concept_id)`
 
+### 13. `dart_filing_receipt_raw`
+
+OpenDART `list.json`(공시검색) 접수 이력 raw 저장용 테이블입니다. Phase B의 원공시·정정공시
+관계 판별과 SUE original-event source 확보에 사용합니다(`docs/dev/20260731_raw_features/`).
+
+| 컬럼명        | 타입              | 비고                             |
+|---------------|-------------------|-----------------------------------|
+| `raw_id`      | BIGSERIAL PK      | 내부 surrogate key                |
+| `corp_code`   | TEXT NOT NULL     | OpenDART 기업 고유번호            |
+| `ticker`      | TEXT              | 6자리 KRX 종목 코드               |
+| `corp_name`   | TEXT NOT NULL     | 법인명                            |
+| `stock_code`  | TEXT NOT NULL     | 종목코드(공시 응답 기준)          |
+| `corp_cls`    | TEXT NOT NULL     | 법인 구분                         |
+| `report_nm`   | TEXT NOT NULL     | 보고서명                          |
+| `rcept_no`    | TEXT NOT NULL     | 접수번호                          |
+| `flr_nm`      | TEXT NOT NULL     | 공시 제출인명                     |
+| `rcept_dt`    | DATE              | 접수일자                          |
+| `rm`          | TEXT NOT NULL     | 비고(코스피/코스닥/정정 등 flag)  |
+| `source`      | TEXT NOT NULL     | `OPENDART`                        |
+| `fetched_at`  | TIMESTAMPTZ       | 데이터를 수집한 시간              |
+| `raw_payload` | JSONB NOT NULL    | 원본 응답 payload                 |
+
+**고유키(Unique):** `(corp_code, rcept_no)`
+**인덱스(Index):** `(ticker, rcept_dt)`
+
+### 14. `dart_capital_change_raw`
+
+OpenDART `irdsSttus`(증자(감자)현황) raw 저장용 테이블입니다. Phase B의 경제적 순발행
+(`ev_net_share_issuance_yoy`) 산식에서 유상증자/감자 등 발행·감소 사유를 액면분할·무상증자 같은
+mechanical action과 구분하는 데 사용합니다.
+
+| 컬럼명                          | 타입              | 비고                        |
+|---------------------------------|-------------------|-----------------------------|
+| `raw_id`                        | BIGSERIAL PK      | 내부 surrogate key          |
+| `corp_code`                     | TEXT NOT NULL     | OpenDART 기업 고유번호      |
+| `ticker`                        | TEXT              | 6자리 KRX 종목 코드         |
+| `bsns_year`                     | INT NOT NULL      | 사업연도                    |
+| `reprt_code`                    | TEXT NOT NULL     | 보고서 코드                 |
+| `rcept_no`                      | TEXT NOT NULL     | 접수번호                    |
+| `corp_cls`                      | TEXT NOT NULL     | 법인 구분                   |
+| `isu_dcrs_de`                   | DATE              | 발행/감소 일자              |
+| `isu_dcrs_stle`                 | TEXT NOT NULL     | 발행/감소 형태(유상증자 등) |
+| `isu_dcrs_stock_knd`            | TEXT NOT NULL     | 주식 종류                   |
+| `isu_dcrs_qy`                   | BIGINT            | 발행/감소 수량              |
+| `isu_dcrs_mstvdv_fval_amount`   | NUMERIC(30,4)     | 주당 액면가액               |
+| `isu_dcrs_mstvdv_fval_amount2`  | NUMERIC(30,4)     | 주당 발행/감소 가액         |
+| `stlm_dt`                       | DATE              | 결산일                      |
+| `source`                        | TEXT NOT NULL     | `OPENDART`                  |
+| `fetched_at`                    | TIMESTAMPTZ       | 데이터를 수집한 시간        |
+| `raw_payload`                   | JSONB NOT NULL    | 원본 응답 payload           |
+
+**고유키(Unique):** `(corp_code, bsns_year, reprt_code, rcept_no, isu_dcrs_de, isu_dcrs_stle, isu_dcrs_stock_knd)`
+**인덱스(Index):** `(ticker, bsns_year, reprt_code)`
+
 ### Removed derived metric tables
 
 리팩터 이후 PostgreSQL에는 raw 수집 테이블만 남기고, `metric_catalog`,
@@ -278,7 +332,7 @@ OpenDART XBRL instance에서 추출한 fact raw 저장용 테이블입니다.
 canonical-compatible `stock_metric_fact`는 `bin/parquet-compute-all.sh`가 raw parquet 위에서
 DuckDB derived mart로 재계산합니다.
 
-### 13. `krx_security_flow_raw`
+### 15. `krx_security_flow_raw`
 
 KRX MDC 기반 수급 raw 저장용 테이블입니다.
 
