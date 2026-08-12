@@ -30,10 +30,12 @@ Most of the §7.1 directory contract is written here: ``phase_b_run_spec.json``,
 ``combined_ab_primary_hypotheses.parquet`` and ``phase_a_card_overlay.parquet``
 for the combined step.
 
-Two §7.1 artifacts are still missing, both tracked in 08 §4.3:
+``03b_horizon_scan_results.md`` too, plus ``03ab_combined_results.md`` on the
+AB side (which §7.1 does not list — see ``horizon_scan_phase_b_report.py``).
+
+One §7.1 artifact is still missing, tracked in 08 §4.3:
 ``daily_ic.parquet``/``cohort_ic.parquet`` (B-10 Stage 3 — needs the shared
-Phase A scan code to stop discarding the per-date IC sequence) and
-``03b_horizon_scan_results.md`` (Stage 5).
+Phase A scan code to stop discarding the per-date IC sequence).
 
 Directory nesting deliberately follows ``run_phase_a``'s actual on-disk
 convention (``phase=<X>/snapshot_date=/source=/config_hash=/run_id=/``) rather
@@ -76,6 +78,12 @@ from research.analysis.horizon_scan_phase_b_diagnostics import (
 )
 from research.analysis.horizon_scan_phase_b_joint_permutation import (
     run_combined_cross_sectional_permutation,
+)
+from research.analysis.horizon_scan_phase_b_report import (
+    build_combined_ab_report_context,
+    build_phase_b_report_context,
+    write_combined_ab_report,
+    write_phase_b_report,
 )
 from research.analysis.horizon_scan_phase_b_robustness import (
     evaluate_sue_cluster_confirmation,
@@ -149,6 +157,18 @@ from research.etl.phase_b_quality import (
 from research.etl.snapshot import resolve_config
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+PHASE_B_REPORT_NAME = "03b_horizon_scan_results.md"
+COMBINED_AB_REPORT_NAME = "03ab_combined_results.md"
+
+
+def _written_diagnostic_rows(
+    core_dir: Path, diagnostics_written: list[str], name: str
+) -> list[dict[str, Any]]:
+    """Rows of a Stage 2 diagnostic this run actually wrote, else empty."""
+    if name not in diagnostics_written:
+        return []
+    return pl.read_parquet(core_dir / f"{name}.parquet").to_dicts()
 
 
 def _feature_coverage_sql_for(available_assets: set[str]) -> str:
@@ -921,7 +941,7 @@ def run_phase_b_core(
     # §7.1 family_summary.parquet / family_cards.md (B-10 Stage 4). Coverage is
     # read back off the parquet just written rather than re-queried, so a card
     # can never disagree with the artifact it summarizes.
-    write_phase_b_family_cards(
+    family_rows = write_phase_b_family_cards(
         config,
         core_dir,
         readiness_rows=readiness_rows,
@@ -955,12 +975,38 @@ def run_phase_b_core(
         core_dir / "phase_b_primary_hypotheses.parquet"
     )
 
+    # §7.1 03b_horizon_scan_results.md (B-10 Stage 5) — rendered last, from the
+    # rows every stage above already produced, so it cannot disagree with the
+    # parquet beside it.
+    write_phase_b_report(
+        tmp_run_dir / PHASE_B_REPORT_NAME,
+        build_phase_b_report_context(
+            run_spec=run_spec,
+            readiness_rows=readiness_rows,
+            family_rows=family_rows,
+            assembled_rows=assembled,
+            robustness=phase_b_diagnostics,
+            diagnostics_written=diagnostics_written,
+            q_threshold=q_threshold,
+            source_quality=compute_family_source_quality(
+                vintage_quality_rows=_written_diagnostic_rows(
+                    core_dir, diagnostics_written, "stock_metric_vintage_quality"
+                ),
+                pairing_quality_rows=_written_diagnostic_rows(
+                    core_dir, diagnostics_written, "receipt_value_pairing_quality"
+                ),
+            ),
+        ),
+    )
+
     final_run_dir = run_dir_root / f"run_id={run_spec['run_id']}"
     return publish_run(
         tmp_run_dir,
         final_run_dir,
         run_spec=run_spec,
-        required_artifacts=("phase_b_run_spec.json", "manifest.json"),
+        # The report is required: a run that published without it would look
+        # complete to `_SUCCESS.json` while giving a human nothing to read.
+        required_artifacts=("phase_b_run_spec.json", "manifest.json", PHASE_B_REPORT_NAME),
         content_hash_exclude_names=PHASE_B_CONTENT_HASH_EXCLUDE_NAMES,
     )
 
@@ -1213,6 +1259,18 @@ def run_combined_ab(
     (tmp_run_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8"
     )
+    # Beyond §7.1's phase=AB list, which names only parquet plus the manifest.
+    # It renders artifacts that list already requires and adds no statistic, so
+    # it stays out of `required_artifacts` — nothing may depend on it.
+    write_combined_ab_report(
+        tmp_run_dir / COMBINED_AB_REPORT_NAME,
+        build_combined_ab_report_context(
+            manifest=manifest,
+            combined_rows=combined,
+            phase_a_overlay=phase_a_overlay,
+            phase_b_ready_ids=phase_b_ready_ids,
+        ),
+    )
 
     final_run_dir = run_dir_root / f"run_id={ab_run_id}"
     return publish_run(
@@ -1220,5 +1278,7 @@ def run_combined_ab(
         final_run_dir,
         run_spec=manifest,
         required_artifacts=("manifest.json",),
-        content_hash_exclude_names=frozenset({"manifest.json", "_SUCCESS.json"}),
+        content_hash_exclude_names=frozenset(
+            {"manifest.json", "_SUCCESS.json", COMBINED_AB_REPORT_NAME}
+        ),
     )

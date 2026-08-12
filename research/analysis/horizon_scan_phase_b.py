@@ -277,8 +277,16 @@ def write_phase_b_run_spec(run_dir: Path, run_spec: dict[str, Any]) -> Path:
     return target
 
 
+# The rendered report carries this run's timestamps, so hashing it would make
+# two byte-identical scans look different. Excluding a name that an older run
+# never wrote is a no-op, so previously published runs still verify.
 PHASE_B_CONTENT_HASH_EXCLUDE_NAMES = frozenset(
-    {"phase_b_run_spec.json", "_SUCCESS.json", "phase_b_readiness_freeze.json"}
+    {
+        "phase_b_run_spec.json",
+        "_SUCCESS.json",
+        "phase_b_readiness_freeze.json",
+        "03b_horizon_scan_results.md",
+    }
 )
 
 

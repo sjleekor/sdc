@@ -44,8 +44,8 @@ Grade A 6개 중 `px_amihud_20d`/`px_near_52w_high`는 baseline 모델에 이미
 
 ## 4. T2 — 코드는 됐는데 데이터가 없다
 
-작업 패키지 B-0~B-9 완료(§5.5 segment 진단 제외), B-10은 Stage 1·2·4 완료(2026-08-12),
-Stage 3·5 미착수. 유닛 테스트 907개 통과(2026-08-12).
+작업 패키지 B-0~B-9 완료(§5.5 segment 진단 제외), B-10은 Stage 1·2·4·5 완료(2026-08-12),
+Stage 3만 남았다. 유닛 테스트 939개 통과(2026-08-12).
 
 그런데 Phase B candidate **38개가 전부 `blocked_missing_dependency`**(`M_B_ready=0`)다.
 원인은 하나다 — 로컬 lake에 `dart_filing_receipt_raw`/`dart_capital_change_raw` parquet가
@@ -92,15 +92,15 @@ Stage 2 진단을 실제 lake에 돌리자마자 `stock_metric_vintage_fact`의 
    prod 백필(진행 중) → vintage probe 판정(`04_specific_plan_B.md` §4.4.1) →
    `raw-parquet-export-all.sh` → `--phase B` → `--phase A` → `--phase AB` 재실행.
    명령과 주의점은 `08` §4.1·§4.1.1.
-2. **데이터 없이도 가능한 코드 작업**: ~~B-10 Stage 2(7종)~~ 완료, ~~Stage 4(family 카드)~~
-   완료. 남은 건 Stage 3(Phase A 공유 코드 내부를 건드려야 해 별도 계획 필요)과 Stage 5.
+2. **데이터 없이도 가능한 코드 작업**: ~~B-10 Stage 2·4·5~~ 완료. 남은 건 Stage 3뿐이고,
+   Phase A 공유 코드 내부(`per_date_market_rank_ic`)를 건드려야 해 별도 계획이 필요하다.
    → `08` §4.3.
 3. **T1 잔여**: ~~k=100 비용 확인~~ 완료(조건 미충족) → h=60 holdout 재평가만 남음. `07` §6.
 
 ## 6. 상태 확인 명령
 
 ```bash
-uv run pytest tests/unit -q                                   # 907개 통과가 기준선(2026-08-12)
+uv run pytest tests/unit -q                                   # 939개 통과가 기준선(2026-08-12)
 git status --porcelain | wc -l                                # T2 코드가 아직 uncommitted인지
 ls data_lake/raw_postgres/snapshot_date=*/source=sj2_remote/ | grep -E "filing_receipt|capital_change"
                                                               # 아무것도 안 나오면 T2는 여전히 막힌 상태

@@ -556,8 +556,27 @@ plan §4.4.2, 보강 결과는 아래 §4.3.1.
   `min_names_per_date`는 비슷한 숫자를 빌려 오지 않고 비운다. `formula_version`은 호출자가
   주입한다 — 오늘 지문이 있는 건 `ev_net_share_issuance_yoy`(`issuance_v2`)뿐이고, 나머지에
   가짜 버전을 붙이지 않는다.
-- **Stage 5** — `03b_horizon_scan_results.md`(phase=B), phase=AB 쪽 리포트, atomic publish
-  범위 확장.
+- **Stage 5 — 완료(2026-08-12).** `research/analysis/horizon_scan_phase_b_report.py`가
+  `03b_horizon_scan_results.md`(phase=B)와 `03ab_combined_results.md`(phase=AB)를 낸다.
+  Phase A `03a`와 같은 세 규칙을 따른다 — context key 전부 필수(빈 리스트는 되지만 누락은
+  에러), **새로 계산하지 않음**(전부 앞 단계 행에서 읽는다), 없는 값은 0이 아니라 `—`.
+
+  두 파일이 답하는 질문이 다르다. `03b`는 Phase B 자기 run — 무엇이 ready였고 source layer가
+  어땠고 스캔이 뭘 찾았나. `03ab`는 Phase A 75개와 Phase B ready 셀을 한 BH에 넣었을 때
+  **무엇이 바뀌었나**만 본다. 안 바뀐 가설은 안 적는다.
+
+  `limitations`는 고정 문구가 아니라 그 run의 상태에서 만든다 — blocked 셀 수와 missing
+  dependency, source quality가 `unmeasured`인 family 목록, 그리고 PIT industry 부재라는
+  구조적 제약.
+
+  **publish 범위.** `03b`는 필수 산출물이다 — 없이 발행되면 `_SUCCESS.json`은 완전해 보이는데
+  사람이 읽을 게 없다. 동시에 `PHASE_B_CONTENT_HASH_EXCLUDE_NAMES`에 넣었다. 리포트에 run
+  타임스탬프가 들어가서, 안 빼면 바이트 단위로 같은 스캔 두 번이 다른 해시를 낸다. 기존에
+  발행된 run은 그 파일이 없으므로 제외 대상 추가가 no-op이고 검증이 그대로 통과한다.
+
+  `03ab`는 **§7.1 목록에 없다.** phase=AB에는 parquet과 manifest만 적혀 있다. 계약이 이미
+  요구하는 산출물을 렌더링할 뿐 새 통계를 만들지 않으므로 의도적으로 추가했고, 대신
+  `required_artifacts`에서는 뺐다 — 아무것도 이 파일에 의존하지 않게.
 - §5.5 segment/freshness 진단(8개 축) — B-PR12가 이미 명시적으로 미룬 부분, 아직 스코프 밖.
 
 ### 4.3.2 Stage 2가 바로 찾아낸 B-2 결함 3건 (2026-08-12) — **해결**

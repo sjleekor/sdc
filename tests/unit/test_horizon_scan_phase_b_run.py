@@ -942,3 +942,43 @@ def test_family_cards_are_written_when_no_diagnostic_landed(tmp_path: Path, conf
     assert len(rows) == 8
     assert all(row["readiness"] == "blocked" for row in rows)
     assert (tmp_path / "family_cards.md").is_file()
+
+
+# --- B-10 Stage 5: 03b report is required, and does not enter the hash ---
+
+
+def test_the_phase_b_report_is_excluded_from_the_reproducibility_hash(tmp_path: Path) -> None:
+    from research.analysis.horizon_scan_run_spec import compute_run_content_hash
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "manifest.json").write_text("{}")
+    before = compute_run_content_hash(run_dir, exclude_names=PHASE_B_CONTENT_HASH_EXCLUDE_NAMES)
+
+    # The report carries this run's timestamps, so two byte-identical scans
+    # would otherwise hash differently.
+    (run_dir / phase_b_run.PHASE_B_REPORT_NAME).write_text("# report\n\nstarted 12:00\n")
+    after = compute_run_content_hash(run_dir, exclude_names=PHASE_B_CONTENT_HASH_EXCLUDE_NAMES)
+
+    assert before == after
+
+
+def test_publish_refuses_a_phase_b_run_without_its_report(tmp_path: Path) -> None:
+    from research.analysis.horizon_scan_run_spec import publish_run
+
+    tmp_run_dir = tmp_path / "run.tmp"
+    tmp_run_dir.mkdir()
+    (tmp_run_dir / "phase_b_run_spec.json").write_text("{}")
+    (tmp_run_dir / "manifest.json").write_text("{}")
+
+    required = ("phase_b_run_spec.json", "manifest.json", phase_b_run.PHASE_B_REPORT_NAME)
+    # A run that published without the report would look complete to
+    # _SUCCESS.json while giving a human nothing to read.
+    with pytest.raises(RuntimeError, match=phase_b_run.PHASE_B_REPORT_NAME):
+        publish_run(
+            tmp_run_dir,
+            tmp_path / "run",
+            run_spec={"run_id": "x"},
+            required_artifacts=required,
+            content_hash_exclude_names=PHASE_B_CONTENT_HASH_EXCLUDE_NAMES,
+        )
