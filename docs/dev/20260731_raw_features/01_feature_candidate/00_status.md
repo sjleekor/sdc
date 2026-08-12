@@ -1,51 +1,43 @@
 # 00. 진행 상태 — 이 디렉터리를 이어받는 사람이 먼저 읽는 문서
 
-- 작성일: 2026-08-11 (갱신: 2026-08-12 17:45 KST)
+- 작성일: 2026-08-11 (갱신: 2026-08-13 05:10 KST)
 - 브랜치: `refactor/parquet-compute-reproducible`
 - 목적: 문서가 8개(합계 30만 자 이상)라 어디까지 왔는지 한눈에 안 보인다. 이 파일은
   **지금 상태와 다음에 할 일만** 적는다. 근거·설계는 각 문서로 넘긴다.
 
 ## 0. 새 세션이면 여기부터
 
-1차 수집은 끝났고 probe 판정도 났다. 크리티컬 패스는 이제 **판정이 요구한 잔여 vintage
-백필 대기**다. 2026-08-12 17:36에 sj2에서 시작했고 3시간 전후로 예상한다.
+**수집도 export도 Phase B도 끝났다. 남은 건 로컬 계산 두 번뿐이다** — `--phase A` 재실행,
+그다음 `--phase AB`. prod에 더 받을 것은 없다.
 
 ```bash
-# 1) 아직 돌고 있나. 대괄호 트릭은 ssh 명령줄 자체에 스크립트 이름이 들어가면 안 통한다.
-ssh whi@sj2-server "pgrep -af 'phase_b_backfill' | grep -v ' -c ' || echo 'NONE_RUNNING'"
-ssh whi@sj2-server 'tail -n 3 /home/whi/phase_b_capital_vintages.log'
-
-# 2) 로그보다 DB가 정본이다. 11011 vintage가 2015~2025 전부 있어야 한다.
-.agents/skills/sdc-db/scripts/dbq.sh sj2 -c \
-  "select bsns_year, count(distinct ticker) tickers, count(*) rows
-   from dart_capital_change_raw where reprt_code='11011' group by 1 order by 1;"
+# 지금 위치 확인 — B는 있고 A(2026-08-12)는 없어야 정상이다
+find research/output/horizon_scan -name manifest.json | sort
 ```
 
-**연도가 찼는지는 행 수가 아니라 ticker 수로 본다.** 기수집분 기준 1,795(2016)~2,561(2024)이
-정상 범위다. 2025가 765에서 안 올라갔으면 아직 그 연도에 도달하지 못한 것이다(연도 순서는
-2015·2017·2018·2019·2021·2022·2023·2025로 2025가 마지막이다).
-
-로그 마지막 줄이 `ALL DONE`이면 정상 종료, `QUOTA EXHAUSTED`면 OpenDART 일일 한도로 끊긴
-것이다. 후자면 같은 스크립트를 다시 실행하면 이어받는다 — 저장된 raw는 skip된다.
+이어서 할 일은 이 한 줄이다. **`--snapshot-date`를 주지 않는다** — `auto_selected`가 꺼지면
+official 자격을 잃는다. 자동 선택이 최신 유효 snapshot(2026-08-12)을 고른다.
 
 ```bash
-ssh whi@sj2-server 'cd /home/whi && SDC_PHASE_B_REPRT_CODES=11011 SDC_LOCK_WAIT_SECONDS=3600 \
-  setsid nohup ./phase_b_backfill.sh capital "2015 2017 2018 2019 2021 2022 2023 2025" \
-  >> /home/whi/phase_b_capital_vintages.log 2>&1 < /dev/null &'
+uv run python -m research.analysis.horizon_scan --phase A --source sj2_remote
 ```
 
-끝났으면 **§5의 1번 4단계부터 이어간다**(1~3단계는 완료). 아직 돌고 있으면 §5의 2번에서 고른다.
+Phase B가 5시간 30분 걸렸으니 A도 비슷하게 잡는다. 끝나면 §5의 10단계(AB)로 간다.
 
-주의: 이 작업은 `sdc_with_source_lock opendart`를 잡는다. 데일리 OpenDART 체인은 04:00에
-lock 없이 시작하므로, 백필이 다음 날 04:00을 넘겼다면 데일리 이벤트가 겹쳤을 수 있다.
-`ingestion_runs`에서 그날 OpenDART run의 status를 먼저 본다.
+**등급이 전부 NE인 걸 보고 놀라지 않는다.** family card의 등급·discovery 집계는
+`q_fdr_global_ab` 기준이고 그 값은 phase=AB run이 만든다. AB를 돌리기 전까지는 NE가 정상이다.
+
+주의: Phase A와 B를 동시에 돌리지 않는다. 정합성 문제는 없지만(출력 경로 분리, A는 A0 마트를
+읽기만 함, DuckDB 1.5.4는 같은 `.tmp`를 공유해도 충돌하지 않는 것을 실측으로 확인) DuckDB가
+인스턴스마다 `threads=14`·`memory_limit=28.7GiB`를 기본으로 잡아 14코어/36GB 장비에서 서로를
+느리게 만든다.
 
 ## 1. 트랙이 두 개다
 
 | 트랙 | 대상 | 상태 |
 |---|---|---|
 | **T1. px/flow 피쳐 검증** | 가격·수급 피쳐 17 family (Phase A0/A → acceptance gate) | **판정까지 완료**. 20일 모델 채택은 보류(§3) |
-| **T2. 재무/이벤트 피쳐 검증** | fin_*/ev_* 8 family, 38 candidate cell (Phase B) | **코드 완료·커밋됨, 실행 0%** — prod 수집만 기다린다 |
+| **T2. 재무/이벤트 피쳐 검증** | fin_*/ev_* 8 family, 38 candidate cell (Phase B) | **Phase B 완주**(38/38 ready). Phase A 재실행 → AB가 남았고 등급은 그때 정해진다 |
 
 ## 2. 문서 지도
 
@@ -78,20 +70,24 @@ Grade A 6개 중 `px_amihud_20d`/`px_near_52w_high`는 baseline 모델에 이미
 - **h=60 holdout 재평가** — 2026년 10~11월 이후 **새 구간으로 한 번만**(이번 구간 재사용
   금지). 위 60일 결과도 이때 같이 본다. → `07` §6
 
-## 4. T2 — 코드는 다 됐고, 데이터만 없다
+## 4. T2 — 데이터가 붙었고 Phase B는 완주했다
 
 작업 패키지 B-0~B-9 완료(§5.5 segment 진단 제외), B-10은 Stage 1·2·4·5 완료로 **Stage 3만**
 남았다. 유닛 테스트 939개 통과(2026-08-12).
 
-Phase B candidate **38개가 전부 `blocked_missing_dependency`**(`M_B_ready=0`)다. 로컬 lake에
-`dart_filing_receipt_raw`/`dart_capital_change_raw` parquet가 없기 때문이고, 버그가 아니라
-outcome-blind readiness 설계가 의도한 동결 상태다.
+`M_B_ready=0` 동결이 풀렸다. `run_id=20260812T231507-f9117ce1`에서 **38 candidate 전부
+ready**가 됐고 B-PR11~B-PR15 오케스트레이션이 실제 데이터로 처음 돌았다 — 통합 크래시는 없었다.
 
-그래서 B-PR11~B-PR15의 게이트·진단 오케스트레이션은 **아직 한 번도 실제 데이터로 실행된 적이
-없다**(mock/synthetic 테스트로만 검증). 발행된 phase=AB run(`20260810T194651-e04c00c7`)도
-Phase B 셀이 0개라 껍데기다. 첫 실제 실행에서 통합 단계 버그가 나올 수 있다고 보는 게 맞다.
+Phase B 단독 기준으로 `bh_pass` 18, `primary_discovery` 14다. 다만 **family 등급은 전부 NE**이고
+이건 정상이다 — 등급과 discovery 집계는 `q_fdr_global_ab` 기준인데 그 값은 phase=AB run이
+만들기 때문이다. 아직 안 돌렸다.
 
-상세: `08` §3(발행된 run·블로커 체인), §4(남은 작업).
+지금까지 드러난 것 둘. **temporal placebo가 유일한 병목이다** — robustness 탈락 7건이 전부
+`temporal_null_pass=false`다(`ev_payout_yield` 3 · `fin_value_z` 3 ·
+`ev_net_share_issuance_yoy` 1). 그리고 **`fin_sue`·`fin_gross_profitability`는 표본이 없다**
+(coverage 0.0000 / 0.0315).
+
+상세: `08` §3.0(이번 run 측정값), §4(남은 작업).
 
 ## 4b. 2026-08-12에 한 일
 
@@ -115,6 +111,22 @@ Phase B 셀이 0개라 껍데기다. 첫 실제 실행에서 통합 단계 버�
 1. `isu_dcrs_stle` 카탈로그 구멍 — 안 고치고 probe를 돌렸다면 지표 ②가 매핑 구멍을 재고
    있는데 vintage 정책 탓으로 읽혔을 것이다. `000040` identity 통과율이 5/10 → 9/10.
 2. B-2 결함 3건 — Stage 2 진단을 실제 lake에 돌리자마자 나왔다.
+
+## 4b-2. 2026-08-12 오후 ~ 08-13 새벽에 한 일
+
+수집 대기가 풀리면서 파이프라인을 끝까지 밀었다. 순서대로다.
+
+| 시각 | 내용 |
+|---|---|
+| 12:53 / 14:27 | 1차 백필 종료 — filings 2015~2026, capital vintage 2016·2020·2024 |
+| 16:51~17:23 | raw export `snapshot_date=2026-08-12` 발행. 두 테이블이 exporter 설정에 없어 먼저 등록해야 했다 → `5631eeb` |
+| 17:24 | vintage probe 판정 → **strict PIT 채택**, `DEFAULT_VINTAGE_POLICY` 고정 → `bfcb252` |
+| 17:36~21:45 | 판정이 요구한 잔여 8개 연도 vintage 백필. 전 연도 `rc=0` |
+| 18:00 전후 | A0 마트 경로 정리(§5 주의 참고). `compute_all --features`로는 A0를 못 만든다 |
+| 23:14 | capital_change만 `--force-table` 재export. 71,535 → 245,120행 |
+| 23:15~04:49 | **Phase B 정식 실행 완주** — 38/38 ready → `08` §3.0 |
+
+문서 커밋은 `93f833d`(상태 문서 재작성)이고, `08` §3.0·§4.1.2·§4.1.3은 이 갱신에 포함된다.
 
 ## 4c. B-2 결함 3건 — 찾고 고쳤다
 
@@ -162,17 +174,26 @@ CFS/OFS)으로 바꾸고 회귀 테스트 8개를 추가했다 — 수정 전 �
    exporter 설정에 두 테이블이 빠져 있어 먼저 등록해야 했다 → `08` §4.1.2
 5. ~~vintage probe 판정~~ 완료 — **strict PIT 채택**. `DEFAULT_VINTAGE_POLICY` 고정.
    측정값은 `08` §4.1.2, 산출물은 `research/output/vintage_probe/`
-6. **잔여 vintage 백필** — 판정이 요구한 8개 연도. §0에서 상태 확인 (진행 중)
-7. **capital_change만 재export** — 백필이 끝나면 그 테이블만 새로 뜬다. 나머지 14개는 손대지
-   않는다
+6. ~~잔여 vintage 백필~~ 완료 (2026-08-12 21:45 `ALL DONE`). 11011 vintage가 2015~2025 전부
+   찼다 — ticker 1,726(2015) → 2,647(2025)
+7. ~~capital_change만 재export~~ 완료. 71,535 → 245,120행
    ```bash
    uv run krx-collector db with-remote-dsn -- bin/raw-parquet-export-all.sh \
      --snapshot-date 2026-08-12 --route remote --force-table dart_capital_change_raw
    ```
-8. **`--phase B` 실행** — 여기서 처음으로 `M_B_ready > 0`이 된다
-9. **`--phase A` 재실행** — 같은 snapshot이어야 결합 BH가 성립한다(§2.3 rule 5)
+8. ~~`--phase B` 실행~~ 완료 — `run_id=20260812T231507-f9117ce1`, **38 ready / 0 blocked**.
+   측정값과 해석은 `08` §3.0
+9. **`--phase A` 재실행** — 같은 snapshot이어야 결합 BH가 성립한다(§2.3 rule 5). 아직 안 돌렸다
+   ```bash
+   uv run python -m research.analysis.horizon_scan --phase A --source sj2_remote
+   ```
 10. **`--phase AB` 실행** — `q_fdr_global_ab`·`screen_pass`·`evidence_grade`가 처음으로
-    진짜 값을 갖는다
+    진짜 값을 갖는다. **지금 family 등급이 전부 NE인 건 이 단계를 안 돌렸기 때문이다**
+
+Phase B는 약 5시간 30분 걸렸다. Phase A도 비슷한 규모로 보고 일정을 잡는다. 두 개를 동시에
+돌리는 건 권하지 않는다 — 출력 경로와 마트 쓰기는 겹치지 않고 DuckDB spill도 실측상 충돌하지
+않지만(1.5.4는 인스턴스별로 분리한다), 인스턴스마다 `threads=14`·`memory_limit=28.7GiB`를
+기본으로 잡아 14코어/36GB 장비에서 서로를 느리게 만든다.
 
 **순서 주의 두 가지.**
 

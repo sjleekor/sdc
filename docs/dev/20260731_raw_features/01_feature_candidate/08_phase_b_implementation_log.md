@@ -282,9 +282,79 @@ artifact")는 한 PR에 넣기엔 너무 크고 성격도 다양해(값 재사�
 
 ## 3. 현재 실행 상태 — 발행된 run과 데이터 블로커
 
-(2026-08-11 확인. 이 절은 코드가 아니라 **디스크에 실제로 있는 것**을 적는다.)
+(2026-08-11 확인, 2026-08-13 갱신. 이 절은 코드가 아니라 **디스크에 실제로 있는 것**을 적는다.)
 
-### 3.1 발행된 official run
+### 3.0 snapshot 2026-08-12 Phase B — 처음으로 실데이터 완주 (2026-08-13)
+
+`snapshot_date=2026-08-09`를 다룬 §3.1~3.2는 아래 run으로 대체됐다. 그 절들은 블로커가
+어떻게 생겼었는지의 기록으로 남긴다.
+
+| 항목 | 값 |
+|---|---|
+| run_id | `20260812T231507-f9117ce1` |
+| snapshot / source | 2026-08-12 / sj2_remote (capital vintage 재export 반영) |
+| config_hash | `e55c3046…` (기존 run들과 동일) |
+| event feature formula | `issuance_v2` |
+| 소요 | 23:15 시작, 약 5시간 30분 |
+| readiness freeze | **38 ready / 0 blocked** (candidate 38개 전부) |
+
+**B-PR11~15 오케스트레이션이 실제 데이터로 처음 돌았고 통합 크래시는 없었다.** §2가 우려한
+"통합 단계에서만 드러나는 버그"는 이번 실행에서는 나오지 않았다. 산출물이 전부 생겼다 —
+`nonoverlap_summary`(21행) · `temporal_placebo_summary`(21행) · `issuer_bootstrap_summary`(6행) ·
+`filing_cycle_bootstrap_summary`(6행) · `permutation_summary`, 그리고 Stage 2 진단 7종.
+
+**Phase B 단독 BH.** 평가 38셀 중 `bh_pass` 18, `primary_discovery_phase_b` 14.
+
+| family | 셀 | bh_pass | discovery | robustness_pass / required | q_min |
+|---|---|---|---|---|---|
+| fin_log_mcap | 4 | 4 | 4 | **3 / 3** | 6.3e-10 |
+| fin_value_z | 4 | 4 | 4 | 0 / 3 | 3.1e-9 |
+| ev_payout_yield | 4 | 4 | 4 | 0 / 3 | 1.7e-14 |
+| fin_accruals_to_assets | 4 | 4 | 0 | 0 / 3 | 1.4e-5 |
+| ev_net_share_issuance_yoy | 4 | 2 | 2 | 0 / 3 | 0.0297 |
+| fin_gross_profitability | 8 | 0 | 0 | 0 / 3 | 0.4165 |
+| fin_asset_growth_yoy | 4 | 0 | 0 | 0 / 3 | 1.0 |
+| fin_sue | 6 | 0 | 0 | 0 / 6 | 1.0 |
+
+**등급은 전부 NE인데 이건 버그가 아니다.** family card의 `primary_discovery_cells`와
+`evidence_grade`는 `q_fdr_global_ab` 기준이고, 그 값은 phase=AB run이 만든다.
+`q_fdr_global_ab_min`이 8개 family 전부 null이다. 즉 **AB를 돌리기 전까지 등급은 미정이 정상**
+이고, §4의 14개는 "Phase B 단독 진단" 수치다. 리포트 §4도 그렇게 명시한다.
+
+**떨어진 곳은 temporal placebo 한 군데다.** discovery 14개의 게이트별 통과 현황이다.
+
+| 게이트 | true | false | null(미요구) |
+|---|---|---|---|
+| `tradable_pass` | 14 | 0 | 0 |
+| `period_sign_pass` | 14 | 0 | 0 |
+| `expected_sign_pass` | 14 | 0 | 0 |
+| `available_direction_pass` | 14 | 0 | 0 |
+| `nonoverlap_robustness_pass` | 9 | 1 | 4 |
+| **`temporal_null_pass`** | **3** | **7** | 4 |
+
+`robustness_pass=false` 7건이 전부 `temporal_null_pass=false`와 같은 행이다. family로는
+`ev_payout_yield` 3 · `fin_value_z` 3 · `ev_net_share_issuance_yoy` 1이다. IC 자체는 크다
+(`ev_payout_yield` cum 0~120에서 `ic_mean` 0.097, `icir` 1.12) 그런데 시계열 placebo와
+구분되지 않는다. `fin_log_mcap`만 요구 게이트 3개를 다 통과했다.
+
+**source 품질은 8개 중 7개가 `warn`이다.** §2.5 임계값 대비 실측은 이렇다.
+
+| 지표 | 임계 | 실측 | 판정 |
+|---|---|---|---|
+| `mapping_fallback_ratio` | 0.50 | 0.3195(`net_income`) / 0.3557(`controlling_net_income`) | 통과 |
+| `value_mismatch_ratio` | 0.01 | 0.0001 | 통과 |
+| **`revision_ratio`** | **0.10** | **0.1056 ~ 0.1259** | **초과 → grade A 상한** |
+
+즉 `warn`을 만든 건 정정 비율 하나다. 0.10을 근소하게 넘는다. `fin_log_mcap`과
+`ev_net_share_issuance_yoy`는 `not_applicable`이다.
+
+**커버리지가 얇은 family 둘.** `fin_sue`는 effective start 2025-05-02에 coverage 0.0000이고
+(B-1 6항 receipt-targeted XBRL 백필이 필요한 그 지점), `fin_gross_profitability`는 0.0315다.
+둘 다 q가 1.0 / 0.42로 나온 family와 일치한다 — 신호가 없다기보다 표본이 없다.
+
+**다음.** 같은 snapshot으로 `--phase A` 재실행 → `--phase AB`. 그래야 등급이 정해진다.
+
+### 3.1 발행된 official run (snapshot 2026-08-09, 기록용)
 
 | phase | run_id | config_hash | 결과 |
 |---|---|---|---|
@@ -502,6 +572,36 @@ strict PIT은 position 시점마다 그 이전 판을 필요로 하므로 판이
 남은 건 **2015·2017·2018·2019·2021·2022·2023 + 2025(보완)** 여덟 연도다. 실측 기준 연도당 약
 23분이라 합계 3시간 전후다. **이 수집이 끝나기 전에 Phase B를 돌리면 issuance family만 얇은
 데이터로 판정된다** — §4.1 4번의 선행 조건에 이 수집이 추가된다.
+
+### 4.1.3 `--phase B`에는 싼 smoke 경로가 없다 (2026-08-12에 확인)
+
+정식 실행 전에 통합 경로 버그를 미리 잡으려고 `--phase B --permutations 20 --output-root <스크래치>`
+로 돌렸는데, **`--permutations`와 `--smoke-family`는 `--phase B`에서 조용히 무시된다.**
+`run_phase_b_core`의 시그니처에 그 인자가 아예 없고(`horizon_scan.py`가 phase A 분기에서만
+넘긴다), §6 B-8 결합 permutation은 `config.raw["placebo"]["cross_sectional_repeats"]`(=100)을
+직접 읽는다. `--phase A`는 같은 플래그를 override로 받는다(`horizon_scan.py` 554~557행).
+
+결과적으로 그 실행은 **정식 비용 그대로**였고 manifest에도 `official: true`가 찍혔다
+(`--permutations`가 official 등급을 낮추지도 않는다 — Phase B의 official은
+`resolution.auto_selected`와 A0 manifest로만 결정된다). 4시간 동안 결합 permutation 단계에서
+안 끝났고, 그 사이 vintage 백필이 완료돼 capital 데이터가 낡은 실행이 되어 폐기했다.
+
+건진 것은 있다. 그 실행이 **readiness freeze를 처음으로 실제 데이터로 통과**했다.
+
+| 항목 | 값 |
+|---|---|
+| `m_b_ready` / `max_candidates` | **38 / 38** (전부 `ready`, `blocked_missing_dependency` 0) |
+| `combined_ab_hypothesis_count` | 113 (Phase A primary 75 + Phase B 38) |
+| `blocked_exploratory_count` | 0 |
+
+B-10 Stage 2 진단 7종도 전부 `core/`에 산출됐다(`capital_change_quality`,
+`filing_receipt_quality`, `receipt_value_pairing_quality`, `stock_metric_vintage_quality`,
+`quarterly_metric_quality`, `event_coverage`, `feature_coverage`) — §3.2가 적어둔 블로커 체인이
+실제로 풀렸다는 뜻이다.
+
+**남은 판단.** Phase B에 싼 리허설 경로가 없으면 통합 버그를 정식 실행 몇 시간 뒤에야 만난다.
+`--permutations`를 `run_phase_b_core`까지 배선하는 건 작지만 사전등록된 scan 경로를 건드리므로
+별도로 판단한다. 지금은 "무시된다"는 사실만 기록한다.
 
 ### 4.2 B-9 나머지
 - ~~evidence grade의 "source 비치명 경고"~~ → 2026-08-12 완료. Stage 2가 값을 내면서 풀렸다.
