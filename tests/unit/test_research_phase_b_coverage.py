@@ -32,11 +32,11 @@ def _rows(con: duckdb.DuckDBPyConnection, view: str) -> list[dict]:
     return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
 
 
-def _catalog_best_priority(metric_code: str) -> int:
+def _catalog_best_priority(metric_code: str, fs_basis: str = "") -> int:
     return min(
         rule.priority
         for rule in default_metric_mapping_rules()
-        if rule.is_active and rule.metric_code == metric_code
+        if rule.is_active and rule.metric_code == metric_code and rule.fs_div in ("", fs_basis)
     )
 
 
@@ -184,7 +184,7 @@ def test_revision_ratio_ignores_rows_whose_receipt_never_matched() -> None:
 
 def test_mapping_fallback_is_measured_against_the_catalog_not_the_data() -> None:
     con = _vintage_con()
-    best = _catalog_best_priority("revenue")
+    best = _catalog_best_priority("revenue", "CFS")
     # Every row came from a worse-than-preferred rule. Measured against the
     # data's own minimum this would read 0.0; against the catalog it is 1.0,
     # which is the fact that matters.
@@ -668,3 +668,51 @@ def test_event_coverage_splits_by_year_and_report_code() -> None:
         (2024, "11013"),
         (2025, "11011"),
     ]
+
+
+def test_mapping_fallback_is_judged_against_the_rule_for_this_basis() -> None:
+    con = _vintage_con()
+    cfs_best = _catalog_best_priority("net_income", "CFS")
+    ofs_best = _catalog_best_priority("net_income", "OFS")
+    assert cfs_best < ofs_best, "fixture assumes net_income's best rule names CFS"
+
+    # An OFS row matched by the best rule that can apply to OFS at all. Judged
+    # against one global minimum it looks like a fallback; it is not, and on
+    # the real lake that artifact read 65.5% fallback for net_income.
+    _add_vintage(
+        con,
+        metric_code="net_income",
+        fs_basis="OFS",
+        rcept_no="20240310000001",
+        mapping_priority=ofs_best,
+    )
+    _add_vintage(
+        con,
+        metric_code="net_income",
+        fs_basis="CFS",
+        rcept_no="20240310000002",
+        mapping_priority=cfs_best,
+    )
+    register_stock_metric_vintage_quality_view(con)
+    by_basis = {r["fs_basis"]: r for r in _rows(con, "stock_metric_vintage_quality")}
+
+    assert by_basis["OFS"]["catalog_best_priority"] == ofs_best
+    assert by_basis["OFS"]["mapping_fallback_rows"] == 0
+    assert by_basis["CFS"]["catalog_best_priority"] == cfs_best
+    assert by_basis["CFS"]["mapping_fallback_rows"] == 0
+
+
+def test_a_genuine_second_choice_rule_still_counts_as_fallback() -> None:
+    con = _vintage_con()
+    cfs_best = _catalog_best_priority("net_income", "CFS")
+    _add_vintage(
+        con,
+        metric_code="net_income",
+        fs_basis="CFS",
+        mapping_priority=cfs_best + 1,
+    )
+    register_stock_metric_vintage_quality_view(con)
+    (row,) = _rows(con, "stock_metric_vintage_quality")
+
+    assert row["mapping_fallback_rows"] == 1
+    assert row["mapping_fallback_ratio"] == 1.0

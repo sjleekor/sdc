@@ -682,6 +682,9 @@ _GRADE_ALL_PASS_KWARGS = dict(
     failed_gates=[],
     valid_subperiods=3,
     all_offsets_evaluable=True,
+    # Stated rather than defaulted: the parameter is fail-closed, so leaving it
+    # out is itself a grade-A cap (see the source-quality tests below).
+    source_quality_status="ok",
 )
 
 
@@ -724,6 +727,65 @@ def test_compute_phase_b_evidence_grade_pit_industry_family_caps_at_b() -> None:
     assert out == "B"
     # size (not PIT-industry-dependent) is unaffected
     assert compute_phase_b_evidence_grade(**_GRADE_ALL_PASS_KWARGS) == "A"
+
+
+def test_compute_phase_b_evidence_grade_source_quality_warning_caps_at_b() -> None:
+    """§9's source warning is non-fatal: it removes grade A, nothing more."""
+    out = compute_phase_b_evidence_grade(
+        **{**_GRADE_ALL_PASS_KWARGS, "source_quality_status": "warn"}
+    )
+    assert out == "B"
+
+
+def test_compute_phase_b_evidence_grade_unmeasured_source_quality_caps_at_b() -> None:
+    # "We could not check" is not a basis for the strongest claim, so it caps
+    # exactly like a breached threshold does.
+    out = compute_phase_b_evidence_grade(
+        **{**_GRADE_ALL_PASS_KWARGS, "source_quality_status": "unmeasured"}
+    )
+    assert out == "B"
+
+
+def test_compute_phase_b_evidence_grade_absent_source_quality_caps_at_b() -> None:
+    kwargs = {k: v for k, v in _GRADE_ALL_PASS_KWARGS.items() if k != "source_quality_status"}
+    # A run that produced no diagnostic at all cannot use its absence as
+    # evidence of quality — the parameter is fail-closed by default.
+    assert compute_phase_b_evidence_grade(**kwargs) == "B"
+
+
+def test_compute_phase_b_evidence_grade_not_applicable_source_quality_allows_a() -> None:
+    # A family that never reads the metric layer has nothing to warn about.
+    out = compute_phase_b_evidence_grade(
+        **{**_GRADE_ALL_PASS_KWARGS, "source_quality_status": "not_applicable"}
+    )
+    assert out == "A"
+
+
+def test_compute_phase_b_evidence_grade_source_warning_never_lowers_below_b() -> None:
+    # Screen-pass failure already routes to D; a source warning on top must not
+    # change that, and must not turn a C into something worse either.
+    assert (
+        compute_phase_b_evidence_grade(
+            **{
+                **_GRADE_ALL_PASS_KWARGS,
+                "screen_pass": False,
+                "failed_gates": ["primary_discovery"],
+                "source_quality_status": "warn",
+            }
+        )
+        == "D"
+    )
+    assert (
+        compute_phase_b_evidence_grade(
+            **{
+                **_GRADE_ALL_PASS_KWARGS,
+                "screen_pass": False,
+                "failed_gates": ["robustness_pass"],
+                "source_quality_status": "warn",
+            }
+        )
+        == "C"
+    )
 
 
 def test_compute_phase_b_evidence_grade_offset_not_fully_evaluable_caps_at_b() -> None:

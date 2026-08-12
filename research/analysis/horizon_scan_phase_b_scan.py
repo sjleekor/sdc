@@ -58,6 +58,7 @@ import duckdb
 import numpy as np
 import polars as pl
 
+from research.analysis.horizon_scan_phase_b_source_quality import source_quality_allows_grade_a
 from research.analysis.horizon_scan_runner import (
     apply_global_bh,
     assert_panel_join_preserves_keys,
@@ -696,6 +697,7 @@ def compute_phase_b_evidence_grade(
     all_offsets_evaluable: bool,
     n_independent_filing_windows: int | None = None,
     grade_a_min_independent_filing_windows: int = 20,
+    source_quality_status: str | None = None,
 ) -> str:
     """§9 B-9's A/B/C/D/NE evidence grade, mirroring
     ``horizon_scan_report.assign_evidence_grade``'s structure (role gate
@@ -720,12 +722,16 @@ def compute_phase_b_evidence_grade(
     the preregistered ``grade_a_min_independent_filing_windows`` threshold
     (config ``phase_b.grade_a_min_independent_filing_windows``, default 20).
 
-    Only the offset (non-overlap) diagnostic is folded into
-    ``all_offsets_evaluable`` today — the plan's other two "B" triggers
-    (source fallback ratios, segment diagnostics) have no computed values
-    anywhere in this pipeline yet (§7.1 lists the fields; B-8's remaining
-    diagnostics / B-10 build them). Wire those in here once they exist rather
-    than fabricating a warning signal that doesn't exist yet.
+    ``source_quality_status`` is §9's "source 비치명 경고", computed by
+    ``horizon_scan_phase_b_source_quality`` from B-10 Stage 2's vintage-side
+    diagnostics. Only ``"ok"``/``"not_applicable"`` allow grade A; a warning,
+    an unmeasurable ratio, and ``None`` (no diagnostic available at all) each
+    cap at B. It is deliberately non-fatal — it can never push a cell below
+    the grade its statistics earned.
+
+    Segment diagnostics, the plan's third "B" trigger, still have no computed
+    values anywhere (§5.5 is out of scope). Wire that one in here once it
+    exists rather than fabricating a warning signal that doesn't exist yet.
     """
     if role != "ready_primary":
         return "NE"
@@ -738,6 +744,7 @@ def compute_phase_b_evidence_grade(
         and all_offsets_evaluable
         and family not in PIT_INDUSTRY_CAPPED_FAMILIES
         and valid_subperiods != 2
+        and source_quality_allows_grade_a(source_quality_status)
         and (
             n_independent_filing_windows is None
             or n_independent_filing_windows >= grade_a_min_independent_filing_windows

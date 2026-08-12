@@ -404,6 +404,15 @@ phase_b:
     two_valid_period_segments_only: B
     long_nonoverlap_unassessable: B
     available_sign_flip: C
+    source_mapping_fallback: B
+    source_revision_rate: B
+    source_pairing_mismatch: B
+    source_quality_unmeasured: B
+  source_quality_thresholds:
+    mapping_fallback_warn: 0.50
+    revision_warn: 0.10
+    pairing_mismatch_warn: 0.01
+    unmeasured_is_capped: true
 ```
 
 Phase A/A0의 다음 공통 값은 그대로 상속한다.
@@ -424,6 +433,48 @@ stats.nw_gap_policy: calendar_session_distance
 placebo.cross_sectional_repeats: 100
 placebo.temporal_long_cell_repeats: 100
 ```
+
+### 2.5 source 비치명 경고와 grade A 상한 (2026-08-12 사전등록)
+
+§9가 evidence grade에 "source/segment 비치명 경고"를 두라고 정했지만 임계값은 정하지 않았다.
+B-10 Stage 2가 `mapping_fallback_ratio`·`revision_ratio`·`value_mismatch_ratio`를 실제로
+산출하게 되면서 이제 정할 수 있고, **Phase B를 한 번이라도 돌리기 전에 여기서 고정한다.**
+
+**성격.** 셋 다 **비치명**이다. grade A만 막고 B 아래로는 절대 내리지 않는다. 통계가 얻어낸
+등급을 데이터 품질 경고가 깎아내리지는 않는다는 뜻이다.
+
+| 신호 | 임계값 | 이유 |
+|---|---|---|
+| `mapping_fallback_ratio` | **0.50** | 절반을 넘으면 그 metric의 정체성이 주로 fallback 룰에 얹혀 있다 |
+| `revision_ratio` | **0.10** | 정정은 본래 드물다. 10%를 넘으면 가끔 있는 정정이 아니라 그 metric의 상시 성질이다 |
+| `value_mismatch_ratio` | **0.01** | 같은 접수의 두 시각을 맞춰 보는 항등 검사다. 1%를 넘는 불일치는 발행사 개별 오류가 아니라 계통 오차다 |
+
+**집계 방식.** family가 읽는 metric들 중 **가장 나쁜 것**으로 판정한다. 평균이 아니다 —
+피쳐는 입력들의 비율이라, 다섯 중 하나가 통째로 fallback이면 나머지 넷이 깨끗해도 그 피쳐는
+믿을 수 없다. metric **안에서는** 연도·보고서별 행 수로 가중한다(비율의 평균이 아니다).
+페어링은 `receipt_value_pairing_quality`의 grain에 metric이 없으므로 lake 전체 값 하나를
+metric layer를 읽는 모든 family에 적용한다 — 추출 경로에 대한 진술이지 개별 metric에 대한
+진술이 아니기 때문이다.
+
+**측정 불가는 깨끗함이 아니다.** 비율을 계산할 수 없으면(예: 접수 이력이 없어
+`revision_ratio`가 NULL) 임계값을 넘긴 것과 **똑같이** grade A를 막는다. grade A는 이
+파이프라인에서 가장 강한 주장이고, "알려진 위험을 확인하지 못했다"는 그 근거가 될 수 없다.
+진단 자체가 없는 run도 마찬가지다 — 없다는 사실이 통과의 증거가 될 수는 없다.
+
+**적용 대상.** `fin_log_mcap`(시가총액 기반)과 `ev_net_share_issuance_yoy`(raw 주식수·증감
+이력 직접 사용)는 metric layer를 거치지 않으므로 `not_applicable`이고 상한이 없다. 나머지
+여섯 family는 각자 읽는 metric 집합으로 판정한다.
+
+**정직성 고지.** 임계값은 각 비율의 의미에서 골랐고 family별 수치를 보고 조정하지 않았다.
+다만 작성 시점에 이미 측정된 값이 있었다 — 페어링 불일치율 0.000117, fallback 최댓값 0.36,
+`revision_ratio`는 전부 NULL. 즉 페어링 임계값은 오늘 기준으로 여유가 매우 크며 판별자가
+아니라 **회귀 탐지기**로 동작한다. 이 값들은 Phase B 결과(IC·q·등급)와 무관하므로
+outcome-blind 성질은 유지된다.
+
+이 임계값을 세운 직후 실측에서 `net_income`의 fallback이 0.655로 나왔는데, 원인은 데이터가
+아니라 정의였다 — 카탈로그 최선 priority가 CFS 전용 룰이라 OFS 행은 구조적으로 맞출 수
+없었다. `catalog_best_priority`를 `(metric_code, fs_basis)`별로 바꿔 고쳤고 값은 0.32가
+됐다. 임계값을 동결하기 전에 재 본 덕에 잡았다.
 
 ## 3. 재무 PIT 데이터 모델
 

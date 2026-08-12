@@ -96,6 +96,7 @@ from research.analysis.horizon_scan_phase_b_scan import (
     run_phase_b_continuous_scan,
     run_phase_b_event_scan,
 )
+from research.analysis.horizon_scan_phase_b_source_quality import compute_family_source_quality
 from research.analysis.horizon_scan_readiness import build_primary_hypothesis_registry
 from research.analysis.horizon_scan_run_spec import (
     REQUIRED_A0_MARTS,
@@ -1053,6 +1054,21 @@ def run_combined_ab(
     ).to_dicts()
     phase_b_ready_rows = [row for row in assembled if row.get("role") == "ready_primary"]
 
+    # §9 "source 비치명 경고" — read off the Phase B run's own B-10 Stage 2
+    # diagnostics rather than recomputed here, so the cap always refers to the
+    # same source layer the scan was built on. A run published before those
+    # artifacts existed simply has no rows, and every family then lands on
+    # `unmeasured`, which caps grade A. That is the intended reading: the
+    # absence of a check is not evidence that the check would pass.
+    def _phase_b_diagnostic(name: str) -> list[dict[str, Any]]:
+        path = phase_b_run_dir / "core" / f"{name}.parquet"
+        return pl.read_parquet(path).to_dicts() if path.is_file() else []
+
+    source_quality = compute_family_source_quality(
+        vintage_quality_rows=_phase_b_diagnostic("stock_metric_vintage_quality"),
+        pairing_quality_rows=_phase_b_diagnostic("receipt_value_pairing_quality"),
+    )
+
     q_threshold = float(config.raw["stats"]["global_bh_q"])
     combined = apply_combined_ab_bh(phase_a_rows, phase_b_ready_rows, q_threshold=q_threshold)
 
@@ -1084,6 +1100,7 @@ def run_combined_ab(
         all_offsets_evaluable = (
             not row.get("robustness_required") or row.get("offset_status") == "complete"
         )
+        quality = source_quality.get(row.get("family"), {})
         grade = compute_phase_b_evidence_grade(
             role=row.get("role", "ready_primary"),
             family=row.get("family"),
@@ -1095,8 +1112,9 @@ def run_combined_ab(
             grade_a_min_independent_filing_windows=int(
                 config.raw["phase_b"]["grade_a_min_independent_filing_windows"]
             ),
+            source_quality_status=quality.get("source_quality_status"),
         )
-        updated_combined.append({**row, **screen, "evidence_grade": grade})
+        updated_combined.append({**row, **screen, **quality, "evidence_grade": grade})
     combined = updated_combined
 
     combined_by_id = {r["hypothesis_id"]: r for r in combined}

@@ -16,8 +16,8 @@ over it to mean anything".
     blocker rather than a warning, and ``unlinked_receipt`` sizes how much XBRL
     the lake is still missing.
 
-``stock_metric_vintage_quality``   per (metric_code, bsns_year, reprt_code) over
-    the same mart. Availability fallback, revision ratio, mapping fallback,
+``stock_metric_vintage_quality``   per (metric_code, bsns_year, reprt_code,
+    fs_basis) over the same mart. Availability fallback, revision ratio, mapping fallback,
     period-end conflicts, and how many positions carry more than one captured
     vintage. §4.2 needs ``mapping_fallback_ratio``/``revision_ratio`` to exist
     before evidence grade "B" can take them into account.
@@ -111,36 +111,61 @@ def build_receipt_value_pairing_quality_sql(*, vintage_view: str = SMVF_TABLE) -
     """
 
 
+# The fs_basis values a vintage-fact row can carry: the two financial-statement
+# bases, plus '' for rows sourced from share counts / shareholder returns /
+# XBRL, which have no basis of their own.
+_FS_BASES: tuple[str, ...] = ("", "CFS", "OFS")
+
+
 def _catalog_best_priority_relation() -> str:
-    """``(metric_code, catalog_best_priority)`` from the mapping-rule catalog.
+    """``(metric_code, fs_basis, catalog_best_priority)`` from the rule catalog.
 
     Taken from the catalog rather than from whatever the lake happens to hold,
     so ``mapping_fallback_ratio`` means "this row did not come from the metric's
     preferred rule" in an absolute sense. A metric whose preferred rule never
     matches anywhere then honestly reports a ratio of 1.0 instead of silently
     redefining its second-choice rule as the baseline.
+
+    Keyed by ``fs_basis`` too, and that part is not cosmetic. ``net_income``'s
+    best rule is priority 10 = (CFS, CIS); an OFS row cannot match it no matter
+    how clean the filing is, because the rule names the other basis. Comparing
+    every row against one global minimum therefore reported 65.5% fallback for
+    ``net_income`` on the real lake — a statement about the rule table's shape,
+    not about the data. Per-basis, an OFS row is measured against the best OFS
+    rule (priority 30) and only a genuine second-choice match counts.
     """
-    best: dict[str, int] = {}
+    best: dict[tuple[str, str], int] = {}
     for rule in default_metric_mapping_rules():
         if not rule.is_active:
             continue
-        current = best.get(rule.metric_code)
-        if current is None or rule.priority < current:
-            best[rule.metric_code] = rule.priority
+        for basis in _FS_BASES:
+            # A rule with no fs_div declared applies to every basis.
+            if rule.fs_div not in ("", basis):
+                continue
+            key = (rule.metric_code, basis)
+            current = best.get(key)
+            if current is None or rule.priority < current:
+                best[key] = rule.priority
     if not best:
         return (
-            "SELECT NULL::VARCHAR AS metric_code, NULL::INTEGER AS catalog_best_priority"
-            " WHERE FALSE"
+            "SELECT NULL::VARCHAR AS metric_code, NULL::VARCHAR AS fs_basis,"
+            " NULL::INTEGER AS catalog_best_priority WHERE FALSE"
         )
     values = ", ".join(
-        f"({_sql_str_literal(metric_code)}, {priority})"
-        for metric_code, priority in sorted(best.items())
+        f"({_sql_str_literal(metric_code)}, {_sql_str_literal(basis)}, {priority})"
+        for (metric_code, basis), priority in sorted(best.items())
     )
-    return f"SELECT * FROM (VALUES {values}) AS t(metric_code, catalog_best_priority)"
+    return f"SELECT * FROM (VALUES {values}) AS t(metric_code, fs_basis, catalog_best_priority)"
 
 
 def build_stock_metric_vintage_quality_sql(*, vintage_view: str = SMVF_TABLE) -> str:
-    """One row per (metric_code, bsns_year, reprt_code) over B-2's output.
+    """One row per (metric_code, bsns_year, reprt_code, fs_basis) over B-2.
+
+    ``fs_basis`` is part of the grain because the mapping catalog is: a metric's
+    preferred rule can name one basis, so an OFS row must be judged against the
+    best OFS rule rather than against a CFS-only one (see
+    ``_catalog_best_priority_relation``). Collapsing the bases would make
+    ``catalog_best_priority`` ambiguous within a group.
 
     ``revision_ratio`` is computed over rows whose ``is_revision`` is *known* —
     a row whose receipt never matched ``dart_filing_receipt_raw`` has
@@ -152,24 +177,24 @@ def build_stock_metric_vintage_quality_sql(*, vintage_view: str = SMVF_TABLE) ->
     WITH catalog_priority AS ({catalog}),
     positions AS (
         SELECT
-            metric_code, bsns_year, reprt_code, ticker, statement_period_end, fs_basis,
+            metric_code, bsns_year, reprt_code, fs_basis, ticker, statement_period_end,
             COUNT(DISTINCT rcept_no) AS vintages
         FROM {vintage_view}
         GROUP BY 1, 2, 3, 4, 5, 6
     ),
     position_stats AS (
         SELECT
-            metric_code, bsns_year, reprt_code,
+            metric_code, bsns_year, reprt_code, fs_basis,
             COUNT(*) AS positions,
             COUNT(*) FILTER (WHERE vintages > 1) AS multi_vintage_positions,
             COUNT(*) FILTER (WHERE vintages > 1)::DOUBLE
                 / NULLIF(COUNT(*), 0) AS multi_vintage_ratio
         FROM positions
-        GROUP BY 1, 2, 3
+        GROUP BY 1, 2, 3, 4
     ),
     row_stats AS (
         SELECT
-            v.metric_code, v.bsns_year, v.reprt_code,
+            v.metric_code, v.bsns_year, v.reprt_code, v.fs_basis,
             ANY_VALUE(v.period_type) AS period_type,
             COUNT(*) AS rows,
             COUNT(DISTINCT v.ticker) AS tickers,
@@ -200,14 +225,14 @@ def build_stock_metric_vintage_quality_sql(*, vintage_view: str = SMVF_TABLE) ->
             COUNT(*) FILTER (WHERE v.source_table = 'dart_xbrl_fact_raw') AS xbrl_sourced_rows,
             COUNT(DISTINCT v.period_end_source) AS period_end_sources,
             COUNT(*) FILTER (WHERE v.period_end_conflict) AS period_end_conflict_rows,
-            COUNT(DISTINCT v.fs_basis) AS fs_bases,
             MIN(v.disclosed_date) AS min_disclosed_date,
             MAX(v.disclosed_date) AS max_disclosed_date,
             MIN(v.available_from) AS min_available_from,
             MAX(v.available_from) AS max_available_from
         FROM {vintage_view} v
-        LEFT JOIN catalog_priority cp ON cp.metric_code = v.metric_code
-        GROUP BY 1, 2, 3
+        LEFT JOIN catalog_priority cp
+          ON cp.metric_code = v.metric_code AND cp.fs_basis = v.fs_basis
+        GROUP BY 1, 2, 3, 4
     )
     SELECT
         r.*,
@@ -219,7 +244,8 @@ def build_stock_metric_vintage_quality_sql(*, vintage_view: str = SMVF_TABLE) ->
       ON p.metric_code = r.metric_code
      AND p.bsns_year = r.bsns_year
      AND p.reprt_code = r.reprt_code
-    ORDER BY r.metric_code, r.bsns_year, r.reprt_code
+     AND p.fs_basis = r.fs_basis
+    ORDER BY r.metric_code, r.bsns_year, r.reprt_code, r.fs_basis
     """
 
 

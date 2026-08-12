@@ -417,7 +417,44 @@ plan §4.4.2, 보강 결과는 아래 §4.3.1.
 (a)/(b) 분기만 측정 뒤에 붙인다.
 
 ### 4.2 B-9 나머지
-- evidence grade의 "source/segment 비치명 경고" — B-PR12 "정직하게 남긴 제약" 참고. mapping_fallback_ratio/revision_ratio/segment 진단이 생기면 `compute_phase_b_evidence_grade`의 "B" 조건에 추가해야 함.
+- ~~evidence grade의 "source 비치명 경고"~~ → 2026-08-12 완료. Stage 2가 값을 내면서 풀렸다.
+  `research/analysis/horizon_scan_phase_b_source_quality.py`가 family별로
+  `mapping_fallback_ratio`·`revision_ratio`·`value_mismatch_ratio`를 판정하고,
+  `compute_phase_b_evidence_grade`가 그 결과로 grade A만 막는다(B 아래로는 내리지 않는다).
+  임계값과 근거는 plan **§2.5**에 사전등록했다 — Phase B를 한 번도 돌리기 전에 고정했다.
+
+  설계에서 두 가지가 중요하다.
+
+  1. **family가 읽는 metric 중 가장 나쁜 것**으로 판정한다. 평균이 아니다. 피쳐는 입력들의
+     비율이라 하나가 통째로 fallback이면 나머지가 깨끗해도 못 믿는다. metric 안에서는 연도별
+     행 수로 가중한다. family→metric 의존 관계는 추측이 아니라 피쳐 SQL에서 읽어 적었다
+     (`FAMILY_METRIC_DEPENDENCIES`).
+  2. **측정 불가는 깨끗함이 아니다.** 비율이 NULL이면 임계값을 넘긴 것과 똑같이 grade A를
+     막는다. 인자를 아예 안 주는 호출도 마찬가지다(fail-closed). 진단이 없다는 사실이 통과의
+     근거가 될 수는 없다.
+
+  `fin_log_mcap`(시가총액)과 `ev_net_share_issuance_yoy`(raw 직접)는 metric layer를 안 거치니
+  `not_applicable`이다.
+
+  **임계값 세운 직후 정의 결함을 하나 잡았다.** 실측에서 `net_income` fallback이 0.655로
+  나왔는데 원인이 데이터가 아니라 `catalog_best_priority`의 정의였다 — 카탈로그 최선
+  priority가 CFS 전용 룰(10)이라 OFS 행은 구조적으로 못 맞춘다. `(metric_code, fs_basis)`별로
+  바꿔 0.32가 됐고, `stock_metric_vintage_quality`의 grain에도 `fs_basis`를 넣었다.
+  임계값을 동결하기 전에 재 본 덕에 잡았다.
+
+  현재 lake(`2026-08-09`) 기준 판정:
+
+  | family | status | fallback(worst metric) | pairing |
+  |---|---|---|---|
+  | `fin_log_mcap` / `ev_net_share_issuance_yoy` | not_applicable | — | — |
+  | `fin_value_z` / `fin_sue` | unmeasured | 0.356 (`controlling_net_income`) | 0.000117 |
+  | `fin_gross_profitability` / `fin_asset_growth_yoy` / `fin_accruals_to_assets` | unmeasured | 0.320 (`net_income`) | 0.000117 |
+  | `ev_payout_yield` | unmeasured | 0.000 (`issued_shares`) | 0.000117 |
+
+  여섯 family가 전부 `unmeasured`인 이유는 하나다 — 접수 이력이 아직 없어 `revision_ratio`가
+  NULL이다. A2 백필이 export되면 저절로 풀린다. fallback 0.32~0.36은 CIS 대신 IS로 보고하는
+  발행사에서 나오는 실제 신호이고 임계값 0.50 아래다.
+- segment 진단(§5.5)은 여전히 값이 없다 — 생기면 같은 자리에 붙인다.
 
 ### 4.3.1 isu_dcrs_stle 카탈로그 v2 (2026-08-12)
 
