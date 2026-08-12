@@ -375,18 +375,21 @@ def test_cfs_ofs_mixed_quarters_never_produce_a_ttm() -> None:
 
 def test_weighted_average_shares_reconstruction() -> None:
     con = _base_con()
-    for reprt_code, amount, rcept_no in [
-        ("11013", 1000, "20230410000001"),
-        ("11012", 1050, "20230810000001"),
-        ("11014", 1080, "20231110000001"),
-        ("11011", 1100, "20240310000001"),
+    # Each filing's context is its own year-to-date duration — a Q1 report
+    # cannot carry a Jan-Dec context, and B-2 now refuses to read one as this
+    # filing's period (see test_metric_vintages.py, 08 §4.3.2).
+    for reprt_code, amount, rcept_no, period_end in [
+        ("11013", 1000, "20230410000001", "2023-03-31"),
+        ("11012", 1050, "20230810000001", "2023-06-30"),
+        ("11014", 1080, "20231110000001", "2023-09-30"),
+        ("11011", 1100, "20240310000001", "2023-12-31"),
     ]:
         con.execute(
             "INSERT INTO dart_xbrl_fact_raw VALUES "
             "('00126380','005930',2023,?,?,"
             "'ifrs-full_WeightedAverageNumberOfOrdinarySharesOutstandingBasic','가중평균주식수',"
-            "'ctx1','duration',DATE '2023-01-01',DATE '2023-12-31',NULL,'[]',?,'가중평균주식수')",
-            [reprt_code, rcept_no, amount],
+            "'ctx1','duration',DATE '2023-01-01',?::DATE,NULL,'[]',?,'가중평균주식수')",
+            [reprt_code, rcept_no, period_end, amount],
         )
     _register(con)
 

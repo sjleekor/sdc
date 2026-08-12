@@ -523,12 +523,12 @@ plan §4.4.2, 보강 결과는 아래 §4.3.1.
   범위 확장.
 - §5.5 segment/freshness 진단(8개 축) — B-PR12가 이미 명시적으로 미룬 부분, 아직 스코프 밖.
 
-### 4.3.2 Stage 2가 바로 찾아낸 B-2 결함 2건 (2026-08-12) — **미해결**
+### 4.3.2 Stage 2가 바로 찾아낸 B-2 결함 3건 (2026-08-12) — **해결**
 
 새 진단 5종을 실제 lake(`snapshot_date=2026-08-09`, vintage fact 1,524,088행)에 돌리자마자
-`stock_metric_vintage_fact`의 결함 두 개가 드러났다. **둘 다 아직 안 고쳤다.** 원인은 하나다 —
-한 filing의 XBRL fact가 **여러 회계기간(당기·전기·전전기)과 연결/별도 두 축**에 걸쳐 있는데
-B-2가 filing당 하나뿐인 것처럼 다룬다.
+`stock_metric_vintage_fact`의 결함이 드러났다. 처음 둘을 적었고, 고치는 과정에서 같은 뿌리의
+세 번째를 찾았다. 원인은 하나다 — 한 filing의 XBRL fact가 **여러 회계기간(당기·전기·전전기)과
+연결/별도 두 축**에 걸쳐 있는데 B-2가 filing당 하나뿐인 것처럼 다룬다.
 
 **결함 1 — `statement_period_end`가 최대 2년 어긋난다.** `xbrl_period_by_filing`이
 `MIN(COALESCE(instant_date, period_end))`을 쓴다. 그런데 FY2024 사업보고서의 XBRL에는
@@ -544,8 +544,14 @@ B-2가 filing당 하나뿐인 것처럼 다룬다.
 | stlm | 2024-12-31 | 250 |
 
 `stlm_dt`는 2,545건 전부 2024-12-31로 정확하다 — 즉 올바른 값이 있는데도 틀린 쪽을 우선한다.
-`statement_period_end`는 이 마트의 **grain 컬럼**이고 B-3의 quarter/seq_key, B-4의 구간 조인,
-B-6의 이벤트 키가 전부 여기서 파생된다.
+
+**영향 범위는 처음 적은 것보다 좁다(정정).** 처음에 "B-3의 quarter/seq_key, B-4의 구간 조인,
+B-6의 이벤트 키가 전부 여기서 파생된다"고 적었는데 확인해 보니 아니다. B-3의 `quarter_ordinal`과
+`seq_key`는 `reprt_code`에서 나오고(`seq_key = bsns_year * 4 + quarter_ordinal`), B-4는
+`statement_period_end`를 아예 안 쓰며, B-6은 조인 키가 아니라 서술 컬럼으로만 나른다. 실제 피해는
+세 가지다 — 마트 grain 컬럼의 값이 틀리고, 그게 B-3·B-6까지 그대로 실려 가고,
+`period_end_conflict`가 98.3%에서 울려 진단으로 못 쓴다. 수정 후 B-3 행 수가 1,443,122 →
+1,443,105로 거의 안 움직인 것이 이 정정을 뒷받침한다.
 
 **결함 2 — 페어링이 기간과 fs_div를 안 맞춘다.** XBRL 페어링 조인이
 `(corp_code, bsns_year, reprt_code, rcept_no, concept_id)`만 쓰고 기간도 `fs_div`도 안 건다.
@@ -564,21 +570,63 @@ XBRL 후보는 연결 3개(FY2022 71,379,940,397 · FY2023 139,211,241,785 · FY
 `receipt_value_pairing_required: verified_same_receipt`이므로 이대로면 전 구간이 게이트에
 걸린다.
 
-**지금 당장 무엇을 막고 있진 않다.** `assert_receipt_value_pairing_verified`는 single-captured-receipt
-불변식(`multi_receipt_filing_keys`)만 검사하고 `receipt_value_pairing_status`는 아직 아무 게이트도
-읽지 않는다. 하지만 결함 1은 값이 조용히 틀린 채 downstream 전체로 퍼진다.
+**결함 3 — XBRL 출처 metric 값이 비교연도 것일 수 있다.** 결함 2를 고치다 같은 뿌리의 세 번째를
+찾았다. `candidates`의 `dart_xbrl_fact_raw` 분기가 기간 필터 없이 rule에 조인하고
+`statement_period_end`로는 `pe.period_end`를 붙인다. winner tie-break(`_XBRL_RANK_SQL`)도 기간을
+안 보므로, **2년 전 숫자가 당기 날짜를 달고 metric 값이 될 수 있다.** 셋 중 이게 제일 나쁘다 —
+비어 있는 게 아니라 들어 있는 채로 틀린다. 해당 metric은 `weighted_avg_shares`,
+`diluted_shares`, `depreciation_expense`, `amortization_intangible_assets`다.
 
-**고칠 방향**(구현 전, 사전 기록):
+**고친 방법.** 세 곳 다 같은 원칙이다 — XBRL fact는 기간과 연결기준을 가지므로 그걸 맞춘다.
+공통 CTE `xbrl_scoped`가 `period_end_effective`(`COALESCE(instant_date, period_end)`),
+`duration_days`, `xbrl_fs_basis`(축에서 읽은 CFS/OFS)를 계산하고 세 곳이 함께 쓴다.
 
-1. `xbrl_period_by_filing`은 MIN이 아니라 **그 filing 자신의 기간**을 골라야 한다. `reprt_code`와
-   `bsns_year`로 기대 기간말을 계산해 그에 맞는 XBRL 컨텍스트를 고르거나, XBRL보다 `stlm_dt`를
-   우선한다(실측상 `stlm_dt`가 정확했다).
-2. 페어링 조인에 **기간 일치**와 **fs_div ↔ Consolidated/Separate 축 일치**를 추가한다. 맞는
-   컨텍스트가 없으면 `unlinked_receipt`이지 `value_mismatch`가 아니다.
+1. `xbrl_period_by_filing` — MIN → **MAX**. 비교표시는 항상 과거이므로 그 filing 자신의 기간이
+   가장 늦다. 더해서 **접수일보다 뒤인 컨텍스트는 버린다** — 제출 시점에 끝나지도 않은 기간을
+   그 filing의 보고 기간으로 볼 수 없다.
+2. 페어링 조인 — `period_end_effective = pe.period_end`와 `xbrl_fs_basis = f.fs_div`를 추가.
+   축이 안 붙은 컨텍스트는 특정 fs_div에 귀속시킬 수 없으므로 페어링 대상에서 뺀다(실측:
+   FY2024 연간 2,545건 전부 축 표시가 있어 손실이 거의 없다). 맞는 컨텍스트가 없으면
+   `unlinked_receipt`이지 `value_mismatch`가 아니다.
+   추가로 `duration_pref`를 뒀다. 분기·반기 filing은 **같은 날 끝나는 3개월 컨텍스트와 누적
+   컨텍스트를 둘 다** 싣는데, `thstrm_amount`가 어느 쪽인지는 재무제표 종류에 달렸다 —
+   IS/CIS는 3개월, CF는 누적(B-3이 `direct_interim` / `cumulative_reported`로 구분하는 바로 그
+   규칙). 선호별로 winner를 하나씩 내고 조인이 `sj_div`로 고른다. 반기 XBRL의 31%가 이
+   중복 duration을 갖고 있어 실제로 필요하다.
+3. XBRL 후보 분기 — 기간 필터를 추가하고, 남은 후보 중 **누적(가장 긴) duration**을 선호한다.
+   이 경로로 오는 metric은 전부 현금흐름표 항목이라 OpenDART가 누적으로 낸다.
 
-`metrics_normalize.py`(구 canonical 경로)는 golden 픽스처로 동결돼 있으므로 건드리지 않는다.
-B-2는 Phase B 전용이라 골든 대상이 아니고, 수정하면 B-3~B-6 출력이 전부 바뀐다 — 별도 작업
-단위로 다루고 이 로그에 전후 수치를 남긴다.
+**전후 실측** (`snapshot_date=2026-08-09` 전체):
+
+| 지표 | before | after |
+|---|---|---|
+| vintage fact 행 수 | 1,524,088 | 1,524,061 (−27) |
+| `period_end_conflict` | 1,498,788 (**98.3%**) | **0** |
+| FY2024 연간 `statement_period_end` 최빈값 | 2022-12-31 (64,688행) | **2024-12-31 (65,926행)** |
+| 페어링 `verified` | 212,011 | **1,344,746** |
+| 페어링 `value_mismatch` | 1,132,907 | **157** |
+| 페어링 `unlinked` | 1,670 | 1,685 |
+| XBRL 출처 행 | 11,001 | 10,974 (−27) |
+| B-3 행 수 | 1,443,122 | 1,443,105 |
+
+연간 `verified_ratio`는 연도별 0.02~0.42에서 **0.996~1.000**으로, `value_mismatch_ratio`는
+0.58~0.98에서 **0.0**으로 바뀌었다(2024년만 4건, 0.000066). 12월 결산이 아닌 회사도 이제 제
+날짜(2024-09-30, 2024-03-31, 2024-06-30, 2024-11-30)로 붙는다.
+
+이제서야 `receipt_value_pairing_required: verified_same_receipt`를 게이트로 쓸 수 있다. 그전
+값은 데이터가 아니라 조인 버그를 재고 있었다.
+
+**남은 157건은 조인 결함이 아니다.** 1,346,588건 중 0.0117%이고 **Q1(11013)
+`net_income`·`controlling_net_income`에 72건이 몰려 있다.** Q1은 3개월과 누적이 같은 기간이라
+`duration_pref`가 갈라 주지 못하는 유일한 분기다. 값 자체가 다른 실제 불일치일 수 있으니
+`receipt_value_pairing_quality`로 계속 지켜보고, 게이트를 켤 때 별도로 판단한다.
+
+**테스트.** 기존 픽스처는 filing당 XBRL 컨텍스트가 하나뿐이라 세 결함을 다 놓쳤다. 실제 filing의
+모양(3개 비교연도 × CFS/OFS)으로 픽스처를 바꾸고 회귀 테스트 8개를 추가했다. 수정 전 코드에
+돌리면 그중 7개가 실패한다.
+
+`metrics_normalize.py`(구 canonical 경로)는 golden 픽스처로 동결돼 있으므로 건드리지 않았다.
+B-2는 Phase B 전용이라 골든 대상이 아니다.
 
 ### 4.4 이 문서 밖 — Phase A 트랙에 남은 것
 

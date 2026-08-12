@@ -23,7 +23,18 @@ def _weekdays_in(year: int, month: int) -> list[date]:
     return days
 
 
-_TRADING_DAYS = [d for month in range(1, 7) for d in _weekdays_in(2026, month)]
+_TRADING_DAYS = [
+    d for year in (2025, 2026) for month in range(1, 13) for d in _weekdays_in(year, month)
+]
+
+# Real filings always name the consolidation basis on a dimension axis — all
+# 2,545 FY2024 annual filings in the 2026-08-09 lake carry axis-marked
+# contexts. A fact without one cannot be paired against a specific fs_div, so
+# fixtures that leave dimensions empty describe a filing that does not exist
+# and hid the pairing defect in 08 §4.3.2.
+_AXIS = "ifrs-full:ConsolidatedAndSeparateFinancialStatementsAxis"
+_DIM_CFS = f'["{_AXIS}=ifrs-full:ConsolidatedMember"]'
+_DIM_OFS = f'["{_AXIS}=ifrs-full:SeparateMember"]'
 
 
 def _base_con() -> duckdb.DuckDBPyConnection:
@@ -81,7 +92,9 @@ def test_baseline_identity_transform_no_receipt_history() -> None:
     con.execute(
         "INSERT INTO dart_xbrl_fact_raw VALUES "
         "('00126380','005930',2025,'11011','20260310000001','ifrs-full_Revenue','매출액',"
-        "'ctx1','duration',DATE '2025-01-01',DATE '2025-12-31',NULL,'[]',1000.0000,'매출액')"
+        "'ctx1','duration',DATE '2025-01-01',DATE '2025-12-31',NULL,'"
+        + _DIM_CFS
+        + "',1000.0000,'매출액')"
     )
     con.execute(
         "INSERT INTO dart_share_count_raw VALUES "
@@ -228,7 +241,9 @@ def test_period_end_conflict_is_flagged_and_xbrl_wins() -> None:
     con.execute(
         "INSERT INTO dart_xbrl_fact_raw VALUES "
         "('00126380','005930',2025,'11011','20260310000001','ifrs-full_Revenue','매출액',"
-        "'ctx1','duration',DATE '2025-01-01',DATE '2025-12-31',NULL,'[]',1000.0000,'매출액')"
+        "'ctx1','duration',DATE '2025-01-01',DATE '2025-12-31',NULL,'"
+        + _DIM_CFS
+        + "',1000.0000,'매출액')"
     )
     con.execute(
         "INSERT INTO dart_share_count_raw VALUES "
@@ -277,7 +292,9 @@ def test_xbrl_value_mismatch_is_flagged_not_silently_accepted() -> None:
     con.execute(
         "INSERT INTO dart_xbrl_fact_raw VALUES "
         "('00126380','005930',2025,'11011','20260310000001','ifrs-full_Revenue','매출액',"
-        "'ctx1','duration',DATE '2025-01-01',DATE '2025-12-31',NULL,'[]',999.0000,'매출액')"
+        "'ctx1','duration',DATE '2025-01-01',DATE '2025-12-31',NULL,'"
+        + _DIM_CFS
+        + "',999.0000,'매출액')"
     )
     _register(con)
 
@@ -334,3 +351,281 @@ def test_no_is_active_dependency_on_corp_master() -> None:
     # metric candidates (issued_shares, treasury_shares) are correctly emitted.
     row_count = con.execute(f"SELECT COUNT(*) FROM {SMVF_TABLE}").fetchone()[0]
     assert row_count == 2
+
+
+# --- 08 §4.3.2: an XBRL fact belongs to a period and a consolidation basis ---
+#
+# The fixtures above describe a filing whose XBRL holds exactly one context.
+# Real filings hold three comparative years on two consolidation axes, and that
+# is the shape in which all three defects below appear.
+
+
+def _add_financial(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    amount: float,
+    fs_div: str = "CFS",
+    sj_div: str = "IS",
+    account_id: str = "ifrs-full_Revenue",
+    account_nm: str = "매출액",
+    bsns_year: int = 2025,
+    reprt_code: str = "11011",
+    rcept_no: str = "20260310000001",
+    ord_: int = 1,
+) -> None:
+    con.execute(
+        "INSERT INTO dart_financial_statement_raw "
+        "(corp_code, ticker, bsns_year, reprt_code, fs_div, sj_div, account_id, "
+        "account_nm, ord, thstrm_amount, currency, rcept_no) "
+        "VALUES ('00126380','005930',?,?,?,?,?,?,?,?, 'KRW', ?)",
+        [bsns_year, reprt_code, fs_div, sj_div, account_id, account_nm, ord_, amount, rcept_no],
+    )
+
+
+def _add_xbrl(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    value: float,
+    context_id: str,
+    period_start: date | None = None,
+    period_end: date | None = None,
+    instant_date: date | None = None,
+    dimensions: str = _DIM_CFS,
+    concept_id: str = "ifrs-full_Revenue",
+    label: str = "매출액",
+    bsns_year: int = 2025,
+    reprt_code: str = "11011",
+    rcept_no: str = "20260310000001",
+) -> None:
+    con.execute(
+        "INSERT INTO dart_xbrl_fact_raw VALUES " "('00126380','005930',?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [
+            bsns_year,
+            reprt_code,
+            rcept_no,
+            concept_id,
+            label,
+            context_id,
+            "instant" if instant_date is not None else "duration",
+            period_start,
+            period_end,
+            instant_date,
+            dimensions,
+            value,
+            label,
+        ],
+    )
+
+
+def _three_comparative_years(con: duckdb.DuckDBPyConnection, dimensions: str = _DIM_CFS) -> None:
+    """What a FY2025 annual filing's XBRL actually contains for one concept."""
+    for year, value in ((2023, 700.0), (2024, 850.0), (2025, 1000.0)):
+        _add_xbrl(
+            con,
+            value=value,
+            context_id=f"ctx{year}",
+            period_start=date(year, 1, 1),
+            period_end=date(year, 12, 31),
+            dimensions=dimensions,
+        )
+
+
+def _revenue_row(con: duckdb.DuckDBPyConnection, fs_basis: str = "CFS") -> tuple:
+    return con.execute(
+        f"SELECT statement_period_end, receipt_value_pairing_status, period_end_source, "
+        f"period_end_conflict, value_numeric FROM {SMVF_TABLE} "
+        f"WHERE metric_code = 'revenue' AND fs_basis = '{fs_basis}'"
+    ).fetchone()
+
+
+def test_statement_period_end_is_the_filings_own_period_not_the_oldest_comparative() -> None:
+    con = _base_con()
+    _add_financial(con, amount=1000.0)
+    _three_comparative_years(con)
+    _register(con)
+
+    period_end, pairing, source, conflict, _ = _revenue_row(con)
+
+    # Taking MIN() over the three contexts put this on 2023-12-31, and
+    # statement_period_end is the mart's grain.
+    assert period_end == date(2025, 12, 31)
+    assert source == "xbrl"
+    assert conflict is False
+    # And the value now pairs against its own year rather than an arbitrary one.
+    assert pairing == "verified_same_receipt"
+
+
+def test_a_context_dated_after_the_receipt_cannot_be_the_period_end() -> None:
+    con = _base_con()
+    _add_financial(con, amount=1000.0)
+    _three_comparative_years(con)
+    # A forward-looking context: this filing was submitted 2026-03-10, so it
+    # does not report on a period ending 2026-12-31.
+    _add_xbrl(
+        con,
+        value=1200.0,
+        context_id="ctx_future",
+        period_start=date(2026, 1, 1),
+        period_end=date(2026, 12, 31),
+    )
+    _register(con)
+
+    period_end, pairing, _, _, _ = _revenue_row(con)
+
+    assert period_end == date(2025, 12, 31)
+    assert pairing == "verified_same_receipt"
+
+
+def test_stlm_date_agrees_with_the_xbrl_period_once_the_right_context_is_picked() -> None:
+    con = _base_con()
+    _add_financial(con, amount=1000.0)
+    _three_comparative_years(con)
+    con.execute(
+        "INSERT INTO dart_share_count_raw VALUES "
+        "('00126380','005930',2025,'11011','20260310000001','합계',5000,100,DATE '2025-12-31')"
+    )
+    _register(con)
+
+    _, _, source, conflict, _ = _revenue_row(con)
+
+    # period_end_conflict only means something once both sides name the same
+    # period; against the oldest comparative it fired on 98.3% of real rows.
+    assert source == "xbrl"
+    assert conflict is False
+
+
+def test_a_separate_statement_row_pairs_against_the_separate_context() -> None:
+    con = _base_con()
+    _add_financial(con, amount=1000.0, fs_div="CFS")
+    _add_financial(con, amount=400.0, fs_div="OFS", ord_=2)
+    _three_comparative_years(con, dimensions=_DIM_CFS)
+    _three_comparative_years_ofs(con)
+    _register(con)
+
+    assert _revenue_row(con, "CFS")[1] == "verified_same_receipt"
+    # SeparateMember always loses the dimension tie-break, so before the fix
+    # this row was compared against the consolidated 1000 and could never
+    # verify — that alone made value_mismatch unavoidable for half the rows.
+    assert _revenue_row(con, "OFS")[1] == "verified_same_receipt"
+
+
+def _three_comparative_years_ofs(con: duckdb.DuckDBPyConnection) -> None:
+    for year, value in ((2023, 280.0), (2024, 340.0), (2025, 400.0)):
+        _add_xbrl(
+            con,
+            value=value,
+            context_id=f"ctx{year}_ofs",
+            period_start=date(year, 1, 1),
+            period_end=date(year, 12, 31),
+            dimensions=_DIM_OFS,
+        )
+
+
+def test_interim_income_statement_pairs_against_the_three_month_duration() -> None:
+    con = _base_con()
+    # OpenDART's thstrm_amount for an interim IS is the 3-month figure.
+    _add_financial(con, amount=300.0, sj_div="IS", reprt_code="11012", rcept_no="20250814000001")
+    _add_xbrl(
+        con,
+        value=300.0,
+        context_id="ctx_q2",
+        period_start=date(2025, 4, 1),
+        period_end=date(2025, 6, 30),
+        reprt_code="11012",
+        rcept_no="20250814000001",
+    )
+    _add_xbrl(
+        con,
+        value=550.0,
+        context_id="ctx_ytd",
+        period_start=date(2025, 1, 1),
+        period_end=date(2025, 6, 30),
+        reprt_code="11012",
+        rcept_no="20250814000001",
+    )
+    _register(con)
+
+    period_end, pairing, _, _, value = _revenue_row(con)
+
+    assert period_end == date(2025, 6, 30)
+    assert value == 300
+    assert pairing == "verified_same_receipt"
+
+
+def test_interim_cash_flow_pairs_against_the_cumulative_duration() -> None:
+    con = _base_con()
+    # ... while a CF thstrm_amount is year-to-date, so the same filing needs
+    # the opposite context. One rule for both is what makes this a defect
+    # rather than a preference.
+    _add_financial(
+        con,
+        amount=550.0,
+        sj_div="CF",
+        account_id="ifrs-full_CashFlowsFromUsedInOperatingActivities",
+        account_nm="영업활동현금흐름",
+        reprt_code="11012",
+        rcept_no="20250814000001",
+    )
+    for context_id, start, value in (
+        ("ctx_q2", date(2025, 4, 1), 300.0),
+        ("ctx_ytd", date(2025, 1, 1), 550.0),
+    ):
+        _add_xbrl(
+            con,
+            value=value,
+            context_id=context_id,
+            period_start=start,
+            period_end=date(2025, 6, 30),
+            concept_id="ifrs-full_CashFlowsFromUsedInOperatingActivities",
+            label="영업활동현금흐름",
+            reprt_code="11012",
+            rcept_no="20250814000001",
+        )
+    _register(con)
+
+    row = con.execute(
+        f"SELECT value_numeric, receipt_value_pairing_status FROM {SMVF_TABLE} "
+        f"WHERE metric_code = 'operating_cash_flow'"
+    ).fetchone()
+
+    assert row[0] == 550
+    assert row[1] == "verified_same_receipt"
+
+
+def test_an_xbrl_sourced_metric_takes_the_current_period_not_a_comparative() -> None:
+    con = _base_con()
+    # No financial-statement counterpart: amortization comes straight from XBRL,
+    # so nothing else pins its period down.
+    for year, value in ((2023, 70.0), (2024, 85.0), (2025, 100.0)):
+        _add_xbrl(
+            con,
+            value=value,
+            context_id=f"ctx_amort_{year}",
+            period_start=date(year, 1, 1),
+            period_end=date(year, 12, 31),
+            concept_id="ifrs-full_AmortisationExpense",
+            label="무형자산상각비",
+        )
+    _register(con)
+
+    row = con.execute(
+        f"SELECT statement_period_end, value_numeric FROM {SMVF_TABLE} "
+        f"WHERE metric_code = 'amortization_intangible_assets'"
+    ).fetchone()
+
+    assert row[0] == date(2025, 12, 31)
+    # A two-year-old number carrying the current period's date is the worst of
+    # the three defects: it is silently wrong rather than missing.
+    assert row[1] == 100
+
+
+def test_pairing_is_unlinked_when_no_context_matches_the_basis() -> None:
+    con = _base_con()
+    _add_financial(con, amount=400.0, fs_div="OFS")
+    # Consolidated-only XBRL — a standalone-only filer's opposite case.
+    _three_comparative_years(con, dimensions=_DIM_CFS)
+    _register(con)
+
+    # Not "value_mismatch": the two numbers were never comparable, and calling
+    # that a mismatch is what made the frozen tolerance unusable as a gate.
+    assert _revenue_row(con, "OFS")[1] == "unlinked_receipt"

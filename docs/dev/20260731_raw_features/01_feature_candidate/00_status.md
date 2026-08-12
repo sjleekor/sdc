@@ -45,7 +45,7 @@ Grade A 6개 중 `px_amihud_20d`/`px_near_52w_high`는 baseline 모델에 이미
 ## 4. T2 — 코드는 됐는데 데이터가 없다
 
 작업 패키지 B-0~B-9 완료(§5.5 segment 진단 제외), B-10은 Stage 1·2·4 완료(2026-08-12),
-Stage 3·5 미착수. 유닛 테스트 899개 통과(2026-08-12).
+Stage 3·5 미착수. 유닛 테스트 907개 통과(2026-08-12).
 
 그런데 Phase B candidate **38개가 전부 `blocked_missing_dependency`**(`M_B_ready=0`)다.
 원인은 하나다 — 로컬 lake에 `dart_filing_receipt_raw`/`dart_capital_change_raw` parquet가
@@ -70,24 +70,26 @@ Stage 3·5 미착수. 유닛 테스트 899개 통과(2026-08-12).
 대기 중에 한 것: `isu_dcrs_stle` 카탈로그 v2(미분류 22.4%→4.3%), B-10 Stage 2 진단 7종과
 Stage 4 family 카드, `sync-filings`를 `dart-backfill-all-years.sh`에 연결.
 
-## 4c. 새로 확정된 블로커 — B-2 결함 2건 (2026-08-12)
+## 4c. B-2 결함 3건 — 찾고 고쳤다 (2026-08-12)
 
-Stage 2 진단을 실제 lake에 돌리자마자 `stock_metric_vintage_fact`의 결함 두 개가 나왔다.
-**아직 안 고쳤다.** 상세와 수정 방향은 `08` §4.3.2.
+Stage 2 진단을 실제 lake에 돌리자마자 `stock_metric_vintage_fact`의 결함이 나왔고, 고치는
+과정에서 같은 뿌리의 세 번째를 찾았다. 뿌리는 하나다 — 한 filing의 XBRL fact가 여러
+회계기간과 연결/별도 두 축에 걸쳐 있는데 B-2가 하나뿐인 것처럼 다뤘다. 상세는 `08` §4.3.2.
 
-1. `statement_period_end`가 최대 2년 어긋난다 — XBRL 기간을 `MIN()`으로 골라 비교표시용
-   전전기가 뽑힌다. FY2024 연간 67,276행 중 64,688행이 2022-12-31이다. 이 컬럼은 마트의
-   grain이고 B-3~B-6이 전부 여기서 파생된다.
-2. XBRL 페어링이 기간과 `fs_div`를 안 맞춘다 — OFS 행이 항상 CFS 값과 비교돼
-   `value_mismatch_ratio`가 전 연도 0.51~0.97이다. 계약상 tolerance는 0이다.
+| 지표 | before | after |
+|---|---|---|
+| `period_end_conflict` | 98.3% | **0** |
+| FY2024 연간 기간말 최빈값 | 2022-12-31 | **2024-12-31** |
+| 페어링 `value_mismatch` | 1,132,907 | **157** |
 
-지금 당장 아무것도 막고 있진 않지만(해당 status를 읽는 게이트가 아직 없다), 1번은 값이
-조용히 틀린 채 downstream 전체로 퍼진다. **Phase B 재실행 전에 고치는 것이 맞다.**
+이제서야 `receipt_value_pairing_required`를 게이트로 쓸 수 있다. 그전 값은 데이터가 아니라
+조인 버그를 재고 있었다. 남은 157건(0.0117%)은 Q1 `net_income` 계열에 몰려 있고, Q1은 3개월과
+누적이 같은 기간이라 갈라낼 수 없는 유일한 분기다 — 게이트를 켤 때 별도로 판단한다.
 
 ## 5. 다음에 할 일 — 이 순서로
 
-1. **[크리티컬 패스]** ~~Phase B 코드 커밋 → 릴리즈~~ 완료 → prod 백필(진행 중) →
-   vintage probe 판정(`04_specific_plan_B.md` §4.4.1) → **B-2 결함 2건 수정(§4c)** →
+1. **[크리티컬 패스]** ~~Phase B 코드 커밋 → 릴리즈~~ 완료 → ~~B-2 결함 수정(§4c)~~ 완료 →
+   prod 백필(진행 중) → vintage probe 판정(`04_specific_plan_B.md` §4.4.1) →
    `raw-parquet-export-all.sh` → `--phase B` → `--phase A` → `--phase AB` 재실행.
    명령과 주의점은 `08` §4.1·§4.1.1.
 2. **데이터 없이도 가능한 코드 작업**: ~~B-10 Stage 2(7종)~~ 완료, ~~Stage 4(family 카드)~~
@@ -98,7 +100,7 @@ Stage 2 진단을 실제 lake에 돌리자마자 `stock_metric_vintage_fact`의 
 ## 6. 상태 확인 명령
 
 ```bash
-uv run pytest tests/unit -q                                   # 899개 통과가 기준선(2026-08-12)
+uv run pytest tests/unit -q                                   # 907개 통과가 기준선(2026-08-12)
 git status --porcelain | wc -l                                # T2 코드가 아직 uncommitted인지
 ls data_lake/raw_postgres/snapshot_date=*/source=sj2_remote/ | grep -E "filing_receipt|capital_change"
                                                               # 아무것도 안 나오면 T2는 여전히 막힌 상태

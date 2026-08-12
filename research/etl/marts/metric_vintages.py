@@ -89,6 +89,10 @@ _XBRL_RANK_SQL = (
     " + (CASE WHEN dimensions LIKE '%OperatingSegmentsMember%' THEN 3 ELSE 0 END)"
 )
 
+# Duration of an XBRL context in days; 0 for instant facts, which have no
+# period_start. Only meaningful on ``xbrl_scoped``, which projects the column.
+_XBRL_DURATION_DAYS = "COALESCE(duration_days, 0)"
+
 
 def _rules_relation_sql(rules: list[MetricMappingRule], unit_by_code: dict[str, str]) -> str:
     """Build a ``(VALUES ...) AS rules(...)`` relation from the code rule list."""
@@ -185,13 +189,76 @@ def build_stock_metric_vintage_fact_sql(
         UNION
         SELECT DISTINCT corp_code, bsns_year, reprt_code, rcept_no FROM {xbrl_view}
     ),
-    xbrl_period_by_filing AS (
-        -- §3.3 priority 1: same-rcept_no XBRL instant/duration period end.
-        SELECT corp_code, bsns_year, reprt_code, rcept_no,
-               MIN(COALESCE(instant_date, period_end)) AS xbrl_period_end
+    xbrl_scoped AS (
+        -- Every XBRL fact plus the two context attributes that decide whether
+        -- it belongs to *this filing's own* statement rather than to one of the
+        -- comparative years or the other consolidation basis printed alongside
+        -- it. Three places below need them, and all three used to ignore them
+        -- (08 §4.3.2).
+        SELECT
+            corp_code, ticker, bsns_year, reprt_code, rcept_no,
+            concept_id, concept_name, label_ko, context_id, dimensions,
+            value_numeric,
+            COALESCE(instant_date, period_end) AS period_end_effective,
+            date_diff('day', period_start, period_end) AS duration_days,
+            CASE
+                WHEN dimensions LIKE '%ConsolidatedMember%' THEN 'CFS'
+                WHEN dimensions LIKE '%SeparateMember%' THEN 'OFS'
+            END AS xbrl_fs_basis
         FROM {xbrl_view}
-        WHERE COALESCE(instant_date, period_end) IS NOT NULL
+    ),
+    xbrl_period_by_filing AS (
+        -- §3.3 priority 1: the filing's OWN period end, taken from its XBRL
+        -- contexts. A periodic report's XBRL carries the current period *and*
+        -- one or two comparative years, so the current period is the LATEST
+        -- context, not the earliest — MIN() here put a FY2024 annual filing's
+        -- period end on 2022-12-31 for 64,688 of its 67,276 rows, and
+        -- statement_period_end is this mart's grain (08 §4.3.2).
+        --
+        -- Contexts dated after the receipt itself are dropped: a filing does
+        -- not report on a period that had not ended when it was submitted, so
+        -- such a context is forward-looking, not the statement period.
+        SELECT corp_code, bsns_year, reprt_code, rcept_no,
+               MAX(period_end_effective) AS xbrl_period_end
+        FROM xbrl_scoped
+        WHERE period_end_effective IS NOT NULL
+          AND (
+            NOT rcept_no ~ '^[0-9]{{14}}$'
+            OR period_end_effective <= strptime(left(rcept_no, 8), '%Y%m%d')::DATE
+          )
         GROUP BY corp_code, bsns_year, reprt_code, rcept_no
+    ),
+    xbrl_pairing AS (
+        -- §1.2 receipt_value_pairing: the same receipt's XBRL value for the
+        -- same concept, period, and consolidation basis. Matching on concept
+        -- alone paired every OFS statement row against the consolidated
+        -- context (SeparateMember always loses the dimension tie-break) and let
+        -- an arbitrary comparative year win among the rest — which is why
+        -- value_mismatch_ratio read 0.51-0.97 against a frozen tolerance of 0.
+        --
+        -- ``duration_pref`` exists because an interim filing prints both the
+        -- 3-month and the year-to-date duration ending on the same date, and
+        -- which one the financial-statement API's thstrm_amount equals depends
+        -- on the statement: IS/CIS report the 3-month figure, CF reports the
+        -- cumulative one (the same split fin_quarterly_metric_vintage encodes
+        -- as direct_interim vs cumulative_reported). Emitting one winner per
+        -- preference lets the join pick by ``sj_div`` instead of guessing.
+        SELECT
+            corp_code, bsns_year, reprt_code, rcept_no, concept_id,
+            xbrl_fs_basis, period_end_effective, duration_pref,
+            value_numeric, context_id AS pairing_xbrl_source_key
+        FROM xbrl_scoped
+        CROSS JOIN (VALUES ('shortest'), ('longest')) AS p(duration_pref)
+        WHERE xbrl_fs_basis IS NOT NULL AND period_end_effective IS NOT NULL
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY corp_code, bsns_year, reprt_code, rcept_no,
+                         concept_id, xbrl_fs_basis, period_end_effective, duration_pref
+            ORDER BY
+                CASE WHEN duration_pref = 'shortest' THEN COALESCE(duration_days, 0)
+                     ELSE -COALESCE(duration_days, 0) END ASC,
+                {_XBRL_RANK_SQL} ASC,
+                context_id ASC
+        ) = 1
     ),
     stlm_period_by_filing AS (
         -- §3.3 priority 2: dart_share_count_raw / dart_shareholder_return_raw.stlm_dt.
@@ -299,18 +366,14 @@ def build_stock_metric_vintage_fact_sql(
         JOIN filing_period_end pe
           ON pe.corp_code = f.corp_code AND pe.bsns_year = f.bsns_year
          AND pe.reprt_code = f.reprt_code AND pe.rcept_no = f.rcept_no
-        LEFT JOIN (
-            SELECT corp_code, bsns_year, reprt_code, rcept_no, concept_id,
-                   value_numeric, context_id AS pairing_xbrl_source_key
-            FROM {xbrl_view}
-            QUALIFY ROW_NUMBER() OVER (
-                PARTITION BY corp_code, bsns_year, reprt_code, rcept_no, concept_id
-                ORDER BY {_XBRL_RANK_SQL} ASC
-            ) = 1
-        ) xr
+        LEFT JOIN xbrl_pairing xr
           ON xr.corp_code = f.corp_code AND xr.bsns_year = f.bsns_year
          AND xr.reprt_code = f.reprt_code AND xr.rcept_no = f.rcept_no
          AND xr.concept_id = f.account_id
+         AND xr.xbrl_fs_basis = f.fs_div
+         AND xr.period_end_effective = pe.period_end
+         AND xr.duration_pref = CASE
+                WHEN f.sj_div IN ('IS', 'CIS') THEN 'shortest' ELSE 'longest' END
         WHERE f.thstrm_amount IS NOT NULL
 
         UNION ALL
@@ -414,13 +477,18 @@ def build_stock_metric_vintage_fact_sql(
             concat(x.rcept_no, ':', x.context_id, ':', x.concept_id) AS source_key,
             r.rule_code AS mapping_rule_code,
             r.priority AS priority,
-            {_XBRL_RANK_SQL} AS candidate_rank,
+            -- Prefer the cumulative (longest) duration among the contexts that
+            -- survive the period filter: every metric sourced this way is a
+            -- cash-flow-statement item, which OpenDART reports year-to-date
+            -- (fin_quarterly_metric_vintage's `cumulative_reported` kind).
+            -- Same convention the pairing CTE applies to sj_div='CF'.
+            -{_XBRL_DURATION_DAYS} * 1000 + {_XBRL_RANK_SQL} AS candidate_rank,
             pe.period_end_source, pe.period_end_conflict,
             NULL AS pairing_xbrl_value,
             NULL AS pairing_xbrl_source_key,
             NULL AS cumulative_value_numeric,
             NULL AS comparative_q_amount
-        FROM {xbrl_view} x
+        FROM xbrl_scoped x
         JOIN corp c ON c.ticker = x.ticker
         JOIN rule_rel r
           ON r.source_table = 'dart_xbrl_fact_raw'
@@ -431,7 +499,11 @@ def build_stock_metric_vintage_fact_sql(
         JOIN filing_period_end pe
           ON pe.corp_code = x.corp_code AND pe.bsns_year = x.bsns_year
          AND pe.reprt_code = x.reprt_code AND pe.rcept_no = x.rcept_no
+        -- Without this the winner could be a comparative year's fact carrying
+        -- the current period's statement_period_end — a two-year-old number
+        -- silently presented as this filing's (08 §4.3.2).
         WHERE x.value_numeric IS NOT NULL
+          AND x.period_end_effective = pe.period_end
     ),
     winners AS (
         SELECT *
