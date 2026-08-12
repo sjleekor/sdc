@@ -1,44 +1,42 @@
 # 00. 진행 상태 — 이 디렉터리를 이어받는 사람이 먼저 읽는 문서
 
-- 작성일: 2026-08-11 (갱신: 2026-08-12 12:00 KST)
+- 작성일: 2026-08-11 (갱신: 2026-08-12 17:45 KST)
 - 브랜치: `refactor/parquet-compute-reproducible`
 - 목적: 문서가 8개(합계 30만 자 이상)라 어디까지 왔는지 한눈에 안 보인다. 이 파일은
   **지금 상태와 다음에 할 일만** 적는다. 근거·설계는 각 문서로 넘긴다.
 
 ## 0. 새 세션이면 여기부터
 
-지금 크리티컬 패스는 **코드가 아니라 prod 수집 대기**다. 2026-08-12 12:00 기준으로 백그라운드
-작업 두 개가 sj2-server에서 돌고 있었다. 먼저 그게 끝났는지 확인한다.
+1차 수집은 끝났고 probe 판정도 났다. 크리티컬 패스는 이제 **판정이 요구한 잔여 vintage
+백필 대기**다. 2026-08-12 17:36에 sj2에서 시작했고 3시간 전후로 예상한다.
 
 ```bash
-# 1) 아직 돌고 있나. PID(2805134 filings / 2836192 capital)는 재사용될 수 있으니
-#    스크립트 이름으로 본다. 대괄호는 pgrep이 자기 명령줄을 잡는 걸 막는다.
-ssh whi@sj2-server "pgrep -af '[p]hase_b_backfill' || echo 'no backfill running'"
-ssh whi@sj2-server 'tail -n 2 /home/whi/phase_b_backfill.log /home/whi/phase_b_capital_probe.log'
+# 1) 아직 돌고 있나. 대괄호 트릭은 ssh 명령줄 자체에 스크립트 이름이 들어가면 안 통한다.
+ssh whi@sj2-server "pgrep -af 'phase_b_backfill' | grep -v ' -c ' || echo 'NONE_RUNNING'"
+ssh whi@sj2-server 'tail -n 3 /home/whi/phase_b_capital_vintages.log'
 
-# 2) 로그보다 DB가 정본이다. filings는 접수 달력연도 2015~2026이 다 있어야 한다.
+# 2) 로그보다 DB가 정본이다. 11011 vintage가 2015~2025 전부 있어야 한다.
 .agents/skills/sdc-db/scripts/dbq.sh sj2 -c \
-  "select extract(year from rcept_dt) y, count(*), count(distinct corp_code)
-   from dart_filing_receipt_raw group by 1 order by 1;"
-
-# 3) capital probe는 연간보고서(11011) 2016/2020/2024 세 vintage만 받는다.
-.agents/skills/sdc-db/scripts/dbq.sh sj2 -c \
-  "select bsns_year, reprt_code, count(*), count(distinct ticker)
-   from dart_capital_change_raw group by 1,2 order by 1,2;"
+  "select bsns_year, count(distinct ticker) tickers, count(*) rows
+   from dart_capital_change_raw where reprt_code='11011' group by 1 order by 1;"
 ```
 
-**연도가 다 찼는지는 receipt 수가 아니라 법인 수로 본다.** 2016~2025는 법인 2,056~2,653개가
-정상 범위다. 그보다 훨씬 적으면(예: 2015가 837) 아직 수집 중이거나 중간에 끊긴 것이다.
-2015는 상장사 수 자체가 적어 다른 해보다 낮게 끝날 수 있으니, 최종 판단은 로그의 완료 문구로
-한다.
+**연도가 찼는지는 행 수가 아니라 ticker 수로 본다.** 기수집분 기준 1,795(2016)~2,561(2024)이
+정상 범위다. 2025가 765에서 안 올라갔으면 아직 그 연도에 도달하지 못한 것이다(연도 순서는
+2015·2017·2018·2019·2021·2022·2023·2025로 2025가 마지막이다).
 
 로그 마지막 줄이 `ALL DONE`이면 정상 종료, `QUOTA EXHAUSTED`면 OpenDART 일일 한도로 끊긴
 것이다. 후자면 같은 스크립트를 다시 실행하면 이어받는다 — 저장된 raw는 skip된다.
 
-두 작업이 끝났으면 **§5의 1번 순서를 그대로 따라간다.** 아직 돌고 있으면 §5의 2번(코드
-작업)에서 고른다 — 남은 건 B-10 Stage 3 하나뿐이고 별도 계획이 필요하다.
+```bash
+ssh whi@sj2-server 'cd /home/whi && SDC_PHASE_B_REPRT_CODES=11011 SDC_LOCK_WAIT_SECONDS=3600 \
+  setsid nohup ./phase_b_backfill.sh capital "2015 2017 2018 2019 2021 2022 2023 2025" \
+  >> /home/whi/phase_b_capital_vintages.log 2>&1 < /dev/null &'
+```
 
-주의: 두 작업 모두 `sdc_with_source_lock opendart`를 잡는다. 데일리 OpenDART 체인은 04:00에
+끝났으면 **§5의 1번 4단계부터 이어간다**(1~3단계는 완료). 아직 돌고 있으면 §5의 2번에서 고른다.
+
+주의: 이 작업은 `sdc_with_source_lock opendart`를 잡는다. 데일리 OpenDART 체인은 04:00에
 lock 없이 시작하므로, 백필이 다음 날 04:00을 넘겼다면 데일리 이벤트가 겹쳤을 수 있다.
 `ingestion_runs`에서 그날 OpenDART run의 status를 먼저 본다.
 
@@ -155,25 +153,52 @@ CFS/OFS)으로 바꾸고 회귀 테스트 8개를 추가했다 — 수정 전 �
 
 ### 1. [크리티컬 패스] 수집 → probe 판정 → 재실행
 
-앞 단계가 끝나야 다음이 된다. 명령과 주의점은 `08` §4.1·§4.1.1.
+앞 단계가 끝나야 다음이 된다. 명령과 주의점은 `08` §4.1·§4.1.1·§4.1.2.
 
 1. ~~Phase B 코드 커밋 → 릴리즈(v0.9.2)~~ 완료
 2. ~~B-2 결함 수정(§4c)~~ 완료
-3. **prod 백필** — §0에서 상태 확인. 끝났으면 4번으로
-4. **vintage probe 판정** — 수집 완료 + raw export 후 아래 한 줄. 기준표 판정까지 스크립트가
-   해서 `research/output/vintage_probe/`에 md·json으로 남긴다
+3. ~~prod 1차 백필~~ 완료 (filings 2015~2026, capital vintage 2016·2020·2024)
+4. ~~raw export~~ 완료 (`snapshot_date=2026-08-12` / `source=sj2_remote`, `--route remote`).
+   exporter 설정에 두 테이블이 빠져 있어 먼저 등록해야 했다 → `08` §4.1.2
+5. ~~vintage probe 판정~~ 완료 — **strict PIT 채택**. `DEFAULT_VINTAGE_POLICY` 고정.
+   측정값은 `08` §4.1.2, 산출물은 `research/output/vintage_probe/`
+6. **잔여 vintage 백필** — 판정이 요구한 8개 연도. §0에서 상태 확인 (진행 중)
+7. **capital_change만 재export** — 백필이 끝나면 그 테이블만 새로 뜬다. 나머지 14개는 손대지
+   않는다
    ```bash
-   uv run python -m research.analysis.capital_change_vintage_probe --snapshot-date YYYY-MM-DD
+   uv run krx-collector db with-remote-dsn -- bin/raw-parquet-export-all.sh \
+     --snapshot-date 2026-08-12 --route remote --force-table dart_capital_change_raw
    ```
-   판정 결과를 `08` §4.1.1에 기록하고, `event_scan.build_issuance_sql`의 `vintage_policy`
-   기본값을 그 결과로 고정한다. dedup 규칙 자체(§4.4.1 1~3항)는 이미 구현돼 있다
-5. **raw export** — `bin/raw-parquet-export-all.sh` → 새 `snapshot_date`
-6. **`--phase B` 재실행** — 여기서 처음으로 `M_B_ready > 0`이 된다
-7. **`--phase A` 재실행** — 같은 snapshot이어야 결합 BH가 성립한다(§2.3 rule 5)
-8. **`--phase AB` 재실행** — `q_fdr_global_ab`·`screen_pass`·`evidence_grade`가 처음으로
-   진짜 값을 갖는다
+8. **`--phase B` 실행** — 여기서 처음으로 `M_B_ready > 0`이 된다
+9. **`--phase A` 재실행** — 같은 snapshot이어야 결합 BH가 성립한다(§2.3 rule 5)
+10. **`--phase AB` 실행** — `q_fdr_global_ab`·`screen_pass`·`evidence_grade`가 처음으로
+    진짜 값을 갖는다
 
-4번과 5번의 순서에 주의: probe는 lake의 parquet을 읽으므로 **export가 먼저**다.
+**순서 주의 두 가지.**
+
+- probe와 export: probe는 lake의 parquet을 읽으므로 **export가 먼저**다.
+- **A0 feature mart가 Phase A/B의 선행 조건이다.** `08` §5의 재현 명령에는 이 단계가 빠져
+  있었다. raw export 뒤에 아래를 돌려야 `--phase B`가 `A0 manifest is required` 에러로
+  죽지 않는다.
+  ```bash
+  # snapshot_date를 주지 않는다 — auto_selected=False가 되면 official 자격을 잃는다
+  uv run python -m research.etl.horizon_scan_inputs --source sj2_remote
+  ```
+  **`compute_all --features`로 대신하면 안 된다.** 두 경로가 같은 `feature_mart/` 아래
+  같은 이름의 마트를 만들지만 계약 해시가 달라서, `compute_all`이 먼저 만들어두면 A0가
+  `mart cache contract mismatch for 'dim_stock_pit_daily'`로 죽는다(그 경우 `--force`로
+  다시 만든다). `_manifests/_SUCCESS.json`과 official/smoke_only 판정을 쓰는 쪽은 A0
+  진입점뿐이다. `compute_all`은 `stock_metric_fact`/`common_feature_daily_fact`
+  (derived_mart) 담당이고, 이건 A0의 선행이므로 **먼저** 돌려야 한다.
+
+  그 `compute_all`을 `--features` 없이 freshness부터 돌리면 **common feature readiness
+  게이트에서 멈춘다**(37개 중 4개만 ready). 이건 오늘 생긴 게 아니다 —
+  `snapshot_date=2026-08-09`에서 같은 값이 나온다. 원인은 데이터 사고가 아니라 창 정렬이다.
+  macro 계열은 2013-06-20부터, 일별 시장·해외·환율 계열은 2014-06-16부터 시작하는데
+  coverage 창이 가장 이른 날짜에 맞춰져 있어 뒤에 시작한 계열이 앞쪽 약 257 거래일을 비운
+  것으로 잡힌다(`missing_count=257`과 일치). horizon scan은
+  `feat_price`/`feat_flow`/`label_scan`(daily_ohlcv·flow 기반)만 읽으므로 이 게이트와
+  무관하다. derived mart 자체는 게이트 전에 이미 만들어진다.
 
 ### 2. 데이터 없이도 가능한 코드 작업
 
