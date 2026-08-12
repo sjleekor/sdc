@@ -50,6 +50,8 @@ target/
 
 # Local Parquet/data lake outputs
 data_lake/
+# DuckDB spill files (marts spill here when memory_limit is tight; tens of GB)
+.tmp/
 # Per-model ETL datasets (L2b artifacts; etl_01 §7)
 data/datasets/
 # Model prediction outputs (top-k buy lists)

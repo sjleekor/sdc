@@ -302,7 +302,6 @@ raw_id_tables=(
   dart_shareholder_return_raw
   dart_share_count_raw
   dart_capital_change_raw
-  dart_filing_receipt_raw
 )
 
 date_month_tables=(
@@ -311,6 +310,7 @@ date_month_tables=(
 )
 
 non_resumable_tables=(
+  dart_filing_receipt_raw
   dart_xbrl_document
   dart_corp_master
   stock_master

@@ -51,9 +51,9 @@ variables, not committed runtime config.
 
 | Strategy | Tables | Output layout |
 |---|---|---|
-| `raw_id_range` | `dart_xbrl_fact_raw`, `dart_financial_statement_raw`, `dart_shareholder_return_raw`, `dart_share_count_raw` | `bsns_year=<YYYY>/reprt_code=<CODE>/` |
+| `raw_id_range` | `dart_xbrl_fact_raw`, `dart_financial_statement_raw`, `dart_shareholder_return_raw`, `dart_share_count_raw`, `dart_capital_change_raw` | `bsns_year=<YYYY>/reprt_code=<CODE>/` |
 | `date_month` | `krx_security_flow_raw`, `daily_ohlcv` | `year=<YYYY>/month=<MM>/` |
-| `full_table` | `dart_xbrl_document`, `common_feature_observation_raw`, `common_feature_series`, `dart_corp_master`, `stock_master`, `stock_master_snapshot` | configured simple column partitions or unpartitioned |
+| `full_table` | `dart_filing_receipt_raw`, `dart_xbrl_document`, `common_feature_observation_raw`, `common_feature_series`, `dart_corp_master`, `stock_master`, `stock_master_snapshot` | configured simple column partitions or unpartitioned |
 | `snapshot_items` | `stock_master_snapshot_items` | `snapshot_date=<YYYY-MM-DD>/` |
 
 Empty source tables are valid for `date_month`, `full_table`,

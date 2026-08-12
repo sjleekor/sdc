@@ -180,9 +180,9 @@ runtime TOML(`[source]`/`[output]`)은 **이 스크립트가 `--route`로부터 
 
 | export 전략 | 테이블 | resume 지원 |
 |---|---|---|
-| `raw_id_range` | `dart_xbrl_fact_raw`, `dart_financial_statement_raw`, `dart_shareholder_return_raw`, `dart_share_count_raw` | O (체크포인트 단위: chunk) |
+| `raw_id_range` | `dart_xbrl_fact_raw`, `dart_financial_statement_raw`, `dart_shareholder_return_raw`, `dart_share_count_raw`, `dart_capital_change_raw` | O (체크포인트 단위: chunk) |
 | `date_month` | `krx_security_flow_raw`, `daily_ohlcv` | O (체크포인트 단위: 월) |
-| `full_table` | `dart_xbrl_document`, `dart_corp_master`, `stock_master`, `stock_master_snapshot`, `common_feature_series`, `common_feature_observation_raw` | X |
+| `full_table` | `dart_filing_receipt_raw`, `dart_xbrl_document`, `dart_corp_master`, `stock_master`, `stock_master_snapshot`, `common_feature_series`, `common_feature_observation_raw` | X |
 | `snapshot_items` | `stock_master_snapshot_items` | X |
 
 판정 순서(테이블마다):
