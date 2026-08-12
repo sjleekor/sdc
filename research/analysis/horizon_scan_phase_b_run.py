@@ -21,16 +21,19 @@ Two run kinds, two directories (§7.1), never conflated:
   immutable), verifies the Phase A artifact's integrity (§2.3 rule 5), and
   applies the combined BH pass.
 
-Only the subset of the §7.1 directory contract that this item covers is
-written here: ``phase_b_run_spec.json``, ``phase_b_readiness_freeze.json``,
-``horizon_ic.parquet``, ``event_ic.parquet``, ``phase_b_primary_hypotheses
-.parquet`` for Phase B; ``combined_ab_primary_hypotheses.parquet``,
-``phase_a_card_overlay.parquet`` for the combined step. The remaining §7.1
-artifacts (``readiness_matrix.*``, the ``*_quality``/``*_coverage`` diagnostics,
-the B-8 robustness `*_summary.parquet` files, `primary_feature_rank_correlation
-.parquet`, `family_cards.md`/`03b_horizon_scan_results.md`) belong to other
-still-open remaining-work items (B-8's non-hard-gate diagnostics, B-9's
-screen_pass/grade logic, B-10) and are not written by this module.
+Most of the §7.1 directory contract is written here: ``phase_b_run_spec.json``,
+``phase_b_readiness_freeze.json``, ``readiness_matrix.{parquet,md}``, the seven
+``*_quality``/``*_coverage`` diagnostics, the B-8 robustness
+``*_summary.parquet`` files, ``primary_feature_rank_correlation.parquet``,
+``family_summary.parquet``/``family_cards.md``, ``horizon_ic.parquet``,
+``event_ic.parquet`` and ``phase_b_primary_hypotheses.parquet`` for Phase B;
+``combined_ab_primary_hypotheses.parquet`` and ``phase_a_card_overlay.parquet``
+for the combined step.
+
+Two §7.1 artifacts are still missing, both tracked in 08 §4.3:
+``daily_ic.parquet``/``cohort_ic.parquet`` (B-10 Stage 3 — needs the shared
+Phase A scan code to stop discarding the per-date IC sequence) and
+``03b_horizon_scan_results.md`` (Stage 5).
 
 Directory nesting deliberately follows ``run_phase_a``'s actual on-disk
 convention (``phase=<X>/snapshot_date=/source=/config_hash=/run_id=/``) rather
