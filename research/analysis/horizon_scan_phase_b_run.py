@@ -110,15 +110,115 @@ from research.analysis.horizon_scan_runner import (
 )
 from research.etl.config import REMOTE_SOURCE, LakeConfig
 from research.etl.features.event_scan import materialize_event_scan_daily
-from research.etl.features.fin_scan import materialize_fin_scan_daily
-from research.etl.features.sue_event import materialize_sue_event
+from research.etl.features.fin_scan import FIN_SCAN_TABLE, materialize_fin_scan_daily
+from research.etl.features.sue_event import SUE_EVENT_TABLE, materialize_sue_event
 from research.etl.lake import connect, register_views
 from research.etl.mart import mart_root, register_mart_view
-from research.etl.marts.financial_quarters import materialize_fin_quarterly_metric_vintage
-from research.etl.marts.metric_vintages import materialize_stock_metric_vintage_fact
+from research.etl.marts.financial_quarters import (
+    FQMV_TABLE,
+    materialize_fin_quarterly_metric_vintage,
+)
+from research.etl.marts.metric_vintages import (
+    SMVF_TABLE,
+    materialize_stock_metric_vintage_fact,
+)
+from research.etl.phase_b_coverage import (
+    FEATURE_COVERAGE_SPECS,
+    build_event_coverage_sql,
+    build_feature_coverage_sql,
+    build_quarterly_metric_quality_sql,
+    build_receipt_value_pairing_quality_sql,
+    build_stock_metric_vintage_quality_sql,
+)
+from research.etl.phase_b_quality import (
+    build_capital_change_quality_sql,
+    build_filing_receipt_quality_sql,
+)
 from research.etl.snapshot import resolve_config
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _feature_coverage_sql_for(available_assets: set[str]) -> str:
+    """``feature_coverage`` over whichever of the two daily marts exist.
+
+    The full SQL unions both marts, so it cannot run when only one of them
+    materialized. Narrowing the spec list keeps the artifact useful in that
+    case instead of dropping it entirely — the missing mart's features are
+    simply absent rows, which is what every other diagnostic here does too.
+    """
+    specs = tuple(s for s in FEATURE_COVERAGE_SPECS if s.source_mart in available_assets)
+    return build_feature_coverage_sql(specs=specs)
+
+
+# §7.1 the seven *_quality / *_coverage diagnostics (B-10 Stage 2), each with
+# the views it reads. A diagnostic whose inputs are not in this lake is not
+# written at all — an absent artifact is a visible gap, the same rule the
+# diagnostics themselves follow for absent groups.
+_QUALITY_DIAGNOSTICS: tuple[tuple[str, frozenset[str], Any], ...] = (
+    (
+        "filing_receipt_quality",
+        frozenset({"dart_filing_receipt_raw"}),
+        lambda _assets: build_filing_receipt_quality_sql(),
+    ),
+    (
+        "capital_change_quality",
+        frozenset({"dart_capital_change_raw", "dart_share_count_raw", "dart_corp_master"}),
+        lambda _assets: build_capital_change_quality_sql(),
+    ),
+    (
+        "receipt_value_pairing_quality",
+        frozenset({SMVF_TABLE}),
+        lambda _assets: build_receipt_value_pairing_quality_sql(),
+    ),
+    (
+        "stock_metric_vintage_quality",
+        frozenset({SMVF_TABLE}),
+        lambda _assets: build_stock_metric_vintage_quality_sql(),
+    ),
+    (
+        "quarterly_metric_quality",
+        frozenset({FQMV_TABLE}),
+        lambda _assets: build_quarterly_metric_quality_sql(),
+    ),
+    (
+        "feature_coverage",
+        frozenset({FIN_SCAN_TABLE}),  # event mart is optional, see _feature_coverage_sql_for
+        _feature_coverage_sql_for,
+    ),
+    (
+        "event_coverage",
+        frozenset({SUE_EVENT_TABLE}),
+        lambda _assets: build_event_coverage_sql(),
+    ),
+)
+
+
+def write_phase_b_quality_diagnostics(
+    con: duckdb.DuckDBPyConnection,
+    core_dir: Path,
+    *,
+    available_assets: set[str],
+) -> list[str]:
+    """Materialize the §7.1 diagnostics into ``core_dir``; return what landed.
+
+    Written unconditionally with respect to *readiness* — unlike the scan
+    artifacts, these describe the inputs, and the case where they matter most
+    is precisely the one where every candidate is blocked and someone needs to
+    see why. An empty result set still produces a parquet with the right
+    schema; only a missing input skips the file.
+    """
+    written: list[str] = []
+    for name, required, build_sql in _QUALITY_DIAGNOSTICS:
+        if not required <= available_assets:
+            continue
+        try:
+            frame = con.execute(build_sql(available_assets)).pl()
+        except duckdb.Error:
+            continue
+        frame.write_parquet(core_dir / f"{name}.parquet")
+        written.append(name)
+    return written
 
 
 def _render_readiness_matrix_md(readiness_rows: list[dict[str, Any]]) -> str:
@@ -682,6 +782,12 @@ def run_phase_b_core(
     (core_dir / "readiness_matrix.md").write_text(
         _render_readiness_matrix_md(readiness_rows), encoding="utf-8"
     )
+
+    # §7.1 the *_quality/*_coverage diagnostics — same unconditional treatment
+    # as readiness_matrix above, and for the same reason: they describe the
+    # inputs, not a scan result, so a run where everything is blocked is the
+    # run that needs them most.
+    write_phase_b_quality_diagnostics(con, core_dir, available_assets=available_assets)
 
     # §5.5/§7.1 primary_feature_rank_correlation.parquet — every ready Phase A
     # continuous family's primary feature crossed with every ready Phase B

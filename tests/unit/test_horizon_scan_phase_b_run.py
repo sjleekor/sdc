@@ -793,3 +793,86 @@ def test_run_combined_ab_omits_permutation_field_when_summary_absent(
 
     manifest = json.loads((published / "manifest.json").read_text())
     assert "combined_cross_sectional_permutation" not in manifest
+
+
+# --- write_phase_b_quality_diagnostics: §7.1 Stage 2 artifacts ---
+
+
+def _con_with_quality_inputs() -> duckdb.DuckDBPyConnection:
+    """A lake holding only the two raw tables the raw-side diagnostics read."""
+    con = duckdb.connect(":memory:")
+    con.execute(
+        "CREATE TABLE dart_filing_receipt_raw ("
+        "corp_code VARCHAR, ticker VARCHAR, report_nm VARCHAR, rcept_no VARCHAR, "
+        "rcept_dt DATE, rm VARCHAR)"
+    )
+    con.execute(
+        "INSERT INTO dart_filing_receipt_raw VALUES "
+        "('00126380','005930','사업보고서 (2023.12)','20240310000001',DATE '2024-03-10','')"
+    )
+    return con
+
+
+def test_quality_diagnostics_skip_artifacts_whose_inputs_are_absent(tmp_path: Path) -> None:
+    con = _con_with_quality_inputs()
+
+    written = phase_b_run.write_phase_b_quality_diagnostics(
+        con, tmp_path, available_assets={"dart_filing_receipt_raw"}
+    )
+
+    # A missing input leaves no file at all — an absent artifact is a visible
+    # gap, not an empty table that reads as "measured, found nothing".
+    assert written == ["filing_receipt_quality"]
+    assert (tmp_path / "filing_receipt_quality.parquet").is_file()
+    assert not (tmp_path / "capital_change_quality.parquet").exists()
+    assert not (tmp_path / "feature_coverage.parquet").exists()
+
+
+def test_quality_diagnostics_are_written_even_when_the_result_is_empty(tmp_path: Path) -> None:
+    con = _con_with_quality_inputs()
+    con.execute("DELETE FROM dart_filing_receipt_raw")
+
+    written = phase_b_run.write_phase_b_quality_diagnostics(
+        con, tmp_path, available_assets={"dart_filing_receipt_raw"}
+    )
+
+    # Present-but-empty is a different fact from absent, and the schema still
+    # has to land so a downstream reader does not have to special-case it.
+    assert written == ["filing_receipt_quality"]
+    frame = pl.read_parquet(tmp_path / "filing_receipt_quality.parquet")
+    assert frame.height == 0
+    assert "periodic_amendment_receipts" in frame.columns
+
+
+def test_feature_coverage_degrades_to_the_daily_mart_that_exists(tmp_path: Path) -> None:
+    con = duckdb.connect(":memory:")
+    con.execute(
+        "CREATE TABLE feat_fin_scan_daily ("
+        "trade_date DATE, ticker VARCHAR, market VARCHAR, "
+        "fin_log_mcap DOUBLE, fin_log_mcap_lag1 DOUBLE, "
+        "fin_book_to_market DOUBLE, fin_earnings_yield DOUBLE, fin_cfo_yield DOUBLE, "
+        "fin_sales_to_price DOUBLE, value_component_count INTEGER, "
+        "fin_value_z DOUBLE, fin_value_z_lag1 DOUBLE, "
+        "fin_gross_profitability DOUBLE, fin_gross_profitability_lag1 DOUBLE, "
+        "fin_operating_profitability DOUBLE, fin_operating_profitability_lag1 DOUBLE, "
+        "fin_asset_growth_yoy DOUBLE, fin_asset_growth_yoy_lag1 DOUBLE, "
+        "fin_accruals_to_assets DOUBLE, fin_accruals_to_assets_lag1 DOUBLE, "
+        "value_fin_age_days BIGINT, profitability_fin_age_days BIGINT, "
+        "asset_growth_fin_age_days BIGINT, accruals_fin_age_days BIGINT)"
+    )
+    con.execute(
+        "INSERT INTO feat_fin_scan_daily VALUES "
+        "(DATE '2024-03-11','005930','KOSPI',1,1,0.5,0.1,0.2,0.3,4,1,1,"
+        "0.4,0.4,0.3,0.3,0.05,0.05,-0.02,-0.02,40,40,40,40)"
+    )
+
+    # feat_event_scan_daily never materialized — the union must not reference
+    # it rather than the whole artifact being dropped.
+    written = phase_b_run.write_phase_b_quality_diagnostics(
+        con, tmp_path, available_assets={"feat_fin_scan_daily"}
+    )
+
+    assert written == ["feature_coverage"]
+    frame = pl.read_parquet(tmp_path / "feature_coverage.parquet")
+    assert set(frame["source_mart"].unique()) == {"feat_fin_scan_daily"}
+    assert "ev_net_share_issuance_yoy" not in set(frame["feature"])

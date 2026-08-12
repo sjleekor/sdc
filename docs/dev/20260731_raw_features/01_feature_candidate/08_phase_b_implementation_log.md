@@ -435,10 +435,34 @@ plan §4.4.2, 보강 결과는 아래 §4.3.1.
 (§1.3 fingerprint 계약의 해당 필드를 이번에 구현했다).
 
 ### 4.3 B-10 나머지 (Stage 2~5)
-- **Stage 2** — 7종 중 2종 완료(2026-08-12). 나머지
-  `receipt_value_pairing_quality.parquet`/`stock_metric_vintage_quality.parquet`/
-  `quarterly_metric_quality.parquet`/`feature_coverage.parquet`/`event_coverage.parquet`는
-  아직 신규 로직이 필요하다. 완료분은 `research/etl/phase_b_quality.py`에 있다.
+- **Stage 2 — 7종 전부 완료(2026-08-12).** raw 위에 앉는 2종은
+  `research/etl/phase_b_quality.py`, 마트(B-2~B-6) 위에 앉는 5종은
+  `research/etl/phase_b_coverage.py`에 있다. 모듈을 나눈 이유는 질문이 다르기 때문이다 —
+  앞의 둘은 "원천이 쓸 만한가", 뒤의 다섯은 "마트가 그 원천을 얼마나 지켰고 피쳐가 스캔할
+  만큼 존재하는가"를 묻는다.
+
+  7종 모두 `write_phase_b_quality_diagnostics`(`horizon_scan_phase_b_run.py`)가 run
+  디렉터리에 쓴다. `readiness_matrix`와 같은 취급으로 **readiness와 무관하게 무조건** 쓴다 —
+  이 진단들은 스캔 결과가 아니라 입력을 서술하고, 가장 필요한 순간이 바로 모든 셀이 blocked인
+  지금이기 때문이다. 입력 뷰가 없는 진단만 파일을 안 만든다(빈 결과는 스키마와 함께 남긴다 —
+  "없음"과 "재보니 0"은 다른 사실이다).
+
+  - `receipt_value_pairing_quality` — (bsns_year, reprt_code). 분모는 판정 가능한 행만
+    쓴다(=`dart_financial_statement_raw` 출처). XBRL 출처 행까지 분모에 넣으면 페어링이 실제보다
+    좋아 보인다.
+  - `stock_metric_vintage_quality` — (metric_code, bsns_year, reprt_code). §4.2가 요구한
+    `mapping_fallback_ratio`/`revision_ratio`가 여기서 나온다. `revision_ratio`는
+    `is_revision`이 **알려진** 행만 분모로 쓴다 — 접수 매칭이 안 된 행을 "정정 아님"으로 세면
+    receipt 커버리지가 최악인 구간에서 비율이 가장 좋아 보이게 된다. `mapping_fallback`은
+    데이터의 최소 priority가 아니라 **카탈로그의 최선 priority**를 기준으로 잰다.
+  - `quarterly_metric_quality` — (metric_code, bsns_year, quarter). 직접 interim 값과 누적
+    차분의 불일치율은 두 소스가 있는 행만 분모로 쓴다.
+  - `feature_coverage` — (feature, variant, market, year). `coverage_ratio`(패널 대비 값 존재)와
+    `min_names_per_date`(그 해 가장 얇은 날이 `min_names`를 넘는가)를 **둘 다** 낸다. 잘 채워진
+    것처럼 보이면서 스캔이 안 되는 해가 있다. `lag1` 변형의 age는 NULL이다 — 같은 행의
+    native_t age는 정확히 한 세션만큼 과소평가라, 조용히 틀린 숫자 대신 비운다.
+  - `event_coverage` — (event_year, market, reprt_code). 버킷별 수익률 존재 수를 따로 낸다.
+    상장폐지·짧은 가격 이력은 늦은 버킷부터 죽이므로 이벤트 단위 한 개 숫자로는 안 보인다.
 
   `filing_receipt_quality` — 접수연도 단위. 수집 커버리지(연도별 receipt·법인 수), 정정
   구분 두 가지(이 접수가 정정본인지 = report_nm의 `[기재정정]` 계열 마커, 나중에 정정된
@@ -472,6 +496,63 @@ plan §4.4.2, 보강 결과는 아래 §4.3.1.
 - **Stage 5** — `03b_horizon_scan_results.md`(phase=B), phase=AB 쪽 리포트, atomic publish
   범위 확장.
 - §5.5 segment/freshness 진단(8개 축) — B-PR12가 이미 명시적으로 미룬 부분, 아직 스코프 밖.
+
+### 4.3.2 Stage 2가 바로 찾아낸 B-2 결함 2건 (2026-08-12) — **미해결**
+
+새 진단 5종을 실제 lake(`snapshot_date=2026-08-09`, vintage fact 1,524,088행)에 돌리자마자
+`stock_metric_vintage_fact`의 결함 두 개가 드러났다. **둘 다 아직 안 고쳤다.** 원인은 하나다 —
+한 filing의 XBRL fact가 **여러 회계기간(당기·전기·전전기)과 연결/별도 두 축**에 걸쳐 있는데
+B-2가 filing당 하나뿐인 것처럼 다룬다.
+
+**결함 1 — `statement_period_end`가 최대 2년 어긋난다.** `xbrl_period_by_filing`이
+`MIN(COALESCE(instant_date, period_end))`을 쓴다. 그런데 FY2024 사업보고서의 XBRL에는
+2022·2023·2024 기간이 다 들어 있어 MIN이 **비교표시용 2022-12-31**을 고른다.
+`filing_period_end`는 이 XBRL 값을 `stlm_dt`보다 우선하므로, XBRL이 있는 filing은 전부
+기간이 틀린다.
+
+| FY2024 연간, `period_end_source` | `statement_period_end` | 행 수 |
+|---|---|---|
+| xbrl | **2022-12-31** | 64,688 |
+| xbrl | 2023-12-31 | 585 |
+| xbrl | 2024-12-31 | 379 |
+| stlm | 2024-12-31 | 250 |
+
+`stlm_dt`는 2,545건 전부 2024-12-31로 정확하다 — 즉 올바른 값이 있는데도 틀린 쪽을 우선한다.
+`statement_period_end`는 이 마트의 **grain 컬럼**이고 B-3의 quarter/seq_key, B-4의 구간 조인,
+B-6의 이벤트 키가 전부 여기서 파생된다.
+
+**결함 2 — 페어링이 기간과 fs_div를 안 맞춘다.** XBRL 페어링 조인이
+`(corp_code, bsns_year, reprt_code, rcept_no, concept_id)`만 쓰고 기간도 `fs_div`도 안 건다.
+`_XBRL_RANK_SQL`은 dimension 개수와 Consolidated/Separate만 보고 기간은 아예 안 본다. 결과:
+
+- 같은 concept의 당기·전기·전전기 행이 **동점**이라 임의로 하나가 뽑힌다.
+- `SeparateMember`는 점수가 항상 높아(+5) 절대 안 뽑히므로, **OFS 재무제표 행은 언제나 CFS
+  XBRL 값과 비교되어 반드시 불일치**한다.
+
+실제 사례(FY2024 `ifrs-full_Revenue`): 재무제표는 CFS 224,422,425,036 / OFS 111,577,891,355인데
+XBRL 후보는 연결 3개(FY2022 71,379,940,397 · FY2023 139,211,241,785 · FY2024 224,422,425,036)와
+별도 3개다. CFS 행은 1/3 확률로만 맞고 OFS 행은 0%다.
+
+그래서 `value_mismatch_ratio`가 전 연도 **0.51~0.97**로 나온다(2018 연간 0.93, 2023 반기 0.97,
+2025 연간 0.58). 계약상 `receipt_value_pairing_error_tolerance: 0`,
+`receipt_value_pairing_required: verified_same_receipt`이므로 이대로면 전 구간이 게이트에
+걸린다.
+
+**지금 당장 무엇을 막고 있진 않다.** `assert_receipt_value_pairing_verified`는 single-captured-receipt
+불변식(`multi_receipt_filing_keys`)만 검사하고 `receipt_value_pairing_status`는 아직 아무 게이트도
+읽지 않는다. 하지만 결함 1은 값이 조용히 틀린 채 downstream 전체로 퍼진다.
+
+**고칠 방향**(구현 전, 사전 기록):
+
+1. `xbrl_period_by_filing`은 MIN이 아니라 **그 filing 자신의 기간**을 골라야 한다. `reprt_code`와
+   `bsns_year`로 기대 기간말을 계산해 그에 맞는 XBRL 컨텍스트를 고르거나, XBRL보다 `stlm_dt`를
+   우선한다(실측상 `stlm_dt`가 정확했다).
+2. 페어링 조인에 **기간 일치**와 **fs_div ↔ Consolidated/Separate 축 일치**를 추가한다. 맞는
+   컨텍스트가 없으면 `unlinked_receipt`이지 `value_mismatch`가 아니다.
+
+`metrics_normalize.py`(구 canonical 경로)는 golden 픽스처로 동결돼 있으므로 건드리지 않는다.
+B-2는 Phase B 전용이라 골든 대상이 아니고, 수정하면 B-3~B-6 출력이 전부 바뀐다 — 별도 작업
+단위로 다루고 이 로그에 전후 수치를 남긴다.
 
 ### 4.4 이 문서 밖 — Phase A 트랙에 남은 것
 
