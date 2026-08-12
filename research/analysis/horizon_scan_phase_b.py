@@ -31,6 +31,7 @@ from research.analysis.horizon_scan_run_spec import (
     package_versions,
     phase_a_code_hash,
 )
+from research.etl.features.event_scan import EVENT_FEATURE_FORMULA_VERSION
 
 PHASE_B_MAX_CANDIDATES = 38
 
@@ -246,6 +247,10 @@ def build_phase_b_run_spec(
         "holdout_start": a0_run_spec["label_policy_version"]["holdout_start"],
         "quality_policy_version": a0_run_spec["quality_policy_version"],
         "universe_policy_version": a0_run_spec["universe_policy_version"],
+        # §1.3 fingerprint: "mapping rule ... 이 다르면 동일 snapshot의 기존
+        # Phase B artifact를 재사용하지 않는다". The isu_dcrs_stle catalog is
+        # that mapping rule for the event features.
+        "event_feature_formula_version": EVENT_FEATURE_FORMULA_VERSION,
         "phase_b_code_hash": code_hash,
         "git_commit": git["git_commit"],
         "git_dirty": git["git_dirty"],

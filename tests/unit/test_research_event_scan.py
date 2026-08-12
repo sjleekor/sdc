@@ -5,7 +5,11 @@ from datetime import date
 import duckdb
 import pytest
 from research.etl.features.event_scan import (
+    ECONOMIC_DECREASE_REASONS,
+    ECONOMIC_INCREASE_REASONS,
     EVENT_SCAN_TABLE,
+    MECHANICAL_DECREASE_REASONS,
+    MECHANICAL_INCREASE_REASONS,
     build_issuance_sql,
     register_event_scan_daily_view,
 )
@@ -674,3 +678,102 @@ def test_strict_pit_reads_the_figure_the_position_could_actually_see() -> None:
 def test_unknown_vintage_policy_is_rejected() -> None:
     with pytest.raises(ValueError, match="unknown vintage_policy"):
         build_issuance_sql(vintage_policy="whatever")
+
+
+# --- §4.4 isu_dcrs_stle catalog (v2) --------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        # v2 additions. Each is a reason the collected history actually returns
+        # that v1 had no entry for, so every one of these used to NULL its
+        # whole trailing-year window.
+        ("신주인수권행사", 100 / 1000),
+        ("유상증자(주주우선공모)", 100 / 1000),
+        ("출자전환", 100 / 1000),
+        # A reason that stays outside the catalog must still block the window.
+        ("기타", None),
+    ],
+)
+def test_v2_catalog_classifies_the_reasons_the_source_actually_returns(
+    reason: str, expected: float | None
+) -> None:
+    con = _base_con()
+    _two_annual_positions(
+        con,
+        prior_year=2022,
+        prior_rcept="20230310000001",
+        current_year=2023,
+        current_rcept="20240310000002",
+    )
+    _insert_capital_change(
+        con,
+        bsns_year=2023,
+        reprt_code="11011",
+        rcept_no="20240310000002",
+        isu_dcrs_de=date(2023, 6, 15),
+        isu_dcrs_stle=reason,
+        isu_dcrs_qy=100,
+    )
+    _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+    _register(con)
+
+    idx = {c: i for i, c in enumerate(_columns(con))}
+    row = _row(con, date(2024, 3, 15))
+    assert row[idx["ev_net_share_issuance_yoy"]] == expected
+
+
+def test_musang_gamja_is_mechanical_under_either_spelling() -> None:
+    # 감자(무상) and 무상감자 are the same action; both must reconcile the
+    # identity without counting as economic issuance.
+    for reason in ("감자(무상)", "무상감자"):
+        con = _base_con()
+        _insert_share_count(
+            con,
+            bsns_year=2022,
+            reprt_code="11011",
+            rcept_no="20230310000001",
+            istc_totqy=1000,
+            now_to_isu=500,
+            now_to_dcrs=0,
+            stlm_dt=date(2022, 12, 31),
+        )
+        _insert_share_count(
+            con,
+            bsns_year=2023,
+            reprt_code="11011",
+            rcept_no="20240310000002",
+            istc_totqy=900,
+            now_to_isu=500,
+            now_to_dcrs=100,
+            stlm_dt=date(2023, 12, 31),
+        )
+        _insert_capital_change(
+            con,
+            bsns_year=2023,
+            reprt_code="11011",
+            rcept_no="20240310000002",
+            isu_dcrs_de=date(2023, 6, 15),
+            isu_dcrs_stle=reason,
+            isu_dcrs_qy=100,
+        )
+        _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+        _register(con)
+
+        idx = {c: i for i, c in enumerate(_columns(con))}
+        row = _row(con, date(2024, 3, 15))
+        assert row[idx["issuance_identity_ok"]] is True, reason
+        assert row[idx["ev_net_share_issuance_yoy"]] == 0.0, reason
+
+
+def test_catalog_classes_stay_disjoint() -> None:
+    sets = {
+        "economic_increase": ECONOMIC_INCREASE_REASONS,
+        "economic_decrease": ECONOMIC_DECREASE_REASONS,
+        "mechanical_increase": MECHANICAL_INCREASE_REASONS,
+        "mechanical_decrease": MECHANICAL_DECREASE_REASONS,
+    }
+    total = sum(len(s) for s in sets.values())
+    union = set().union(*sets.values())
+    assert len(union) == total, f"a reason appears in two classes: {sets}"

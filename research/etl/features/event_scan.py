@@ -57,18 +57,40 @@ _CAL_TABLE = "_event_scan_calendar"
 # §4.4 isu_dcrs_stle classification — unrecognized values fall through to
 # 'unclassified' (never guessed) and block ev_net_share_issuance_yoy for that
 # trailing-year window (§4.4: "미분류 isu_dcrs_stle ... NULL과 quality flag").
+#
+# Matching stays EXACT. No normalization, no substring rule: a rule loose enough
+# to absorb 무상감자 into 감자(무상) is also loose enough to silently absorb the
+# next unseen reason, and §4.4 step 3 forbids inferring a reason this source did
+# not give. Every string below was added by reading it, not by pattern.
+#
+# v2 (2026-08-12) added the four reasons the collected history actually returns
+# that v1 had no entry for — 22.4% of annual-vintage events were falling through
+# to 'unclassified' purely because the catalog was short. See
+# 04_specific_plan_B.md §4.4 "매핑 판단 근거".
+EVENT_FEATURE_FORMULA_VERSION = "issuance_v2"
+
 ECONOMIC_INCREASE_REASONS = frozenset(
     {
         "유상증자(일반공모)",
         "유상증자(주주배정)",
         "유상증자(제3자배정)",
+        "유상증자(주주우선공모)",  # v2 — same paid-in increase, different allocation
         "전환권행사",
+        "신주인수권행사",  # v2 — warrant exercise, economically identical to 전환권행사
         "주식매수선택권행사",
+        "출자전환",  # v2 — debt swapped for new shares; real dilution, see plan §4.4
     }
 )
 ECONOMIC_DECREASE_REASONS = frozenset({"감자(유상)"})
 MECHANICAL_INCREASE_REASONS = frozenset({"무상증자", "주식배당", "주식분할"})
-MECHANICAL_DECREASE_REASONS = frozenset({"주식병합", "감자(무상)", "소각"})
+MECHANICAL_DECREASE_REASONS = frozenset(
+    {
+        "주식병합",
+        "감자(무상)",
+        "무상감자",  # v2 — the same action, spelled the other way round
+        "소각",
+    }
+)
 
 # Unverified best guess — see module docstring. DPS's row_name is the one
 # already relied on elsewhere in this codebase (opendart_share_info tests).

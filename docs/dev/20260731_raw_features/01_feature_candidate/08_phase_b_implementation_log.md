@@ -396,8 +396,13 @@ uv run python -m research.analysis.capital_change_vintage_probe --snapshot-date 
 
 두 vintage가 다 있는 `000040` 하나로 도구를 검증했다(거리 1년): 창 9개 중 불일치 0개,
 행 수준 35개 중 1개 불일치(2021-01-31 → 2021-01-13 재기재). 날짜 정정이 창 합계를 안 바꾼다는
-것이 실제로 확인된다. identity 통과율은 latest 5/10, strict 3/10이었다 — 표본이 한 종목이라
-수치 자체는 의미가 없지만, 통과율이 생각보다 낮을 수 있다는 신호다.
+것이 실제로 확인된다.
+
+**probe를 돌리기 전에 매핑부터 고쳤다.** 첫 검증에서 identity 통과율이 latest 5/10, strict
+3/10으로 낮게 나왔는데, 원인이 vintage 정책이 아니라 `isu_dcrs_stle` 카탈로그 누락이었다.
+그대로 probe를 돌렸다면 지표 ②가 매핑 구멍을 재고 있는데 vintage 정책 탓으로 읽혔을 것이고,
+"strict의 통과율이 절반 이하" 우선 규칙이 잘못된 근거로 발동할 수 있었다. 판정 근거는
+plan §4.4.2, 보강 결과는 아래 §4.3.1.
 
 측정 결과가 나오기 전에는 `event_scan.build_issuance_sql`의 `capital_change_classified`를
 고치지 않는다. dedup 규칙 자체(§4.4.1 1~3항)는 확정됐으므로 그 부분 구현은 선행해도 되고,
@@ -405,6 +410,29 @@ uv run python -m research.analysis.capital_change_vintage_probe --snapshot-date 
 
 ### 4.2 B-9 나머지
 - evidence grade의 "source/segment 비치명 경고" — B-PR12 "정직하게 남긴 제약" 참고. mapping_fallback_ratio/revision_ratio/segment 진단이 생기면 `compute_phase_b_evidence_grade`의 "B" 조건에 추가해야 함.
+
+### 4.3.1 isu_dcrs_stle 카탈로그 v2 (2026-08-12)
+
+`capital_change_quality`가 처음 낸 값에서 2025년 annual vintage의 미분류 비율이 **0.224**
+(259건 중 58건)로 나왔다. §4.4 4단계가 미분류 하나로 창 전체를 NULL로 만들기 때문에, vintage
+정책과 무관하게 issuance family를 죽이는 값이다.
+
+사유별로 뜯어보니 58건 중 47건이 단순 카탈로그 누락이었다 — `신주인수권행사`(50건, 이미 매핑된
+`전환권행사`와 동형), `무상감자`(13건, `감자(무상)`의 다른 표기), `유상증자(주주우선공모)`(5건),
+`출자전환`(2건). 판정 근거와 정확 일치 유지 원칙은 plan §4.4.2에 기록했다.
+
+보강 전후:
+
+| 지표 | v1 | v2 |
+|---|---|---|
+| 2025 annual 미분류 | 58건 (0.224) | 11건 (0.043) |
+| 2024 annual 미분류 | 23건 (0.657) | 0건 (0.000) |
+| `000040` identity 통과 (latest) | 5/10 | **9/10** |
+| `000040` identity 통과 (strict_pit) | 3/10 | 4/10 |
+
+남은 11건은 전부 발행사가 사유를 비워둔 `-` 행이라 미분류로 남긴다. 매핑 버전은
+`issuance_v2`이며 `phase_b_run_spec.json`의 `event_feature_formula_version`으로 기록된다
+(§1.3 fingerprint 계약의 해당 필드를 이번에 구현했다).
 
 ### 4.3 B-10 나머지 (Stage 2~5)
 - **Stage 2** — 7종 중 2종 완료(2026-08-12). 나머지
