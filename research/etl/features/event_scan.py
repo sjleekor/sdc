@@ -112,12 +112,15 @@ ANNUAL_REPRT_CODE = "11011"
 
 # Which vintage to pick. Both are implemented because the choice between them is
 # decided by measurement, not by preference — see 04_specific_plan_B.md §4.4.1
-# "vintage distance probe" for the pre-registered thresholds. Until that probe
-# reports, LATEST here is a provisional default, not the adopted policy.
+# "vintage distance probe" for the pre-registered thresholds. The probe ran on
+# snapshot_date=2026-08-12: the 9-year-distance feature-changing rate is 0.1824,
+# far past the 5% row of the threshold table, and strict PIT's identity pass rate
+# (0.653) is nowhere near the "half of latest" (0.375) override floor. So (b) is
+# the adopted policy, not a provisional one — see 08 §4.1.1 for the measurements.
 VINTAGE_POLICY_LATEST = "latest_vintage"
 VINTAGE_POLICY_STRICT_PIT = "strict_pit"
 VINTAGE_POLICIES = (VINTAGE_POLICY_LATEST, VINTAGE_POLICY_STRICT_PIT)
-DEFAULT_VINTAGE_POLICY = VINTAGE_POLICY_LATEST
+DEFAULT_VINTAGE_POLICY = VINTAGE_POLICY_STRICT_PIT
 
 
 def _classification_case(alias: str) -> str:

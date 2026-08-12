@@ -435,6 +435,74 @@ plan §4.4.2, 보강 결과는 아래 §4.3.1.
 고치지 않는다. dedup 규칙 자체(§4.4.1 1~3항)는 확정됐으므로 그 부분 구현은 선행해도 되고,
 (a)/(b) 분기만 측정 뒤에 붙인다.
 
+### 4.1.2 수집 완료와 probe 판정 결과 (2026-08-12) — **(b) strict PIT 채택**
+
+**수집이 끝났다.** A2(filings)는 12:53, capital probe는 14:27에 각각 `ALL DONE`으로 종료했다.
+quota 중단은 없었고 데일리 OpenDART 체인(04:00~05:22)과도 겹치지 않았다.
+
+| 테이블 | 수집 결과 |
+|---|---|
+| `dart_filing_receipt_raw` | 접수 달력연도 2015~2026, 1,201,866행. 연도별 법인 1,992(2015)~2,657(2026) |
+| `dart_capital_change_raw` | 71,535행. 11011 vintage 2016·2020·2024 + 데일리로 들어온 2025·2026 |
+
+**raw export.** `snapshot_date=2026-08-12` / `source=sj2_remote`를 `--route remote`로 발행했다
+(15개 테이블, `_SUCCESS.json` 기록). 첫 실행에서 두 테이블이 `unknown table(s)`로 실패했는데,
+§4.1 3항이 "이미 등록돼 있다"고 적은 것과 달리 Rust exporter의
+`tools/raw-parquet-exporter/config/export_tables.toml`에만 빠져 있었다.
+`research/etl/config.py`와 `bin/raw-parquet-export-all.sh`에는 있었다. 등록 내용은 아래와 같다.
+
+| 테이블 | 전략 | 근거 |
+|---|---|---|
+| `dart_capital_change_raw` | `raw_id_range` + `bsns_year`/`reprt_code` | `dart_share_count_raw`와 동일한 모양 |
+| `dart_filing_receipt_raw` | `full_table`, 무파티션 | `bsns_year`/`reprt_code` 컬럼이 없다. `raw_id_range`는 그 파티션 쌍을 하드코딩으로 요구하고(`export.rs:535`) `date_month`는 `trade_date`에 고정돼 있다(`export.rs:837`) |
+
+full_table은 resume 대상이 아니므로 `raw-parquet-export-all.sh`의 분류도
+`raw_id_tables` → `non_resumable_tables`로 옮겼다. 두 테이블 행 수는 Postgres와 정확히 일치한다.
+
+**probe 측정값** (`research/output/vintage_probe/`, snapshot 2026-08-12).
+
+지표 ① feature-changing 불일치율. 티커별 최신 판이 2025판인지 2024판인지에 따라 거리가 갈려
+설계가 예상한 1·5·9년 외에 4·8년 점도 같이 나왔다.
+
+| 거리(년) | 티커 | 비교 창 | 불일치 창 | 비율 |
+|---|---|---|---|---|
+| 1 | 757 | 6,617 | 114 | 0.0172 |
+| 4 | 1,328 | 5,970 | 1,345 | 0.2253 |
+| 5 | 725 | 3,549 | 498 | 0.1403 |
+| 8 | 1,052 | 1,062 | 304 | 0.2863 |
+| **9** | 672 | 680 | 124 | **0.1824** |
+
+지표 ② identity 통과율.
+
+| 정책 | position | 전년 있음 | identity 통과 | feature 생성 | 비율 |
+|---|---|---|---|---|---|
+| (a) latest_vintage | 94,219 | 80,196 | 60,210 | 60,178 | 0.7504 |
+| (b) strict_pit | 94,219 | 80,196 | 52,407 | 52,382 | 0.6532 |
+
+**판정.** 9년 거리 불일치율 0.1824는 기준표의 "5% 초과" 칸이다 → **(b) strict PIT 채택 + 잔여
+연도 vintage 수집**. 우선 규칙("(b)의 통과율이 (a)의 절반 이하이면 (a)")은 발동하지 않는다 —
+0.6532는 (a)의 87% 수준이고 발동선인 0.375보다 한참 위다.
+
+거리 1년이 1.72%인데 9년이 18.2%다. 옛 판을 그대로 쓰면 안 되는 이유가 시간에 비례해 커진다는
+뜻이고, 5% 임계값이 거리 1년과 4~9년 사이 어딘가에 놓여 있다. 행 수준으로 보면 더 분명하다 —
+거리 9년에서 옛 판 사건 3,129건 중 3,109건이 최신 판에 같은 모양으로 남아 있지 않다.
+
+`DEFAULT_VINTAGE_POLICY`를 `VINTAGE_POLICY_STRICT_PIT`으로 고정했다(유닛 테스트 939개 통과).
+
+**따라오는 수집.** (b) 채택은 plan §4.4.1이 정한 대로 잔여 8개 연도 vintage 수집을 요구한다.
+strict PIT은 position 시점마다 그 이전 판을 필요로 하므로 판이 없는 구간은 feature가 NULL이 된다.
+11011 기준 현재 커버리지는 이렇다.
+
+| bsns_year | ticker | 상태 |
+|---|---|---|
+| 2016 / 2020 / 2024 | 1,795 / 2,152 / 2,561 | probe용으로 백필 완료 |
+| 2025 | 765 | 데일리 경로로만 들어와 부분 수집 |
+| 나머지 | 0 | 미수집 |
+
+남은 건 **2015·2017·2018·2019·2021·2022·2023 + 2025(보완)** 여덟 연도다. 실측 기준 연도당 약
+23분이라 합계 3시간 전후다. **이 수집이 끝나기 전에 Phase B를 돌리면 issuance family만 얇은
+데이터로 판정된다** — §4.1 4번의 선행 조건에 이 수집이 추가된다.
+
 ### 4.2 B-9 나머지
 - ~~evidence grade의 "source 비치명 경고"~~ → 2026-08-12 완료. Stage 2가 값을 내면서 풀렸다.
   `research/analysis/horizon_scan_phase_b_source_quality.py`가 family별로
