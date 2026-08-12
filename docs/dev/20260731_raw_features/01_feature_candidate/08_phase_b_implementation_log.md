@@ -335,8 +335,10 @@ Phase B 코드가 전부 uncommitted (56개 변경/신규 파일, 마지막 커�
 
 1. **커밋 + 릴리즈** — Phase B 변경분을 커밋하고 `sdc-release` 스킬로 버전 범프·태그·prod
    compose 갱신. 이걸 해야 prod가 `dart sync-filings`를 알게 된다.
-2. **prod 백필** — sj2-server에서 연도별로 수집. `bin/dart-backfill-all-years.sh`에는 아직
-   **안 엮여 있으니**(B-PR2 시점 그대로) 당분간 수동 실행이다.
+2. **prod 백필** — sj2-server에서 연도별로 수집. 2026-08-12에 `dart sync-filings`를
+   `bin/dart-backfill-all-years.sh`와 prod wrapper의 **마지막 단계로 엮었다**(접수 달력연도
+   기준 자체 범위, 현재 연도가 맨 끝). 지금 돌고 있는 A2는 그 전에 띄운 일회성
+   `phase_b_backfill.sh`다. 수동으로 개별 실행할 때의 커맨드는 아래와 같다.
    ```bash
    krx-collector dart sync-filings --years 2015,2016,...,2026   # dart_filing_receipt_raw
    krx-collector dart sync-share-info --year <YYYY>             # dart_capital_change_raw 동반 수집
@@ -366,6 +368,11 @@ Phase B 코드가 전부 uncommitted (56개 변경/신규 파일, 마지막 커�
 |---|---|---|
 | A2 | `phase_b_backfill.sh filings "2024 … 2015 2026"` (11개 연도, `dart_filing_receipt_raw`) | 2026-08-12 06:33 시작, 연도당 약 35분, 완료 예상 13시 전후 |
 | capital probe | `phase_b_backfill.sh capital "2024 2020 2016"`, `SDC_PHASE_B_REPRT_CODES=11011` | `opendart` lock 대기 중(`SDC_LOCK_WAIT_SECONDS=32400`). A2 종료 직후 자동 시작, 약 1시간 10분 |
+
+`phase_b_backfill.sh`는 저장소가 아니라 sj2-server의 `/home/whi/phase_b_backfill.sh`에만 있는
+일회성 스크립트다(`deploy/prod/bin/lib/sdc-wrapper.sh`를 source해서 lock과 로깅만 재사용한다).
+상시 경로는 이제 `bin/dart-backfill-all-years.sh`의 마지막 단계이므로 이 일회성 스크립트를
+저장소로 옮기지 않는다 — 두 벌이 되면 어느 쪽이 정본인지 흐려진다.
 
 두 작업 모두 `sdc_with_source_lock opendart`를 잡으므로 서로 겹치지 않는다. 데일리 OpenDART
 체인은 04:00 Corp Sync에서 시작해 chain으로 이어지며 lock을 잡지 않으니, 백필이 다음 날

@@ -158,9 +158,11 @@ uv run krx-collector dart sync-filings --tickers 005930 --years 2025
 
 재무 metric 정규화와 common daily fact 생성은 PostgreSQL CLI가 아니라 아래 "Parquet compute 파이프라인"에서 DuckDB 마트로 실행합니다.
 
-`dart sync-filings`는 아직 `dart-backfill-all-years.sh`/일일 wrapper에 포함되지 않은 신규
-커맨드입니다 — 현재는 필요할 때 수동으로 실행합니다. `dart sync-share-info`는 기존 주식수/배당/
-자사주 raw와 함께 `dart_capital_change_raw`(증자·감자 현황)도 같은 실행에서 수집합니다.
+`dart sync-filings`는 `dart-backfill-all-years.sh`에 포함돼 있습니다(아래 "OpenDART 전체
+사업연도 백필"). 일일 wrapper에는 아직 없습니다 — 접수 이력은 Phase B 전용이라 매일 돌릴
+이유가 없고, 백필 스크립트가 현재 연도를 매번 다시 받으므로 최신분도 그때 따라옵니다.
+`dart sync-share-info`는 기존 주식수/배당/자사주 raw와 함께
+`dart_capital_change_raw`(증자·감자 현황)도 같은 실행에서 수집합니다.
 
 `dart sync-filings`는 다른 OpenDART 커맨드와 달리 (corp, 연도) 윈도우 하나가 여러 페이지로
 나뉘어 옵니다. `--rate-limit-seconds`는 윈도우 사이와 **페이지 사이 모두**에 적용되므로, 공시가
@@ -197,6 +199,16 @@ uv run krx-collector dart sync-filings --tickers 005930 --years 2025
 - 보고서 코드: `11011,11012,11013,11014`
 - 재무제표 구분: `CFS,OFS`
 - 처리 순서: 최신 연도부터 `dart sync-financials`, `dart sync-share-info`, `dart sync-xbrl` raw 적재
+- 마지막 단계: `dart sync-filings`로 공시 접수 이력(`dart_filing_receipt_raw`) 적재
+
+접수 이력 단계는 앞의 세 단계와 **연도 축이 다릅니다.** 나머지는 사업연도(bsns_year) 기준인데
+접수 이력은 접수 **달력연도** 기준입니다 — FY2025 사업보고서는 2026년에 접수되므로, 이 단계만
+`end_year`가 아니라 **현재 달력연도까지** 돌립니다. 순서는 과거 연도를 내림차순으로 먼저 하고
+현재 연도를 맨 마지막에 둡니다. 저장된 과거 연도는 이후 실행에서 영원히 skip되지만 현재 연도는
+설계상 매번 다시 받으므로, 마지막에 둬야 가장 신선한 상태로 끝납니다.
+
+접수 이력을 마지막에 두는 이유는 또 있습니다. quota로 exit 75가 나도 다른 모든 consumer가
+쓰는 metric raw는 이미 들어와 있게 됩니다. 접수 이력은 Phase B SUE 원공시 source 전용입니다.
 
 필요하면 Cronicle 이벤트 환경 변수로 범위를 좁힙니다.
 
@@ -206,9 +218,22 @@ SDC_DART_BACKFILL_END_YEAR=2025
 SDC_DART_BACKFILL_INCLUDE_CURRENT_YEAR=0
 SDC_DART_BACKFILL_REPRT_CODES=11011,11012,11013,11014
 SDC_DART_BACKFILL_FS_DIVS=CFS,OFS
+SDC_DART_BACKFILL_FILINGS=1              # 0이면 접수 이력 단계 skip
+SDC_DART_BACKFILL_FILINGS_END_YEAR=2026  # 기본값 = 현재 달력연도
+SDC_DART_BACKFILL_FILINGS_RATE_LIMIT=0.5 # sync-filings에만 적용
 ```
 
 모든 OpenDART API key가 일일 한도에 도달하면 각 OpenDART CLI는 exit code `75`로 종료됩니다. 스크립트는 `set -euo pipefail`이므로 그 지점에서 멈추고, 다음 실행 때 이미 저장된 raw/XBRL은 skip되어 같은 범위를 이어받습니다.
+
+#### 소요 시간 실측 (2026-08-12)
+
+접수 이력 11개 연도를 prod에서 실제로 돌린 결과 **연도당 약 36분**, 전체 약 6시간 30분이었습니다
+(`--rate-limit-seconds 0.5`, API key 9개). 요청 수는 약 32,000건으로 일일 한도(9키 × 20,000)에는
+여유가 있었습니다. `sync-share-info`를 연간보고서(`11011`)만으로 한정한 증자·감자 수집은 3개
+연도에 약 1시간 10분이었습니다.
+
+전체 백필(재무 + 주식수 + XBRL + 접수 이력)은 하루를 넘길 수 있으므로, 다음 날 04:00 OpenDART
+daily chain과 겹치지 않는지 확인하고 필요하면 daily event를 그때까지 disable 상태로 둡니다.
 
 ### KRX 수급 범위 백필
 

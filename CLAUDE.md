@@ -37,9 +37,10 @@ Top-level subcommands (see `src/krx_collector/cli/app.py`, where the argparse tr
 - `prices backfill` — daily OHLCV; default = gap-detection backfill, `--incremental` = only after each ticker's `MAX(trade_date)`.
 - `dart sync-corp | sync-financials | sync-share-info | sync-xbrl` — OpenDART raw ingestion.
   `sync-share-info` also collects `dart_capital_change_raw` (irdsSttus) in the same run.
-  `dart sync-filings` (raw disclosure-receipt history, list.json) and `dart
-  backfill-xbrl-receipts` (explicit receipt-targeted XBRL refetch, `--targets-file`) are new
-  Phase B raw-feature commands — not yet wired into `bin/dart-backfill-all-years.sh`.
+  `dart sync-filings` (raw disclosure-receipt history, list.json) runs as the last stage of
+  `bin/dart-backfill-all-years.sh`, on its own *calendar receipt year* range (up to the current
+  year, not `end_year`). `dart backfill-xbrl-receipts` (explicit receipt-targeted XBRL refetch,
+  `--targets-file`) stays manual — picking the target receipts is a separate analysis.
 - `common seed | sync` — seed `common_feature_series` config + sync market/macro raw observations.
 - `flows sync` — KRX MDC security-flow raw (investor net-buy, short-selling).
 - `ops freshness-report` — read-only raw freshness status.
