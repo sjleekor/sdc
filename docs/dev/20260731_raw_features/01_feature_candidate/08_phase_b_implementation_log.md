@@ -9,7 +9,7 @@
 사람이든 다른 사람이든) 바로 파악할 수 있게 하는 게 목적이다.
 
 기준 시점: 2026-08-10, 브랜치 `refactor/parquet-compute-reproducible`.
-`uv run pytest tests/unit` 819개 통과, 회귀 없음.
+`uv run pytest tests/unit` 819개 통과, 회귀 없음. (최신 기준선은 아래 2026-08-12 항목.)
 
 2026-08-11 재확인: 같은 브랜치에서 `uv run pytest tests/unit -q` 819개 그대로 통과.
 이 문서가 처음 저장된 뒤(2026-08-10 13:59) 실제로 Phase A 재실행·Phase AB 결합 run이
@@ -20,6 +20,19 @@ Phase B 코드는 **아직 커밋되지 않았다**(전부 working tree 상태).
 릴리즈했고 prod compose도 갱신됐다. 2번(prod 백필)이 진행 중이며, 그 과정에서 capital action
 list의 vintage 중복 문제가 드러나 plan §4.4.1이 계약 보강으로 추가됐다. 현재 상태와 대기 중인
 측정은 §4.1.1을 보면 된다.
+
+**2026-08-12 세션 종료 시점** — `uv run pytest tests/unit -q` **939개 통과**, lint 통과
+(`research/analysis/fin_vs_price_corr/`의 기존 미해결 건 제외). 이날 커밋 10개는 `00` §4b에
+표로 있다. 코드 관점의 큰 변화는 셋이다.
+
+1. **B-10이 Stage 3만 남았다.** Stage 2(진단 7종)·4(family 카드)·5(run 리포트 2종)를 넣고
+   전부 run 디렉터리에 연결했다. §4.3 참고.
+2. **B-2 결함 3건을 고쳤다.** Stage 2 진단을 실제 lake에 돌리자마자 나왔다. §4.3.2.
+3. **B-9의 마지막 미결 항목이 닫혔다.** source 비치명 경고가 grade A 상한으로 연결됐다.
+   §4.2.
+
+**다음 세션은 `00_status.md` §0부터 읽는다** — 백그라운드 수집이 끝났는지 확인하는 명령과,
+끝났을 때 어느 순서로 진행하는지가 거기 있다.
 
 ## 1. 전체 상태 요약
 
@@ -363,12 +376,16 @@ Stage 3·5 미착수.
 **끝난 것.** 1번 커밋+릴리즈 완료(v0.9.2). `dart_share_count_raw`는 2015년부터 연도별
 1,726~2,238 ticker로 이미 차 있다 — 즉 filing position 자체는 전 구간에 존재한다.
 
-**돌고 있는 것.**
+**돌고 있는 것** (2026-08-12 12:00 기준 스냅샷 — 지금 상태는 `00` §0의 명령으로 직접 확인한다).
 
-| 작업 | 내용 | 상태 |
+| 작업 | 내용 | 12:00 시점 상태 |
 |---|---|---|
-| A2 | `phase_b_backfill.sh filings "2024 … 2015 2026"` (11개 연도, `dart_filing_receipt_raw`) | 2026-08-12 06:33 시작, 연도당 약 35분, 완료 예상 13시 전후 |
-| capital probe | `phase_b_backfill.sh capital "2024 2020 2016"`, `SDC_PHASE_B_REPRT_CODES=11011` | `opendart` lock 대기 중(`SDC_LOCK_WAIT_SECONDS=32400`). A2 종료 직후 자동 시작, 약 1시간 10분 |
+| A2 | `phase_b_backfill.sh filings "2024 … 2015 2026"` (11개 연도, `dart_filing_receipt_raw`) | 06:33 시작, 연도당 약 36분. 2015 진행 중(10/11), 남은 건 2026 하나. 완료 예상 13시 전후 |
+| capital probe | `phase_b_backfill.sh capital "2024 2020 2016"`, `SDC_PHASE_B_REPRT_CODES=11011` | `opendart` lock 대기 중(`SDC_LOCK_WAIT_SECONDS=32400`). A2 종료 직후 자동 시작, 약 1시간 10분 → 14시 전후 |
+
+연도 순서는 과거부터고 2026이 마지막이다. 저장된 과거 연도는 다음 실행에서 영원히 skip되지만
+현재 연도는 설계상 매번 다시 받으므로 마지막에 둬야 가장 신선하게 끝난다. exit 75(quota)로
+끊기면 같은 스크립트를 다시 돌리면 이어받는다.
 
 `phase_b_backfill.sh`는 저장소가 아니라 sj2-server의 `/home/whi/phase_b_backfill.sh`에만 있는
 일회성 스크립트다(`deploy/prod/bin/lib/sdc-wrapper.sh`를 source해서 lock과 로깅만 재사용한다).
@@ -389,8 +406,10 @@ probe(약 7.8k)는 한도에 여유가 있다.
 여기(구현 로그)에는 실행 결과만 기록한다 — 거리 1·5·9년별 feature-changing 불일치율,
 (a)/(b) identity 통과율, 그리고 그 값이 기준표의 어느 칸에 떨어졌는지.
 
-**실행.** 수집이 끝나고 raw export로 새 snapshot이 나오면 아래 한 줄이면 된다. 기준표 판정까지
-스크립트가 적용해 `research/output/vintage_probe/`에 md·json으로 남긴다.
+**실행.** probe는 PostgreSQL이 아니라 **lake의 parquet**을 읽는다. 따라서 순서는 수집 완료 →
+`bin/raw-parquet-export-all.sh`로 새 snapshot 발행 → probe다. export를 건너뛰면 옛 snapshot을
+재는 셈이 된다. 기준표 판정까지 스크립트가 적용해 `research/output/vintage_probe/`에 md·json으로
+남긴다.
 
 ```bash
 uv run python -m research.analysis.capital_change_vintage_probe --snapshot-date YYYY-MM-DD
