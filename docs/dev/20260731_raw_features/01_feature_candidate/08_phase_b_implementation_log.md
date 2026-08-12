@@ -327,7 +327,8 @@ Phase B 코드가 전부 uncommitted (56개 변경/신규 파일, 마지막 커�
 
 ## 4. 남은 작업
 
-작업 패키지 관점 진척도: B-0 ~ B-9 완료(단 §5.5 segment 진단 제외), B-10은 Stage 1만 완료.
+작업 패키지 관점 진척도: B-0 ~ B-9 완료(단 §5.5 segment 진단 제외), B-10은 Stage 1·2·4 완료,
+Stage 3·5 미착수.
 
 ### 4.1 선행 조건 — 데이터 수집 (코드 작업 아님, 이게 지금 크리티컬 패스)
 
@@ -498,8 +499,26 @@ plan §4.4.2, 보강 결과는 아래 §4.3.1.
 - **Stage 3** — `daily_ic.parquet`/`cohort_ic.parquet`: `scan_cell`/`scan_event_cohort_cell`이
   지금 요약 통계만 반환하고 날짜별/코호트별 원시 IC 시퀀스는 버리므로, Phase A와 공유하는
   코드(`per_date_market_rank_ic` 등)의 내부를 건드려야 함 — 더 침습적, 별도 계획 필요.
-- **Stage 4** — `family_summary.parquet`/`family_cards.md`: 위 모든 진단을 합쳐 family별
-  결론을 서술하는 진짜 "카드" — 카드 포맷/문구 결정이 필요.
+- **Stage 4 — 완료(2026-08-12).** `research/analysis/horizon_scan_phase_b_cards.py`가
+  family 8개마다 한 행(`family_summary.parquet`)과 한 카드(`family_cards.md`)를 낸다.
+  §6 B-10이 정한 카드 항목을 identity / readiness / coverage / result / next_step 다섯 묶음으로
+  나눠 렌더한다.
+
+  두 가지 원칙으로 만들었다.
+
+  1. **blocked가 정상 경로다.** 지금은 38개 셀이 전부 blocked이므로 카드의 일은 "무엇이
+     없어서 막혔는지"를 말하는 것이다. 통계 필드는 0/False가 아니라 NULL로 두고, 마크다운은
+     `—`로 렌더한다. 평가 셀이 0이면 discovery·screen_pass 건수도 `0`이 아니라 `—`다 —
+     "재보니 0"과 "안 쟀다"는 다른 사실이다. 카드 머리말에 이 규칙을 적어 둔다.
+  2. **여기서 새로 계산하지 않는다.** 모든 숫자는 앞 단계가 이미 만든 행에서 읽는다.
+     coverage는 방금 쓴 `feature_coverage.parquet`/`event_coverage.parquet`을 **다시 읽어서**
+     채운다 — 카드가 자기가 요약하는 산출물과 어긋날 수 없게 된다. family 단위 집계(최고 등급,
+     최소 q, failed gate 합집합)와 `next_step` 문장만 파생값이다.
+
+  `fin_sue`는 grain이 달라 `event_coverage`에서 커버리지를 가져오고, 연속 패널 개념인
+  `min_names_per_date`는 비슷한 숫자를 빌려 오지 않고 비운다. `formula_version`은 호출자가
+  주입한다 — 오늘 지문이 있는 건 `ev_net_share_issuance_yoy`(`issuance_v2`)뿐이고, 나머지에
+  가짜 버전을 붙이지 않는다.
 - **Stage 5** — `03b_horizon_scan_results.md`(phase=B), phase=AB 쪽 리포트, atomic publish
   범위 확장.
 - §5.5 segment/freshness 진단(8개 축) — B-PR12가 이미 명시적으로 미룬 부분, 아직 스코프 밖.

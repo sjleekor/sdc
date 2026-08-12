@@ -19,6 +19,7 @@ BH math in the fixture is authentic, not hand-faked.
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 
 import duckdb
@@ -876,3 +877,68 @@ def test_feature_coverage_degrades_to_the_daily_mart_that_exists(tmp_path: Path)
     frame = pl.read_parquet(tmp_path / "feature_coverage.parquet")
     assert set(frame["source_mart"].unique()) == {"feat_fin_scan_daily"}
     assert "ev_net_share_issuance_yoy" not in set(frame["feature"])
+
+
+# --- write_phase_b_family_cards: §7.1 Stage 4 artifacts ---
+
+
+def test_family_cards_read_coverage_back_off_the_parquet_just_written(
+    tmp_path: Path, config
+) -> None:
+    from research.analysis.horizon_scan_phase_b import build_phase_b_readiness_rows
+
+    pl.DataFrame(
+        [
+            {
+                "feature": "fin_value_z",
+                "variant": "native_t",
+                "market": "KOSPI",
+                "year": 2016,
+                "panel_rows": 200,
+                "nonnull_rows": 150,
+                "first_value_date": date(2016, 3, 2),
+                "min_names_per_date": 11,
+            }
+        ]
+    ).write_parquet(tmp_path / "feature_coverage.parquet")
+
+    rows = phase_b_run.write_phase_b_family_cards(
+        config,
+        tmp_path,
+        readiness_rows=build_phase_b_readiness_rows(config, available_assets=set()),
+        assembled_rows=[],
+        rank_correlation_rows=[],
+        diagnostics_written=["feature_coverage"],
+        run_id="20260812T090000-abcd1234",
+    )
+
+    by_family = {row["family"]: row for row in rows}
+    assert by_family["fin_value_z"]["coverage_ratio"] == 0.75
+    assert by_family["fin_value_z"]["effective_start"] == date(2016, 3, 2)
+    # event_coverage was not written, so the SUE family gets no coverage at all
+    # rather than borrowing the continuous table.
+    assert by_family["fin_sue"]["coverage_source"] is None
+
+    assert (tmp_path / "family_summary.parquet").is_file()
+    markdown = (tmp_path / "family_cards.md").read_text()
+    assert "## fin_value_z" in markdown
+    assert "20260812T090000-abcd1234" in markdown
+
+
+def test_family_cards_are_written_when_no_diagnostic_landed(tmp_path: Path, config) -> None:
+    from research.analysis.horizon_scan_phase_b import build_phase_b_readiness_rows
+
+    rows = phase_b_run.write_phase_b_family_cards(
+        config,
+        tmp_path,
+        readiness_rows=build_phase_b_readiness_rows(config, available_assets=set()),
+        assembled_rows=[],
+        rank_correlation_rows=[],
+        diagnostics_written=[],
+    )
+
+    # The card that says "blocked, here is the missing dependency" is exactly
+    # the one a run with nothing collected needs to produce.
+    assert len(rows) == 8
+    assert all(row["readiness"] == "blocked" for row in rows)
+    assert (tmp_path / "family_cards.md").is_file()

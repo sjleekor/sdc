@@ -62,6 +62,11 @@ from research.analysis.horizon_scan_phase_b import (
     write_phase_b_readiness_freeze,
     write_phase_b_run_spec,
 )
+from research.analysis.horizon_scan_phase_b_cards import (
+    FAMILY_SUMMARY_TABLE,
+    build_family_summary_rows,
+    render_family_cards_md,
+)
 from research.analysis.horizon_scan_phase_b_diagnostics import (
     compute_phase_b_rank_correlation,
     run_sue_event_ordinal_nonoverlap,
@@ -109,7 +114,10 @@ from research.analysis.horizon_scan_runner import (
     scan_cell,
 )
 from research.etl.config import REMOTE_SOURCE, LakeConfig
-from research.etl.features.event_scan import materialize_event_scan_daily
+from research.etl.features.event_scan import (
+    EVENT_FEATURE_FORMULA_VERSION,
+    materialize_event_scan_daily,
+)
 from research.etl.features.fin_scan import FIN_SCAN_TABLE, materialize_fin_scan_daily
 from research.etl.features.sue_event import SUE_EVENT_TABLE, materialize_sue_event
 from research.etl.lake import connect, register_views
@@ -192,6 +200,43 @@ _QUALITY_DIAGNOSTICS: tuple[tuple[str, frozenset[str], Any], ...] = (
         lambda _assets: build_event_coverage_sql(),
     ),
 )
+
+
+def write_phase_b_family_cards(
+    config: HorizonScanConfig,
+    core_dir: Path,
+    *,
+    readiness_rows: list[dict[str, Any]],
+    assembled_rows: list[dict[str, Any]],
+    rank_correlation_rows: list[dict[str, Any]],
+    diagnostics_written: list[str],
+    run_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """§7.1 ``family_summary.parquet`` + ``family_cards.md`` (B-10 Stage 4)."""
+
+    def _read(name: str) -> list[dict[str, Any]]:
+        if name not in diagnostics_written:
+            return []
+        return pl.read_parquet(core_dir / f"{name}.parquet").to_dicts()
+
+    rows = build_family_summary_rows(
+        config,
+        readiness_rows=readiness_rows,
+        assembled_rows=assembled_rows,
+        feature_coverage_rows=_read("feature_coverage"),
+        event_coverage_rows=_read("event_coverage"),
+        rank_correlation_rows=rank_correlation_rows,
+        # Only the issuance feature carries a fingerprinted formula version
+        # today; the others get None rather than a made-up one.
+        formula_versions={"ev_net_share_issuance_yoy": EVENT_FEATURE_FORMULA_VERSION},
+    )
+    pl.DataFrame(rows, infer_schema_length=None).write_parquet(
+        core_dir / f"{FAMILY_SUMMARY_TABLE}.parquet"
+    )
+    (core_dir / "family_cards.md").write_text(
+        render_family_cards_md(rows, run_id=run_id), encoding="utf-8"
+    )
+    return rows
 
 
 def write_phase_b_quality_diagnostics(
@@ -787,7 +832,11 @@ def run_phase_b_core(
     # as readiness_matrix above, and for the same reason: they describe the
     # inputs, not a scan result, so a run where everything is blocked is the
     # run that needs them most.
-    write_phase_b_quality_diagnostics(con, core_dir, available_assets=available_assets)
+    diagnostics_written = write_phase_b_quality_diagnostics(
+        con, core_dir, available_assets=available_assets
+    )
+
+    rank_corr_rows: list[dict[str, Any]] = []
 
     # §5.5/§7.1 primary_feature_rank_correlation.parquet — every ready Phase A
     # continuous family's primary feature crossed with every ready Phase B
@@ -864,6 +913,19 @@ def run_phase_b_core(
             pl.DataFrame(rows, infer_schema_length=None).write_parquet(
                 core_dir / f"{name.removesuffix('_rows')}_summary.parquet"
             )
+
+    # §7.1 family_summary.parquet / family_cards.md (B-10 Stage 4). Coverage is
+    # read back off the parquet just written rather than re-queried, so a card
+    # can never disagree with the artifact it summarizes.
+    write_phase_b_family_cards(
+        config,
+        core_dir,
+        readiness_rows=readiness_rows,
+        assembled_rows=assembled,
+        rank_correlation_rows=rank_corr_rows,
+        diagnostics_written=diagnostics_written,
+        run_id=run_spec["run_id"],
+    )
 
     continuous_by_id = {
         r["hypothesis_id"]: r for r in ready_stats_rows if r.get("scan_type") in ("cum", "bucket")

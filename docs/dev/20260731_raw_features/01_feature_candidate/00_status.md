@@ -1,6 +1,6 @@
 # 00. 진행 상태 — 이 디렉터리를 이어받는 사람이 먼저 읽는 문서
 
-- 작성일: 2026-08-11
+- 작성일: 2026-08-11 (갱신: 2026-08-12)
 - 브랜치: `refactor/parquet-compute-reproducible`
 - 목적: 문서가 8개(합계 30만 자 이상)라 어디까지 왔는지 한눈에 안 보인다. 이 파일은
   **지금 상태와 다음에 할 일만** 적는다. 근거·설계는 각 문서로 넘긴다.
@@ -10,7 +10,7 @@
 | 트랙 | 대상 | 상태 |
 |---|---|---|
 | **T1. px/flow 피쳐 검증** | 가격·수급 피쳐 17 family (Phase A0/A → acceptance gate) | **판정까지 완료**, 커밋됨(`a03872e`) |
-| **T2. 재무/이벤트 피쳐 검증** | fin_*/ev_* 8 family, 38 candidate cell (Phase B) | **코드 거의 완료, 실행 0%** — 수집이 안 돼 막힘. 전부 uncommitted |
+| **T2. 재무/이벤트 피쳐 검증** | fin_*/ev_* 8 family, 38 candidate cell (Phase B) | **코드 완료·커밋됨(v0.9.2), 실행 0%** — prod 수집 진행 중이고 B-2 결함 2건이 §4c에 미해결 |
 
 ## 2. 문서 지도
 
@@ -44,8 +44,8 @@ Grade A 6개 중 `px_amihud_20d`/`px_near_52w_high`는 baseline 모델에 이미
 
 ## 4. T2 — 코드는 됐는데 데이터가 없다
 
-작업 패키지 B-0~B-9 완료(§5.5 segment 진단 제외), B-10은 Stage 1만 완료. 유닛 테스트
-819개 통과(2026-08-11 재확인).
+작업 패키지 B-0~B-9 완료(§5.5 segment 진단 제외), B-10은 Stage 1·2·4 완료(2026-08-12),
+Stage 3·5 미착수. 유닛 테스트 899개 통과(2026-08-12).
 
 그런데 Phase B candidate **38개가 전부 `blocked_missing_dependency`**(`M_B_ready=0`)다.
 원인은 하나다 — 로컬 lake에 `dart_filing_receipt_raw`/`dart_capital_change_raw` parquet가
@@ -67,20 +67,38 @@ Grade A 6개 중 `px_amihud_20d`/`px_near_52w_high`는 baseline 모델에 이미
 그걸 중복 합산해 `ev_net_share_issuance_yoy`가 전부 NULL이 된다. dedup 규칙과, latest-vintage
 대 strict PIT 중 무엇을 쓸지 정하는 측정 설계·판정 기준을 plan §4.4.1에 사전 고정했다.
 
+대기 중에 한 것: `isu_dcrs_stle` 카탈로그 v2(미분류 22.4%→4.3%), B-10 Stage 2 진단 7종과
+Stage 4 family 카드, `sync-filings`를 `dart-backfill-all-years.sh`에 연결.
+
+## 4c. 새로 확정된 블로커 — B-2 결함 2건 (2026-08-12)
+
+Stage 2 진단을 실제 lake에 돌리자마자 `stock_metric_vintage_fact`의 결함 두 개가 나왔다.
+**아직 안 고쳤다.** 상세와 수정 방향은 `08` §4.3.2.
+
+1. `statement_period_end`가 최대 2년 어긋난다 — XBRL 기간을 `MIN()`으로 골라 비교표시용
+   전전기가 뽑힌다. FY2024 연간 67,276행 중 64,688행이 2022-12-31이다. 이 컬럼은 마트의
+   grain이고 B-3~B-6이 전부 여기서 파생된다.
+2. XBRL 페어링이 기간과 `fs_div`를 안 맞춘다 — OFS 행이 항상 CFS 값과 비교돼
+   `value_mismatch_ratio`가 전 연도 0.51~0.97이다. 계약상 tolerance는 0이다.
+
+지금 당장 아무것도 막고 있진 않지만(해당 status를 읽는 게이트가 아직 없다), 1번은 값이
+조용히 틀린 채 downstream 전체로 퍼진다. **Phase B 재실행 전에 고치는 것이 맞다.**
+
 ## 5. 다음에 할 일 — 이 순서로
 
 1. **[크리티컬 패스]** ~~Phase B 코드 커밋 → 릴리즈~~ 완료 → prod 백필(진행 중) →
-   vintage probe 판정(`04_specific_plan_B.md` §4.4.1) → `raw-parquet-export-all.sh` →
-   `--phase B` → `--phase A` → `--phase AB` 재실행. 명령과 주의점은 `08` §4.1·§4.1.1.
-2. **데이터 없이도 가능한 코드 작업**: B-10 Stage 2(품질·커버리지 진단 parquet 7종),
-   Stage 4(family 카드). Stage 3은 Phase A 공유 코드 내부를 건드려야 해 별도 계획이 필요하다.
+   vintage probe 판정(`04_specific_plan_B.md` §4.4.1) → **B-2 결함 2건 수정(§4c)** →
+   `raw-parquet-export-all.sh` → `--phase B` → `--phase A` → `--phase AB` 재실행.
+   명령과 주의점은 `08` §4.1·§4.1.1.
+2. **데이터 없이도 가능한 코드 작업**: ~~B-10 Stage 2(7종)~~ 완료, ~~Stage 4(family 카드)~~
+   완료. 남은 건 Stage 3(Phase A 공유 코드 내부를 건드려야 해 별도 계획 필요)과 Stage 5.
    → `08` §4.3.
-3. **T1 잔여**: k=100 비용 확인(지금 가능) → `07` §6.
+3. **T1 잔여**: ~~k=100 비용 확인~~ 완료(조건 미충족) → h=60 holdout 재평가만 남음. `07` §6.
 
 ## 6. 상태 확인 명령
 
 ```bash
-uv run pytest tests/unit -q                                   # 819개 통과가 기준선
+uv run pytest tests/unit -q                                   # 899개 통과가 기준선(2026-08-12)
 git status --porcelain | wc -l                                # T2 코드가 아직 uncommitted인지
 ls data_lake/raw_postgres/snapshot_date=*/source=sj2_remote/ | grep -E "filing_receipt|capital_change"
                                                               # 아무것도 안 나오면 T2는 여전히 막힌 상태
