@@ -430,10 +430,13 @@ width 60인 60–120 bucket과 cumulative 0–60/0–120만 걸린다. **사전�
 B등급 2개가 A로 못 간 이유는 통계가 아니라 원천 품질이다. `source_quality_status=warn`이 상한을
 B로 묶는데, 원인은 §3.0이 적은 `revision_ratio` 0.1056~0.1259 하나다(임계 0.10).
 
-**막힌 셀의 이유는 한 곳으로 모인다.** grade C 24개는 `failed_gates`에 **전부**
-`robustness_pass`가 들어 있다. 반대로 grade D 7개는 하나도 없고 `primary_discovery` 미달이
-원인이다. 즉 통계적으로 살아남은 셀을 떨어뜨리는 건 사실상 temporal placebo 하나다 — §3.0의
-진단이 등급 단계에서도 그대로 재현된다.
+**막힌 셀의 이유는 한 곳으로 모인다.** grade C는 규칙상 "`available_direction_pass` 실패
+**또는** `robustness_pass` 실패"로 라우팅되는데(`compute_phase_b_evidence_grade`), 실측에서는
+**24개 전부가 robustness 문으로 왔고 available 방향 문으로 떨어진 셀은 0개**다. 그중 7개는
+`primary_discovery`까지 통과하고 오직 강건성에서만 떨어졌다(나머지 17개는 둘 다 실패).
+반대로 grade D 7개는 `robustness_pass`가 하나도 없고 `primary_discovery` 미달이 원인이다.
+즉 통계적으로 살아남은 셀을 떨어뜨리는 건 사실상 temporal placebo 하나다 — §3.0의 진단이
+등급 단계에서도 그대로 재현된다. placebo p값 비교는 `09_all_feature_results.md` §9.2.
 
 | grade | 셀 | `failed_gates` 주요 조합 |
 |---|---:|---|

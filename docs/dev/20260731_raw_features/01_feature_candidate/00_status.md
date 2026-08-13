@@ -24,6 +24,9 @@ find research/output/horizon_scan -name manifest.json | sort
 | B | `20260812T231507-f9117ce1` | 38/38 ready, `bh_pass` 18, discovery 14 |
 | AB | `20260813T130307-f9117ce1` | `m_ab=113`, discovery 45, `screen_pass` 7, grade A5·B2·C24·D7 |
 
+**결과부터 보고 싶으면 `09_all_feature_results.md`로 간다.** 25 family 전부를 원천·산식·
+가설·예측력·등급으로 한 표에 정리해뒀다. 아래는 그 문서의 §9.1과 같은 경고다.
+
 **결과를 읽을 때 반드시 같이 볼 것 하나.** grade A 5개를 같은 무게로 읽으면 안 된다.
 `screen_pass` 7셀 중 **temporal placebo를 실제로 거친 건 3셀뿐**이다(`fin_log_mcap`의
 cumulative 0–60·0–120과 bucket 60–120). 나머지 4셀은 h40–60 bucket이라 `nw_lag < 59`,
@@ -57,6 +60,7 @@ T1 h=60 holdout 재평가)는 급하지 않다.
 | `06_grade_a_deep_dive/` | Grade A 6개 family 종목 단위 상세(+`07_glossary.md`) | T1 |
 | `07_phase1_acceptance_gate.md` | 증분성·경제성·holdout 판정과 채택 결론 | T1 |
 | `08_phase_b_implementation_log.md` | B-PR1~15 구현 기록, **현재 실행 상태(§3)·남은 작업(§4)** | T2 |
+| `09_all_feature_results.md` | **25 family 결과 한눈에** — 원천·산식·가설·예측력·등급 | 공통 |
 
 계약(`04_*`)과 기록(`08`)의 역할이 다르다. 임계값·판정 기준은 **결과를 보기 전에** `04`에
 적고, 실행 결과와 실측치는 `08`에 적는다. 이 구분을 깨지 않는 게 이 트랙의 핵심 규율이다.
@@ -106,9 +110,11 @@ ready**가 됐고 B-PR11~B-PR15 오케스트레이션이 실제 데이터로 처
 사전등록된 설계이지 우회가 아니지만, **실제로 세 게이트를 다 거친 건 `fin_log_mcap` 3셀뿐**이다.
 B 2개가 A로 못 간 이유는 통계가 아니라 `revision_ratio` 0.1056~0.1259(임계 0.10) 하나다.
 
-**떨어진 이유도 한 곳으로 모인다.** grade C 24개는 `failed_gates`에 **전부**
-`robustness_pass`가 들어 있고, grade D 7개는 하나도 없다(원인은 `primary_discovery` 미달).
-즉 통계적으로 살아남은 셀을 떨어뜨리는 건 사실상 temporal placebo 하나다. 그리고
+**떨어진 이유도 한 곳으로 모인다.** grade C는 규칙상 "available 방향 실패 **또는** 강건성
+실패"로 갈라지는데, 실측에서는 **24개 전부가 강건성 문으로 왔고 available 방향으로 떨어진
+셀은 0개**다. 그중 7개는 `primary_discovery`까지 통과하고 강건성에서만 떨어졌다. grade D
+7개는 반대로 강건성 실패가 하나도 없고 `primary_discovery` 미달이 원인이다. 즉 통계적으로
+살아남은 셀을 떨어뜨리는 건 사실상 temporal placebo 하나다. 그리고
 **`fin_sue`·`fin_gross_profitability`는 표본이 없다**(coverage 0.0000 / 0.0315).
 
 **A/B rank correlation은 낮다.** 84쌍 대부분이 절댓값 0.15 이하다(`px_reversal_5d`↔
