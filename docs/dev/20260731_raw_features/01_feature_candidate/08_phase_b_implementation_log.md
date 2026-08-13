@@ -54,6 +54,9 @@ list의 vintage 중복 문제가 드러나 plan §4.4.1이 계약 보강으로 �
 | B-PR14 | 결합 단면 permutation(B-8) | 완료 |
 | B-PR15 | B-10 Stage 1 — readiness_matrix + robustness summary 아카이브 | 완료 |
 
+B-PR1~15 전부 **실데이터로 한 번씩 돌았다** — Phase B(§3.0) → Phase A 재실행 → phase=AB
+(§3.0.1). 통합 크래시는 없었고 등급이 확정됐다(A=5, B=2, C=24, D=7).
+
 ## 2. B-PR별 상세
 
 ### B-PR1 — contract (B-0)
@@ -353,6 +356,105 @@ artifact")는 한 PR에 넣기엔 너무 크고 성격도 다양해(값 재사�
 둘 다 q가 1.0 / 0.42로 나온 family와 일치한다 — 신호가 없다기보다 표본이 없다.
 
 **다음.** 같은 snapshot으로 `--phase A` 재실행 → `--phase AB`. 그래야 등급이 정해진다.
+→ 둘 다 끝났다. §3.0.1.
+
+### 3.0.1 Phase A 재실행 → phase=AB — 등급이 정해졌다 (2026-08-13)
+
+크리티컬 패스의 마지막 두 계산이다. §3.0이 남겨둔 "등급 미정" 상태가 여기서 풀린다.
+
+**Phase A 재실행.**
+
+| 항목 | 값 |
+|---|---|
+| run_id | `20260813T081646-00fa0e76` |
+| snapshot / source | 2026-08-12 / sj2_remote |
+| config_hash | `e55c3046…` (Phase B run과 동일) |
+| official / git | true / `b314624`, dirty=false |
+| 소요 | 08:16:46 → 12:57:29, **4시간 41분** |
+| 결과 | 412행 16 family, FDR 채점 75, `bh_pass` 58, `primary_discovery` 31 |
+
+**08-09 run과 값이 완전히 같다.** 메타 5개 컬럼(`run_id`·`snapshot_date`·`source`·
+`config_hash`·`phase`)을 뺀 **40개 값 컬럼 × 412행이 전부 일치**한다. 부동소수점 오차 수준의
+차이도 없다. 이유는 둘이다 — Phase A 유효 표본이 holdout 경계 2025-08-01에서 끊기고
+(`effective_sample_end`가 available 2025-07-30 / common_survivor 2025-02-05), 8년치 capital
+vintage 백필은 `dart_capital_change_raw`만 건드려 `fin_*`/`ev_*` 즉 Phase B 소관이다. 즉 이
+재실행의 목적은 새 발견이 아니라 **snapshot과 config를 Phase B에 맞추는 것**이었고, 그건
+달성됐다.
+
+**phase=AB.**
+
+| 항목 | 값 |
+|---|---|
+| run_id | `20260813T130307-f9117ce1` |
+| 소요 | 1초 미만 (순수 재조합) |
+| `m_ab` | **113** = Phase A 75 + Phase B ready 38 |
+| q 임계 | 0.10 |
+| primary discovery | **45** |
+| `screen_pass` | **7** |
+| evidence grade | **A=5, B=2, C=24, D=7** |
+
+`--phase AB`는 `--phase-a-run-dir`/`--phase-b-run-dir`를 **필수 인자로** 받는다(자동 탐색이
+아니다). 두 run은 결합 전에 content hash로 무결성 검증을 통과했다(§2.3 rule 5).
+
+**BH family를 넓혔는데 강등이 0건이다.**
+
+| 출신 | 채점 | 단독 discovery | 결합 discovery |
+|---|---:|---:|---:|
+| Phase A | 75 | 31 | **31** |
+| Phase B | 38 | 14 | **14** |
+
+75 → 113으로 넓히면 문턱은 엄격해지기만 하는데 떨어진 가설이 하나도 없다. 리포트 §3이
+"(none)"인 이유다.
+
+**`screen_pass` 7셀.**
+
+| family | horizon | 셀 | grade | `ic_mean` | `q_fdr_global_ab` | robustness | source quality |
+|---|---|---|---|---|---|---|---|
+| fin_log_mcap | 0–120 | cum | **A** | −0.1115 | 0.00000 | 필요·통과 | n/a |
+| fin_log_mcap | 0–60 | cum | **A** | −0.0838 | 0.00000 | 필요·통과 | n/a |
+| fin_log_mcap | 60–120 | bucket | **A** | −0.0653 | 0.00000 | 필요·통과 | n/a |
+| fin_log_mcap | 40–60 | bucket | **A** | −0.0387 | 0.00000 | **불필요** | n/a |
+| ev_net_share_issuance_yoy | 40–60 | bucket | **A** | −0.0083 | 0.02313 | **불필요** | n/a |
+| ev_payout_yield | 40–60 | bucket | **B** | +0.0523 | 0.00000 | **불필요** | warn |
+| fin_value_z | 40–60 | bucket | **B** | +0.0348 | 0.00000 | **불필요** | warn |
+
+**7셀 중 3셀만 robustness 게이트를 실제로 거쳤다.** 나머지 4셀은 `robustness_required=False`라
+temporal placebo를 아예 안 봤다. 기준은 `nw_lag >= 59`
+(`placebo.temporal_min_nw_lag`, `select_phase_b_long_horizon_cells`)다 — h40–60 bucket은
+width 20이라 long-horizon 셀이 아니고 rule 7의 non-overlap·temporal placebo 대상에서 빠진다.
+width 60인 60–120 bucket과 cumulative 0–60/0–120만 걸린다. **사전등록된 설계이지 빠져나간 게
+아니지만, grade A 5개를 같은 무게로 읽으면 안 된다.** 요구 게이트 3개를 전부 통과한 건
+`fin_log_mcap`의 3셀이고, 이건 §3.0의 "`fin_log_mcap`만 요구 게이트 3개를 다 통과했다"와 그대로
+맞는다.
+
+B등급 2개가 A로 못 간 이유는 통계가 아니라 원천 품질이다. `source_quality_status=warn`이 상한을
+B로 묶는데, 원인은 §3.0이 적은 `revision_ratio` 0.1056~0.1259 하나다(임계 0.10).
+
+**막힌 셀의 이유는 한 곳으로 모인다.** grade C 24개는 `failed_gates`에 **전부**
+`robustness_pass`가 들어 있다. 반대로 grade D 7개는 하나도 없고 `primary_discovery` 미달이
+원인이다. 즉 통계적으로 살아남은 셀을 떨어뜨리는 건 사실상 temporal placebo 하나다 — §3.0의
+진단이 등급 단계에서도 그대로 재현된다.
+
+| grade | 셀 | `failed_gates` 주요 조합 |
+|---|---:|---|
+| C | 24 | `[primary_discovery, period_sign_pass, robustness_pass]` 7 · `[robustness_pass]` 7 · `[primary_discovery, tradable_pass, period_sign_pass, robustness_pass]` 6 · 나머지 4 |
+| D | 7 | `[primary_discovery, tradable_pass]` 4 · `[primary_discovery, period_sign_pass]` 2 · `[primary_discovery]` 1 |
+
+**결합 단면 permutation (B-PR14).** 실제 발견 45개에 대해 100회 복제로
+`p_empirical_count = 0.0099`. 45개 이상을 만들어낸 복제가 0회라는 뜻이다. 다만 **0.0099는 복제
+100회에서 나올 수 있는 최솟값**이라, 더 낮은 p를 보려면 `placebo.cross_sectional_repeats`를
+올려야 한다.
+
+**`primary_feature_rank_correlation.parquet` 84쌍이 이번에 처음 나왔다** (B-PR13). 08-09 AB
+run에는 parquet 2개뿐이었다. Phase A × Phase B 피처 간 일별 rank correlation인데 값이 대체로
+낮다 — `px_reversal_5d`↔`fin_log_mcap` −0.021, `px_mom_12_1`↔`fin_asset_growth_yoy` +0.152
+수준이다. A쪽 발견과 B쪽 발견이 서로 다른 정보를 보고 있다는 뜻이라, 결합 BH에서 강등이 0건인
+것과 일관된다.
+
+산출물 경로는
+`research/output/horizon_scan/phase=AB/snapshot_date=2026-08-12/source=sj2_remote/config_hash=e55c3046…/run_id=20260813T130307-f9117ce1/`
+— `combined_ab_primary_hypotheses.parquet`, `phase_a_card_overlay.parquet`,
+`primary_feature_rank_correlation.parquet`, `03ab_combined_results.md`.
 
 ### 3.1 발행된 official run (snapshot 2026-08-09, 기록용)
 
@@ -889,6 +991,9 @@ B-2는 Phase B 전용이라 골든 대상이 아니다.
   등급 결과는 구 run과 동일. §3.1 참고.
 - ~~`run_combined_ab`를 실제 두 발행물로 실행~~ → 2026-08-10 완료
   (`20260810T194651-e04c00c7`). 단 B가 0개라 내용은 비어 있다.
+- ~~snapshot 2026-08-12로 Phase A 재실행 + 내용 있는 AB~~ → 2026-08-13 완료
+  (`20260813T081646-00fa0e76` / `20260813T130307-f9117ce1`). `m_ab=113`,
+  `screen_pass=7`, grade A=5·B=2·C=24·D=7. §3.0.1 참고.
 
 ## 5. 재현
 
@@ -901,17 +1006,29 @@ uv run python -m research.analysis.horizon_scan --phase AB \
   --phase-a-run-dir <phase=A run 경로> --phase-b-run-dir <phase=B run 경로>
 ```
 
-마지막으로 실제 실행한 `--phase AB` 인자(§3.1의 두 run):
+**`--phase B`에는 A0 feature mart라는 선행 조건이 있다.** 없으면
+`A0 manifest is required before a Phase B scan`으로 죽는다. raw export 뒤에 이걸 먼저 돌린다.
+
+```bash
+# snapshot_date를 주지 않는다 — auto_selected=False가 되면 official 자격을 잃는다
+uv run python -m research.etl.horizon_scan_inputs --source sj2_remote
+```
+
+`compute_all --features`로 대신할 수 없다. 계약 해시가 달라 A0가
+`mart cache contract mismatch`로 죽는다(그 경우 `--force`). 자세한 이유는 `00_status.md` §5.
+
+마지막으로 실제 실행한 `--phase AB` 인자(§3.0.1의 두 run, snapshot 2026-08-12):
 
 ```bash
 BASE=research/output/horizon_scan
 HASH=e55c3046c113a9168d2b64fcbc87124c2fa1783b7682acc0852a718cd800dd3b
 uv run python -m research.analysis.horizon_scan --phase AB \
-  --phase-a-run-dir "$BASE/phase=A/snapshot_date=2026-08-09/source=sj2_remote/config_hash=$HASH/run_id=20260810T141014-7212fe82" \
-  --phase-b-run-dir "$BASE/phase=B/snapshot_date=2026-08-09/source=sj2_remote/config_hash=$HASH/run_id=20260810T135845-e04c00c7"
+  --phase-a-run-dir "$BASE/phase=A/snapshot_date=2026-08-12/source=sj2_remote/config_hash=$HASH/run_id=20260813T081646-00fa0e76" \
+  --phase-b-run-dir "$BASE/phase=B/snapshot_date=2026-08-12/source=sj2_remote/config_hash=$HASH/run_id=20260812T231507-f9117ce1"
 ```
 
-이어서 작업할 때 **가장 먼저 볼 것**: §3.2(왜 막혔나) → §4.1(순서대로 무엇을 해야 하나).
-코드부터 이어서 쓰고 싶다면 데이터 없이도 가능한 것은 §4.3 Stage 2·Stage 4 정도다
-(Stage 3은 Phase A 공유 코드 내부를 건드려야 해서 별도 계획이 필요하고, 나머지는 전부
-실제 ready 셀이 생겨야 검증이 가능하다).
+직전 세대(snapshot 2026-08-09, §3.1의 두 run)는 `run_id=20260810T141014-7212fe82` /
+`20260810T135845-e04c00c7`였다. Phase B가 0셀이던 시절의 기록이다.
+
+이어서 작업할 때 **가장 먼저 볼 것**: §3.0(Phase B 측정값) → §3.0.1(등급 확정) → §4(남은 작업).
+§3.1·§3.2는 `M_B_ready=0`이 어떻게 생겼었는지의 기록으로만 남긴다 — 그 블로커는 해소됐다.

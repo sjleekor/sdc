@@ -1,43 +1,50 @@
 # 00. 진행 상태 — 이 디렉터리를 이어받는 사람이 먼저 읽는 문서
 
-- 작성일: 2026-08-11 (갱신: 2026-08-13 05:10 KST)
+- 작성일: 2026-08-11 (갱신: 2026-08-13 13:10 KST)
 - 브랜치: `refactor/parquet-compute-reproducible`
 - 목적: 문서가 8개(합계 30만 자 이상)라 어디까지 왔는지 한눈에 안 보인다. 이 파일은
   **지금 상태와 다음에 할 일만** 적는다. 근거·설계는 각 문서로 넘긴다.
 
 ## 0. 새 세션이면 여기부터
 
-**수집도 export도 Phase B도 끝났다. 남은 건 로컬 계산 두 번뿐이다** — `--phase A` 재실행,
-그다음 `--phase AB`. prod에 더 받을 것은 없다.
+**크리티컬 패스가 끝났다.** 수집 → export → Phase B → Phase A → AB가 전부 official로
+발행됐고, **evidence grade가 확정됐다 — A=5, B=2, C=24, D=7**. 계산으로 급히 돌릴 것은 없다.
 
 ```bash
-# 지금 위치 확인 — B는 있고 A(2026-08-12)는 없어야 정상이다
+# 지금 위치 확인 — snapshot_date=2026-08-12에 A·B·AB 세 개가 다 있어야 정상이다
 find research/output/horizon_scan -name manifest.json | sort
 ```
 
-이어서 할 일은 이 한 줄이다. **`--snapshot-date`를 주지 않는다** — `auto_selected`가 꺼지면
-official 자격을 잃는다. 자동 선택이 최신 유효 snapshot(2026-08-12)을 고른다.
+발행물 세 개다. 셋 다 `config_hash=e55c3046…`, `snapshot_date=2026-08-12`,
+`source=sj2_remote`, `official=true`.
 
-```bash
-uv run python -m research.analysis.horizon_scan --phase A --source sj2_remote
-```
+| phase | run_id | 핵심 결과 |
+|---|---|---|
+| A | `20260813T081646-00fa0e76` | 412행, `bh_pass` 58, discovery 31 |
+| B | `20260812T231507-f9117ce1` | 38/38 ready, `bh_pass` 18, discovery 14 |
+| AB | `20260813T130307-f9117ce1` | `m_ab=113`, discovery 45, `screen_pass` 7, grade A5·B2·C24·D7 |
 
-Phase B가 5시간 30분 걸렸으니 A도 비슷하게 잡는다. 끝나면 §5의 10단계(AB)로 간다.
+**결과를 읽을 때 반드시 같이 볼 것 하나.** grade A 5개를 같은 무게로 읽으면 안 된다.
+`screen_pass` 7셀 중 **temporal placebo를 실제로 거친 건 3셀뿐**이다(`fin_log_mcap`의
+cumulative 0–60·0–120과 bucket 60–120). 나머지 4셀은 h40–60 bucket이라 `nw_lag < 59`,
+즉 `robustness_required=False`로 그 게이트 대상이 아니었다. 사전등록된 설계이지 우회가 아니다.
+→ `08` §3.0.1
 
-**등급이 전부 NE인 걸 보고 놀라지 않는다.** family card의 등급·discovery 집계는
-`q_fdr_global_ab` 기준이고 그 값은 phase=AB run이 만든다. AB를 돌리기 전까지는 NE가 정상이다.
+**다음 갈림길은 Phase C·acceptance gate 인계**(§5-1b)다. 계산이 아니라 판단이 필요한 단계라,
+`04_B` §12의 사전등록 인계 목록을 먼저 읽는다. 나머지(B-10 Stage 3, receipt-targeted XBRL 백필,
+T1 h=60 holdout 재평가)는 급하지 않다.
 
-주의: Phase A와 B를 동시에 돌리지 않는다. 정합성 문제는 없지만(출력 경로 분리, A는 A0 마트를
+참고: Phase A와 B를 동시에 돌리지 않는다. 정합성 문제는 없지만(출력 경로 분리, A는 A0 마트를
 읽기만 함, DuckDB 1.5.4는 같은 `.tmp`를 공유해도 충돌하지 않는 것을 실측으로 확인) DuckDB가
 인스턴스마다 `threads=14`·`memory_limit=28.7GiB`를 기본으로 잡아 14코어/36GB 장비에서 서로를
-느리게 만든다.
+느리게 만든다. 실측 소요는 B 5시간 30분, A 4시간 41분, AB 1초 미만이다.
 
 ## 1. 트랙이 두 개다
 
 | 트랙 | 대상 | 상태 |
 |---|---|---|
 | **T1. px/flow 피쳐 검증** | 가격·수급 피쳐 17 family (Phase A0/A → acceptance gate) | **판정까지 완료**. 20일 모델 채택은 보류(§3) |
-| **T2. 재무/이벤트 피쳐 검증** | fin_*/ev_* 8 family, 38 candidate cell (Phase B) | **Phase B 완주**(38/38 ready). Phase A 재실행 → AB가 남았고 등급은 그때 정해진다 |
+| **T2. 재무/이벤트 피쳐 검증** | fin_*/ev_* 8 family, 38 candidate cell (Phase B) | **A·B·AB 완주, 등급 확정**(A5·B2·C24·D7). 채택 판정은 아직 안 했다(§4) |
 
 ## 2. 문서 지도
 
@@ -70,24 +77,50 @@ Grade A 6개 중 `px_amihud_20d`/`px_near_52w_high`는 baseline 모델에 이미
 - **h=60 holdout 재평가** — 2026년 10~11월 이후 **새 구간으로 한 번만**(이번 구간 재사용
   금지). 위 60일 결과도 이때 같이 본다. → `07` §6
 
-## 4. T2 — 데이터가 붙었고 Phase B는 완주했다
+## 4. T2 — A·B·AB 완주, 등급이 확정됐다
 
 작업 패키지 B-0~B-9 완료(§5.5 segment 진단 제외), B-10은 Stage 1·2·4·5 완료로 **Stage 3만**
 남았다. 유닛 테스트 939개 통과(2026-08-12).
 
 `M_B_ready=0` 동결이 풀렸다. `run_id=20260812T231507-f9117ce1`에서 **38 candidate 전부
 ready**가 됐고 B-PR11~B-PR15 오케스트레이션이 실제 데이터로 처음 돌았다 — 통합 크래시는 없었다.
+이어서 같은 snapshot으로 Phase A를 재실행하고 AB까지 발행해 등급을 확정했다.
 
-Phase B 단독 기준으로 `bh_pass` 18, `primary_discovery` 14다. 다만 **family 등급은 전부 NE**이고
-이건 정상이다 — 등급과 discovery 집계는 `q_fdr_global_ab` 기준인데 그 값은 phase=AB run이
-만들기 때문이다. 아직 안 돌렸다.
+**결합 BH.** `m_ab=113`(Phase A 75 + Phase B ready 38), q 0.10에서 discovery **45개**.
+**BH family를 75 → 113으로 넓혔는데 강등이 0건**이다 — Phase A 31개, Phase B 14개가 그대로
+살아남았다. 결합 단면 permutation은 100복제에서 `p_empirical_count=0.0099`(45 이상을 만든 복제
+0회, 이 값이 100복제의 최솟값이다).
 
-지금까지 드러난 것 둘. **temporal placebo가 유일한 병목이다** — robustness 탈락 7건이 전부
-`temporal_null_pass=false`다(`ev_payout_yield` 3 · `fin_value_z` 3 ·
-`ev_net_share_issuance_yoy` 1). 그리고 **`fin_sue`·`fin_gross_profitability`는 표본이 없다**
-(coverage 0.0000 / 0.0315).
+**`screen_pass` 7셀, grade A=5 · B=2 · C=24 · D=7.**
 
-상세: `08` §3.0(이번 run 측정값), §4(남은 작업).
+| family | horizon | grade | 비고 |
+|---|---|---|---|
+| `fin_log_mcap` | 0–120 cum · 0–60 cum · 60–120 bucket | **A** | **요구 게이트 3개 전부 통과** |
+| `fin_log_mcap` | 40–60 bucket | A | robustness 미요구 |
+| `ev_net_share_issuance_yoy` | 40–60 bucket | A | robustness 미요구 |
+| `ev_payout_yield` | 40–60 bucket | B | robustness 미요구 · source `warn` |
+| `fin_value_z` | 40–60 bucket | B | robustness 미요구 · source `warn` |
+
+**A 5개를 같은 무게로 읽으면 안 된다.** h40–60 bucket은 width 20이라 `nw_lag < 59`,
+즉 `robustness_required=False`로 temporal placebo 대상이 아니었다(`placebo.temporal_min_nw_lag`).
+사전등록된 설계이지 우회가 아니지만, **실제로 세 게이트를 다 거친 건 `fin_log_mcap` 3셀뿐**이다.
+B 2개가 A로 못 간 이유는 통계가 아니라 `revision_ratio` 0.1056~0.1259(임계 0.10) 하나다.
+
+**떨어진 이유도 한 곳으로 모인다.** grade C 24개는 `failed_gates`에 **전부**
+`robustness_pass`가 들어 있고, grade D 7개는 하나도 없다(원인은 `primary_discovery` 미달).
+즉 통계적으로 살아남은 셀을 떨어뜨리는 건 사실상 temporal placebo 하나다. 그리고
+**`fin_sue`·`fin_gross_profitability`는 표본이 없다**(coverage 0.0000 / 0.0315).
+
+**A/B rank correlation은 낮다.** 84쌍 대부분이 절댓값 0.15 이하다(`px_reversal_5d`↔
+`fin_log_mcap` −0.021, 최대가 `px_mom_12_1`↔`fin_asset_growth_yoy` +0.152). 두 트랙이 서로 다른
+정보를 본다는 뜻이고, 결합에서 강등이 0건인 것과 일관된다.
+
+상세: `08` §3.0(Phase B 측정값), §3.0.1(Phase A 재실행·AB 등급 확정).
+
+**아직 안 한 것: Phase C / acceptance gate 인계.** `04_B` §12가 인계물 11종을 정해뒀고 산출물은
+대부분 나왔다. acceptance gate는 T1과 같은 잣대(증분성·purged walk-forward OOS·turnover·
+거래비용)로 보고, **holdout은 feature·horizon·variant·interaction 선택이 다 끝난 뒤 한 번만**
+연다. 지금 `screen_pass` 7셀은 그 인계 대상 목록이지 채택 결론이 아니다.
 
 ## 4b. 2026-08-12에 한 일
 
@@ -128,6 +161,24 @@ Phase B 단독 기준으로 `bh_pass` 18, `primary_discovery` 14다. 다만 **fa
 
 문서 커밋은 `93f833d`(상태 문서 재작성)이고, `08` §3.0·§4.1.2·§4.1.3은 이 갱신에 포함된다.
 
+## 4b-3. 2026-08-13 오전에 한 일 — 크리티컬 패스 종료
+
+| 시각 | 내용 |
+|---|---|
+| 08:16~12:57 | **Phase A 재실행 완주**(4시간 41분). `20260813T081646-00fa0e76`, official |
+| 13:03 | **phase=AB 발행**(1초 미만). `20260813T130307-f9117ce1` → 등급 확정 |
+
+Phase A는 sj2-server가 끊긴 상태에서 돌렸다. **문제없다** — `research/` 트리에는 DB 접근
+코드가 아예 없고(`psycopg`·`DB_DSN`·`get_settings`·`PostgresStorage`·`SDC_REMOTE_DSN` 전부
+미사용), 입력은 로컬 lake와 A0 마트에서만 온다. snapshot 자동 선택도 로컬에서 풀려
+`auto_selected=True`, 즉 official 자격을 유지한다. AB는 발행된 두 run 디렉터리만 읽으므로
+더 말할 것도 없다.
+
+**Phase A 결과가 08-09 run과 값까지 완전히 같다.** 메타 5개 컬럼을 뺀 40개 값 컬럼 × 412행이
+전부 일치한다. 유효 표본이 holdout 경계 2025-08-01에서 끊겨 늘어난 3일이 안 들어오고, capital
+vintage 백필은 Phase B 소관 테이블만 건드렸기 때문이다. 이 재실행의 목적은 새 발견이 아니라
+**snapshot·config를 Phase B에 맞추는 것**이었고 그건 달성됐다.
+
 ## 4c. B-2 결함 3건 — 찾고 고쳤다
 
 뿌리는 하나다. 한 filing의 XBRL fact가 **여러 회계기간(당기·전기·전전기)과 연결/별도 두 축**에
@@ -163,9 +214,10 @@ CFS/OFS)으로 바꾸고 회귀 테스트 8개를 추가했다 — 수정 전 �
 
 ## 5. 다음에 할 일 — 이 순서로
 
-### 1. [크리티컬 패스] 수집 → probe 판정 → 재실행
+### 1. ~~[크리티컬 패스] 수집 → probe 판정 → 재실행~~ — **10단계 전부 완료 (2026-08-13)**
 
-앞 단계가 끝나야 다음이 된다. 명령과 주의점은 `08` §4.1·§4.1.1·§4.1.2.
+앞 단계가 끝나야 다음이 된다. 명령과 주의점은 `08` §4.1·§4.1.1·§4.1.2. 재현 명령 전체는
+`08` §5에 정리돼 있다.
 
 1. ~~Phase B 코드 커밋 → 릴리즈(v0.9.2)~~ 완료
 2. ~~B-2 결함 수정(§4c)~~ 완료
@@ -183,14 +235,17 @@ CFS/OFS)으로 바꾸고 회귀 테스트 8개를 추가했다 — 수정 전 �
    ```
 8. ~~`--phase B` 실행~~ 완료 — `run_id=20260812T231507-f9117ce1`, **38 ready / 0 blocked**.
    측정값과 해석은 `08` §3.0
-9. **`--phase A` 재실행** — 같은 snapshot이어야 결합 BH가 성립한다(§2.3 rule 5). 아직 안 돌렸다
+9. ~~`--phase A` 재실행~~ 완료 — `run_id=20260813T081646-00fa0e76`, 4시간 41분, official.
+   같은 snapshot이어야 결합 BH가 성립한다(§2.3 rule 5). 08-09 run과 값까지 동일 → §4b-3
    ```bash
+   # --snapshot-date를 주지 않는다. auto_selected가 꺼지면 official 자격을 잃는다
    uv run python -m research.analysis.horizon_scan --phase A --source sj2_remote
    ```
-10. **`--phase AB` 실행** — `q_fdr_global_ab`·`screen_pass`·`evidence_grade`가 처음으로
-    진짜 값을 갖는다. **지금 family 등급이 전부 NE인 건 이 단계를 안 돌렸기 때문이다**
+10. ~~`--phase AB` 실행~~ 완료 — `run_id=20260813T130307-f9117ce1`, 1초 미만.
+    `q_fdr_global_ab`·`screen_pass`·`evidence_grade`가 실제 값을 가졌다(A5·B2·C24·D7).
+    두 run 디렉터리를 **필수 인자로** 넘긴다 → `08` §5에 실제 인자 그대로 있다
 
-Phase B는 약 5시간 30분 걸렸다. Phase A도 비슷한 규모로 보고 일정을 잡는다. 두 개를 동시에
+실측 소요는 B 5시간 30분, A 4시간 41분, AB 1초 미만이다. 두 개를 동시에
 돌리는 건 권하지 않는다 — 출력 경로와 마트 쓰기는 겹치지 않고 DuckDB spill도 실측상 충돌하지
 않지만(1.5.4는 인스턴스별로 분리한다), 인스턴스마다 `threads=14`·`memory_limit=28.7GiB`를
 기본으로 잡아 14코어/36GB 장비에서 서로를 느리게 만든다.
@@ -221,6 +276,25 @@ Phase B는 약 5시간 30분 걸렸다. Phase A도 비슷한 규모로 보고 �
   `feat_price`/`feat_flow`/`label_scan`(daily_ohlcv·flow 기반)만 읽으므로 이 게이트와
   무관하다. derived mart 자체는 게이트 전에 이미 만들어진다.
 
+### 1b. [지금 가장 위] Phase C·acceptance gate 인계
+
+크리티컬 패스가 끝났으니 여기가 다음 갈림길이다. `04_B` §12가 인계물 11종을 사전등록해뒀고
+산출물은 대부분 나와 있다(run spec·manifest·`_SUCCESS.json`, frozen role과 raw p-value,
+combined BH와 freeze hash, curve, coverage 진단, robustness 결과, family card와 A card
+overlay, `screen_pass` 목록, rank-correlation matrix).
+
+정리하면 판단이 필요한 것은 두 가지다.
+
+- **어디까지를 인계 대상으로 볼 것인가.** `screen_pass` 7셀 중 temporal placebo를 실제로 거친
+  건 `fin_log_mcap` 3셀뿐이다(§4). 나머지 4셀은 h40–60 bucket이라 그 게이트 대상이 아니었는데,
+  이걸 같은 등급으로 인계할지 별도 표기할지 정해야 한다.
+- **Phase C를 열 것인가.** `04_B` §12는 "A/B에서 실제로 부호 반전 또는 경제적으로 해석 가능한
+  조건부 패턴이 나온 family만 새 config로 사전등록"이라고 못박았다. 이번 run에 그런 family가
+  있는지부터 확인해야 한다.
+
+acceptance gate 자체는 T1과 같은 잣대다 — 증분성, purged walk-forward OOS, turnover·거래비용.
+**holdout은 feature·horizon·variant·interaction 선택이 전부 끝난 뒤 한 번만 연다.**
+
 ### 2. 데이터 없이도 가능한 코드 작업
 
 ~~B-10 Stage 2·4·5~~ 완료. 남은 건 **Stage 3**(`daily_ic`/`cohort_ic`)뿐이다.
@@ -248,9 +322,15 @@ Phase A와 공유하는 `per_date_market_rank_ic` 내부를 고쳐야 한다. **
 uv run pytest tests/unit -q                                   # 939개 통과가 기준선(2026-08-12)
 uv run ruff check src/ tests/                                 # research/의 fin_vs_price_corr는 기존 미해결
 
-# T2가 아직 막혀 있는지 — 아무것도 안 나오면 여전히 막힌 상태다
+# raw가 붙어 있는지 — 두 테이블이 나와야 한다 (안 나오면 T2가 다시 막힌 상태)
 ls data_lake/raw_postgres/snapshot_date=*/source=sj2_remote/ | grep -E "filing_receipt|capital_change"
 
 find research/output/horizon_scan -name manifest.json         # 발행된 run 목록
-find research/output/horizon_scan -name "03b_*"               # Phase B 리포트(있으면 재실행이 된 것)
+find research/output/horizon_scan -name "03b_*"               # Phase B 리포트
+find research/output/horizon_scan -name "03ab_*"              # AB 리포트 = 등급이 정해졌다는 신호
 ```
+
+등급 확정 결과를 한 번에 보려면 AB run의 `03ab_combined_results.md`를 읽는다. 셀 단위로 보려면
+같은 디렉터리의 `combined_ab_primary_hypotheses.parquet`에서 `screen_pass` / `evidence_grade` /
+`robustness_required` / `failed_gates`를 같이 본다. **`robustness_required`를 빼고 읽으면 grade
+A 5개를 과대평가하게 된다**(§4).
