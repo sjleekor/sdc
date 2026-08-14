@@ -152,22 +152,41 @@ def test_risk_vol_and_mdd_on_path(tmp_path: Path) -> None:
     assert mdd <= math.log(0.9) + 1e-9
 
 
-def test_secondary_horizon_no_forward_has_null_rank(tmp_path: Path) -> None:
-    """Regression: a horizon whose forward return is NULL must not get a rank.
+def test_secondary_horizon_no_forward_has_null_outputs(tmp_path: Path) -> None:
+    """Regression: a horizon whose forward return is NULL must not get outputs.
 
     A 30-session single ticker has no 60-session forward, so raw_label_60d is
-    all NULL; y_rank_60d / y_cls_60d must be NULL too (PERCENT_RANK over NULL).
+    all NULL; y_rank_60d / y_cls_60d / y_reg_60d must be NULL too.
+
+    ``y_reg`` is the subtle one: PERCENT_RANK assigns a value to NULL keys, and
+    ``LEAST(GREATEST(NULL, lo), hi)`` returns ``lo`` because DuckDB's
+    GREATEST/LEAST skip NULL arguments. Both need an explicit guard.
     """
     con = duckdb.connect()
     rows = [(f"2020-01-{i + 1:02d}", "A", "KOSPI", 10, 11, 9, 100 + i, 5) for i in range(30)]
     _ohlcv_view(con, rows)
     con.execute(f"CREATE VIEW label_daily AS {labels.build_label_sql(labels.LabelSpec())}")
-    raw60, rank60, cls60 = con.execute(
-        "SELECT count(raw_label_60d), count(y_rank_60d), count(y_cls_60d) FROM label_daily"
+    raw60, rank60, cls60, reg60 = con.execute(
+        "SELECT count(raw_label_60d), count(y_rank_60d), count(y_cls_60d), count(y_reg_60d) "
+        "FROM label_daily"
     ).fetchone()
     assert raw60 == 0
     assert rank60 == 0  # not 20 — the bug would assign ranks to NULL-forward rows
     assert cls60 == 0
+    assert reg60 == 0  # not 20 — the bug would clip NULL to the bottom quantile
+
+
+def test_greatest_least_skip_nulls() -> None:
+    """The DuckDB behaviour the y_reg guard exists for — pinned so it stays true.
+
+    If a future DuckDB made GREATEST NULL-propagating this test would fail and
+    the guard could be simplified; until then, every winsorize site needs it.
+    """
+    con = duckdb.connect()
+    (clipped,) = con.execute(
+        "SELECT LEAST(GREATEST(NULL, 0.1::DOUBLE), 0.9::DOUBLE)"
+    ).fetchone()
+    assert clipped == pytest.approx(0.1)  # not NULL
 
 
 def test_risk_labels_emitted_only_when_included(tmp_path: Path) -> None:

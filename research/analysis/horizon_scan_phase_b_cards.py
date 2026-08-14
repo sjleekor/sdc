@@ -124,10 +124,10 @@ def build_family_summary_rows(
 ) -> list[dict[str, Any]]:
     """One row per Phase B family, in config order.
 
-    ``formula_versions`` is supplied by the caller rather than looked up: only
-    the issuance feature has a fingerprinted formula version today
-    (``event_feature_formula_version``), and inventing one for the families
-    that have none would put a fake fingerprint on the card.
+    ``formula_versions`` is supplied by the caller rather than looked up: which
+    feature module a family came from is a run-level fact, and a family whose
+    module has no fingerprint must show ``—`` rather than a borrowed one. The
+    caller routes fin/event/payout versions in ``_feature_formula_versions``.
     """
     versions = formula_versions or {}
     by_family: dict[str, list[dict[str, Any]]] = {}

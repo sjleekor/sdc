@@ -67,7 +67,26 @@ _CAL_TABLE = "_event_scan_calendar"
 # that v1 had no entry for — 22.4% of annual-vintage events were falling through
 # to 'unclassified' purely because the catalog was short. See
 # 04_specific_plan_B.md §4.4 "매핑 판단 근거".
-EVENT_FEATURE_FORMULA_VERSION = "issuance_v2"
+#
+# v3 (2026-08-15) added 유상감자 to the economic-decrease set. v2 fixed exactly
+# this word-order variant for 무상감자 but reviewed only the 259 annual-vintage
+# events, where 유상감자 does not appear; over the whole capital-change history
+# it is 699 rows / 88 issuers. Until v3 the economic-decrease set matched
+# nothing at all (the source never writes 감자(유상)), so the feature could not
+# produce a negative value and every window holding a 유상감자 row was dropped
+# as unclassified. See 10_known_issues.md I3.
+EVENT_FEATURE_FORMULA_VERSION = "issuance_v3"
+
+# The payout feature shares this module but not this catalog: its formula is the
+# dividend/buyback TTM sum over PIT market cap. Fingerprinting it separately
+# keeps a catalog bump from implying that payout changed (and vice versa) —
+# ``ev_payout_yield``'s card would otherwise read "issuance_vN", which is not
+# the rule it was built with.
+#
+#   payout_v1 — the 2026-08 rules as first scanned (§4.5).
+#   payout_v2 — direct dividend totals are unit-checked against the DPS-implied
+#               amount and negative totals rejected (10_known_issues.md I5).
+PAYOUT_FEATURE_FORMULA_VERSION = "payout_v2"
 
 ECONOMIC_INCREASE_REASONS = frozenset(
     {
@@ -81,7 +100,12 @@ ECONOMIC_INCREASE_REASONS = frozenset(
         "출자전환",  # v2 — debt swapped for new shares; real dilution, see plan §4.4
     }
 )
-ECONOMIC_DECREASE_REASONS = frozenset({"감자(유상)"})
+ECONOMIC_DECREASE_REASONS = frozenset(
+    {
+        "감자(유상)",
+        "유상감자",  # v3 — the same action, spelled the other way round
+    }
+)
 MECHANICAL_INCREASE_REASONS = frozenset({"무상증자", "주식배당", "주식분할"})
 MECHANICAL_DECREASE_REASONS = frozenset(
     {
@@ -96,6 +120,43 @@ MECHANICAL_DECREASE_REASONS = frozenset(
 # already relied on elsewhere in this codebase (opendart_share_info tests).
 CASH_DIVIDEND_TOTAL_ROW_NAME = "현금배당금총액(백만원)"
 CASH_DIVIDEND_TOTAL_UNIT_SCALE = 1_000_000  # "백만원" -> won
+
+# Some filers write the raw won amount into the 백만원-labelled field, which the
+# unconditional scale above then inflates by 1e6 (일양약품 2019: 2,249,158,200 in
+# the 2019 filing vs 2,249 in the 2020 one — the same 22.5억). Only 4 rows of
+# 17,859 do it, but an inflated one produces a payout yield in the thousands.
+#
+# DPS x (issued - treasury) is an independent estimate of the same amount from a
+# different row of the same filing, so it can tell a unit slip (1e6x) from a
+# real number. Legitimate disagreement between the two is bounded by share-class
+# and timing effects (a few x at most), so the multiple below only has to sit
+# between "a few" and 1e6 — 100 leaves three orders of magnitude of headroom on
+# each side. When the direct total fails the check the row falls through to the
+# DPS proxy rather than being corrected by division: the source said 원 or it
+# said 백만원, and guessing which is not this layer's job.
+DIVIDEND_TOTAL_SANITY_MULTIPLE = 100
+
+# Backstop for the filings that carry no DPS row, where the check above has
+# nothing to compare against. Observed distribution: median 0.4%, 99th 13.5%,
+# 99.9th 51%; the surviving unit slips sit in the thousands. 10 (= 1000% of
+# market cap returned in one year) is far outside anything a filer does and far
+# inside the error, so it separates them without touching a real tail.
+PAYOUT_YIELD_MAX = 10
+
+# A negative cash dividend total is not a quantity this feature can carry; the
+# source has 27 such rows across 12 issuers. Excluded here rather than clipped
+# downstream, for the same reason.
+_DPS_IMPLIED_TOTAL = "d.dps_raw * (sw.issued_shares - COALESCE(sw.treasury_shares, 0))"
+DIRECT_TOTAL_USABLE_SQL = f"""(
+                d.dividend_total_raw IS NOT NULL
+                AND d.dividend_total_raw >= 0
+                AND (
+                    d.dps_raw IS NULL OR sw.issued_shares IS NULL
+                    OR {_DPS_IMPLIED_TOTAL} <= 0
+                    OR d.dividend_total_raw * {CASH_DIVIDEND_TOTAL_UNIT_SCALE}
+                       <= {DIVIDEND_TOTAL_SANITY_MULTIPLE} * ({_DPS_IMPLIED_TOTAL})
+                )
+            )"""
 DPS_ROW_NAME = "주당 현금배당금(원)"
 
 DEFAULT_ISSUANCE_IDENTITY_TOLERANCE = 0
@@ -361,6 +422,7 @@ def build_payout_sql(
     fiscal years, not quarters), so this does not need B-3's quarter/TTM
     machinery — only the annual (``reprt_code='11011'``) filing position.
     """
+    direct_total_usable = DIRECT_TOTAL_USABLE_SQL
     return f"""
     WITH dividend_rows AS (
         SELECT
@@ -423,7 +485,7 @@ def build_payout_sql(
                  )
             END AS dividend_total_available_from,
             CASE
-                WHEN d.dividend_total_raw IS NOT NULL
+                WHEN {direct_total_usable}
                      THEN d.dividend_total_raw * {CASH_DIVIDEND_TOTAL_UNIT_SCALE}
                 WHEN d.dividend_total_text = '-' THEN 0
                 WHEN d.dps_raw IS NOT NULL AND sw.issued_shares IS NOT NULL
@@ -431,7 +493,7 @@ def build_payout_sql(
                 WHEN d.dps_text = '-' THEN 0
             END AS cash_dividends_total,
             CASE
-                WHEN d.dividend_total_raw IS NOT NULL OR d.dividend_total_text = '-'
+                WHEN {direct_total_usable} OR d.dividend_total_text = '-'
                      THEN 'direct_total'
                 WHEN d.dps_raw IS NOT NULL THEN 'dps_proxy'
                 WHEN d.dps_text = '-' THEN 'dps_proxy'
@@ -455,8 +517,15 @@ def build_payout_sql(
     buyback_wide AS (
         SELECT
             ticker, bsns_year,
-            COALESCE(MAX(buyback_cfs), MAX(buyback_ofs)) AS buyback_cash_ttm,
-            COALESCE(MAX(buyback_avail_cfs), MAX(buyback_avail_ofs)) AS buyback_available_from
+            -- payout_v2: a negative treasury *acquisition* amount is not a
+            -- quantity this feature can carry (disposals are a different line
+            -- item). Dropping it leaves the dividend leg intact rather than
+            -- letting the sum go negative.
+            CASE WHEN COALESCE(MAX(buyback_cfs), MAX(buyback_ofs)) >= 0
+                 THEN COALESCE(MAX(buyback_cfs), MAX(buyback_ofs)) END AS buyback_cash_ttm,
+            CASE WHEN COALESCE(MAX(buyback_cfs), MAX(buyback_ofs)) >= 0
+                 THEN COALESCE(MAX(buyback_avail_cfs), MAX(buyback_avail_ofs))
+            END AS buyback_available_from
         FROM buyback
         GROUP BY ticker, bsns_year
     )
@@ -564,7 +633,15 @@ def build_event_scan_daily_sql(
             ev_net_share_issuance_yoy, issuance_available_from,
             issuance_identity_ok, issuance_classification_complete,
             cash_dividends_total, dividend_source, buyback_cash_ttm, payout_available_from,
+            -- payout_v2: the DPS cross-check upstream only fires when the
+            -- filing also carries a DPS row. This is the backstop for the rest
+            -- — a yield above PAYOUT_YIELD_MAX means the company returned more
+            -- than 10x its own market value in one year, which no filer does;
+            -- it is a unit slip the source did not give us the means to
+            -- resolve. Rejected, not clipped, for the same reason as upstream.
             CASE WHEN base_ok AND (cash_dividends_total IS NOT NULL OR buyback_cash_ttm IS NOT NULL)
+                      AND (COALESCE(cash_dividends_total, 0) + COALESCE(buyback_cash_ttm, 0))
+                          / market_cap_pit <= {PAYOUT_YIELD_MAX}
                  THEN (COALESCE(cash_dividends_total, 0) + COALESCE(buyback_cash_ttm, 0))
                       / market_cap_pit
             END AS ev_payout_yield

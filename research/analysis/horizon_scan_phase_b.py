@@ -31,7 +31,11 @@ from research.analysis.horizon_scan_run_spec import (
     package_versions,
     phase_a_code_hash,
 )
-from research.etl.features.event_scan import EVENT_FEATURE_FORMULA_VERSION
+from research.etl.features.event_scan import (
+    EVENT_FEATURE_FORMULA_VERSION,
+    PAYOUT_FEATURE_FORMULA_VERSION,
+)
+from research.etl.features.fin_scan import FIN_FEATURE_FORMULA_VERSION
 
 PHASE_B_MAX_CANDIDATES = 38
 
@@ -249,8 +253,12 @@ def build_phase_b_run_spec(
         "universe_policy_version": a0_run_spec["universe_policy_version"],
         # §1.3 fingerprint: "mapping rule ... 이 다르면 동일 snapshot의 기존
         # Phase B artifact를 재사용하지 않는다". The isu_dcrs_stle catalog is
-        # that mapping rule for the event features.
+        # that mapping rule for the event features; the ratio/winsorize/fs_basis
+        # rules are the equivalent for the financial ones. Neither is covered by
+        # config_hash (scan YAML) or phase_b_code_hash (analysis modules only).
         "event_feature_formula_version": EVENT_FEATURE_FORMULA_VERSION,
+        "payout_feature_formula_version": PAYOUT_FEATURE_FORMULA_VERSION,
+        "fin_feature_formula_version": FIN_FEATURE_FORMULA_VERSION,
         "phase_b_code_hash": code_hash,
         "git_commit": git["git_commit"],
         "git_dirty": git["git_dirty"],

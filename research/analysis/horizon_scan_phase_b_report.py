@@ -103,6 +103,8 @@ def build_phase_b_report_context(
             "source": run_spec.get("source"),
             "config_hash": run_spec.get("config_hash"),
             "event_feature_formula_version": run_spec.get("event_feature_formula_version"),
+            "payout_feature_formula_version": run_spec.get("payout_feature_formula_version"),
+            "fin_feature_formula_version": run_spec.get("fin_feature_formula_version"),
             "started_at": run_spec.get("started_at"),
         },
         "readiness_summary": {
@@ -187,7 +189,9 @@ def render_phase_b_report(context: dict[str, Any]) -> str:
                 f"- snapshot_date: {_cell(ri.get('snapshot_date'))} / "
                 f"source: {_cell(ri.get('source'))}",
                 f"- config_hash: `{_cell(ri.get('config_hash'))}`",
-                f"- event feature formula: {_cell(ri.get('event_feature_formula_version'))}",
+                f"- feature formula: issuance {_cell(ri.get('event_feature_formula_version'))}"
+                f" / payout {_cell(ri.get('payout_feature_formula_version'))}"
+                f" / fin {_cell(ri.get('fin_feature_formula_version'))}",
                 f"- started: {_cell(ri.get('started_at'))}",
                 f"- readiness freeze: {rs.get('ready')} ready / {rs.get('blocked')} blocked "
                 f"of {rs.get('candidates')} candidate cells",

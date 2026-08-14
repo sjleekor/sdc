@@ -128,9 +128,15 @@ from research.analysis.horizon_scan_runner import (
 from research.etl.config import REMOTE_SOURCE, LakeConfig
 from research.etl.features.event_scan import (
     EVENT_FEATURE_FORMULA_VERSION,
+    EVENT_SCAN_TABLE,
+    PAYOUT_FEATURE_FORMULA_VERSION,
     materialize_event_scan_daily,
 )
-from research.etl.features.fin_scan import FIN_SCAN_TABLE, materialize_fin_scan_daily
+from research.etl.features.fin_scan import (
+    FIN_FEATURE_FORMULA_VERSION,
+    FIN_SCAN_TABLE,
+    materialize_fin_scan_daily,
+)
 from research.etl.features.sue_event import SUE_EVENT_TABLE, materialize_sue_event
 from research.etl.lake import connect, register_views
 from research.etl.mart import mart_root, register_mart_view
@@ -226,6 +232,36 @@ _QUALITY_DIAGNOSTICS: tuple[tuple[str, frozenset[str], Any], ...] = (
 )
 
 
+# §1.3 fingerprint routing. A family carries the formula version of the feature
+# module it is built from. Keyed by ``readiness_dependencies`` so a new family on
+# an already-fingerprinted mart inherits it instead of silently getting None;
+# ``_FORMULA_VERSION_BY_FAMILY`` overrides that where one mart holds two
+# independent formulas (event_scan: the isu_dcrs_stle catalog vs the payout sum).
+_FORMULA_VERSION_BY_DEPENDENCY = {
+    FIN_SCAN_TABLE: FIN_FEATURE_FORMULA_VERSION,
+    EVENT_SCAN_TABLE: EVENT_FEATURE_FORMULA_VERSION,
+}
+_FORMULA_VERSION_BY_FAMILY = {
+    "ev_payout_yield": PAYOUT_FEATURE_FORMULA_VERSION,
+}
+
+
+def _feature_formula_versions(readiness_rows: list[dict[str, Any]]) -> dict[str, str]:
+    """Map family -> formula version, for the cards' ``formula version`` row."""
+    versions: dict[str, str] = {}
+    for row in readiness_rows:
+        family = row["family"]
+        if family in _FORMULA_VERSION_BY_FAMILY:
+            versions[family] = _FORMULA_VERSION_BY_FAMILY[family]
+            continue
+        for dependency in row.get("readiness_dependencies", ()):
+            version = _FORMULA_VERSION_BY_DEPENDENCY.get(dependency)
+            if version is not None:
+                versions[family] = version
+                break
+    return versions
+
+
 def write_phase_b_family_cards(
     config: HorizonScanConfig,
     core_dir: Path,
@@ -250,9 +286,7 @@ def write_phase_b_family_cards(
         feature_coverage_rows=_read("feature_coverage"),
         event_coverage_rows=_read("event_coverage"),
         rank_correlation_rows=rank_correlation_rows,
-        # Only the issuance feature carries a fingerprinted formula version
-        # today; the others get None rather than a made-up one.
-        formula_versions={"ev_net_share_issuance_yoy": EVENT_FEATURE_FORMULA_VERSION},
+        formula_versions=_feature_formula_versions(readiness_rows),
     )
     pl.DataFrame(rows, infer_schema_length=None).write_parquet(
         core_dir / f"{FAMILY_SUMMARY_TABLE}.parquet"

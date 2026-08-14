@@ -706,8 +706,35 @@ fin_sales_to_price      = revenue_ttm / market_cap
 - `total_equity<=0`이면 B/M만 NULL이고 `negative_equity=true`를 남긴다.
 - E/P와 CFO/P의 음수는 적자·음의 현금흐름 정보이므로 보존한다.
 - component를 `(trade_date, market)` 안에서 1/99% winsorize한 뒤 z-score한다.
+  **결측 component는 winsorize를 통과해도 결측으로 남는다**(아래 fin_v2 참고).
 - 유효 component가 2개 이상일 때만 그 평균을 `fin_value_z`로 만든다.
 - component count와 각 component coverage를 daily row와 report에 남긴다.
+
+**fin_v2 (2026-08-15) — 결측 처리 정정.** 최초 구현은 winsorize를
+`LEAST(GREATEST(ratio, p01), p99)`로 썼는데, DuckDB의 `GREATEST`/`LEAST`는 NULL 인자를
+건너뛴다. 그래서 값이 없는 component가 **그날 그 시장의 1분위 값으로 대체**됐고,
+`value_component_count`도 4로 세어졌다. 결과가 둘이다.
+
+1. "2개 이상일 때만" 규칙이 한 번도 작동하지 않았다. 산출된 `fin_value_z` 4,050,165개 중
+   **1,183,214개(29.2%)**가 유효 component 2개 미만인 행이다(0개 783,183 / 1개 400,031).
+2. 대체값이 하한이라 결측 종목이 전부 "가장 싼 쪽의 반대편"에 몰렸다.
+
+정정 후에는 각 clip을 `CASE WHEN ratio IS NULL THEN NULL ELSE ... END`로 감싼다. 규칙 자체를
+바꾸는 게 아니라 **문서에 적힌 규칙대로 동작하게 만드는 것**이다.
+
+부작용을 미리 적어둔다. 규칙대로 자르면 남는 행이 2,866,951개로 줄어 coverage가 0.607 →
+약 **0.43**이 되고, 유효 시작일도 뒤로 밀린다(≥2 조건 충족 비율: 2019년 6.8%, 2020년 56.9%,
+2021년 이후 79% 내외). 표본이 짧아지는 것은 정정의 대가이지 새로운 문제가 아니다.
+
+산식 버전은 `FIN_FEATURE_FORMULA_VERSION = "fin_v2"`다.
+
+**S/P의 실질 결측.** 같은 조사에서 component별 coverage가 B/M 76~86%, E/P 52~57%,
+CFO/P 70~78%인데 **S/P는 5% 안팎**임을 확인했다. `revenue`의 canonical 매핑이 거의 비어 있기
+때문이고(vintage 8,103행, `net_income`은 141,011행), 같은 원인이 `fin_gross_profitability`의
+coverage 0.03도 만든다. XBRL fact에는 `ifrs_Revenue` 184,846건·`ifrs_GrossProfit` 178,829건이
+있는데 카탈로그가 `ifrs-full_` 접두사만 매핑하고 있고, vintage의 `xbrl_sourced_rows`는 전
+연도 0이다. **이 보강은 canonical 층(`src/krx_collector/definitions/`) 변경이라 범위가 달라
+다음 라운드로 분리한다.**
 
 `fin_log_mcap`은 size segment 자체이므로 size-tertile 강건성은 self-segment diagnostic으로만
 표시하고 screen gate에 중복 적용하지 않는다.
@@ -846,6 +873,65 @@ snapshot의 기존 artifact를 재사용하지 않는다.
 
 보강 후 미분류 비율은 22.4% → **4.25%**(남은 11건은 전부 `-`). 이 변경은 Phase B scan을 한 번도
 돌리기 전에, 각 사유의 경제적 의미만으로 판정했다. 결과를 보고 고친 것이 아니다.
+
+### 4.4.3 isu_dcrs_stle 매핑 v3 (2026-08-15)
+
+v2 검토가 annual vintage 이벤트 259건만 대상으로 한 탓에 **`유상감자`가 빠졌다.**
+`dart_capital_change_raw` 전체(사유 16종)를 다시 세어보면 감소 사유는 둘뿐이다.
+
+| `isu_dcrs_stle` | 건수 | 법인 수 | v2 판정 | v3 판정 |
+|---|---:|---:|---|---|
+| `무상감자` | 2,840 | — | mechanical_decrease | 유지 |
+| `유상감자` | **699** | 88 | **미분류** | **economic_decrease** |
+
+v2가 `무상감자`를 "이미 매핑된 `감자(무상)`과 같은 행위의 다른 표기"로 인정한 것과 **정확히
+같은 근거**다. `유상감자`는 이미 매핑된 `감자(유상)`의 어순 변형이고, 자본을 실제로 주주에게
+반환하므로 경제적 감소가 맞다. 4.4.2가 정한 정확 일치 원칙은 유지한다 — 어순 정규화 규칙을
+넣지 않고 문자열을 읽고 추가했다.
+
+이 누락의 결과가 두 가지였다.
+
+1. `ECONOMIC_DECREASE_REASONS`가 `감자(유상)` 하나뿐이었고 source는 그 표기를 쓰지 않으므로,
+   **경제적 감소가 한 번도 매칭되지 않았다.** `ev_net_share_issuance_yoy`는 313만 관측치 전부
+   0 이상이었다 — 이름은 순발행인데 실제로는 총발행을 쟀다.
+2. `유상감자`가 미분류로 떨어져 §4.4 4단계가 그 창을 통째로 NULL로 만들었다
+   (`issuance_classification_complete=false` 24,012행).
+
+`소각`은 v2 그대로 mechanical로 둔다(§4.4 2단계). 다만 source가 `소각`이라는 문자열을 한 번도
+반환하지 않는다는 사실을 기록해둔다 — 현재 카탈로그의 `주식병합`·`감자(무상)`·`감자(유상)`·
+`소각` 네 문자열은 실제 데이터에 존재하지 않는다.
+
+**문헌형 순발행과의 관계.** Daniel·Titman, Pontiff·Woodgate의 net share issuance는 분할조정
+주식수의 변화를 보므로 자사주 매입·소각에서 음수가 난다. 이 family는 v3 이후에도 유상감자만
+음수 통로로 쓰므로 **같은 이름의 다른 지표**다. 문헌형을 쓰려면 별도 family로 사전등록해야
+하며, 그것은 config 변경(=`config_hash` 변경, Phase A 재실행)을 유발하므로 다음 라운드로
+분리한다.
+
+매핑 버전은 `EVENT_FEATURE_FORMULA_VERSION = "issuance_v3"`이다.
+
+### 4.5.1 현금배당 총액 단위 검증 (payout_v2, 2026-08-15)
+
+`현금배당금총액(백만원)` 행에 **원 단위 금액을 적는 제출자가 있다.** 일양약품(007570)이
+명확한 사례다 — 2019 사업연도 보고서는 `2,249,158,200`, 2020 보고서는 같은 금액을 `2,249`로
+적었다. 행 이름을 믿고 1e6을 곱하면 1e6배 부풀려진다.
+
+| 항목 | 값 |
+|---|---:|
+| `thstrm` 배당 총액 행 | 17,859 |
+| 단위 오류로 판정되는 행 | **4** (4개 종목) |
+| 음수 총액 행 | **27** (12개 종목) |
+
+절댓값 임계로는 거를 수 없다 — 삼성전자 2020년 20.3조는 특별배당으로 실제 값이다. 대신 같은
+공시의 다른 행에서 얻는 **DPS × (발행 − 자기주식)**을 독립 추정치로 쓴다. 두 추정치의 정당한
+차이는 주식 종류·시점 때문에 몇 배 수준이고 단위 오류는 1e6배이므로, 임계를 **100배**로 둔다
+(양쪽으로 세 자릿수 여유).
+
+판정에 걸린 행은 **DPS proxy로 넘긴다.** 1e6으로 나눠 "고치지" 않는다 — source가 원으로 적었는지
+백만원으로 적었는지를 이 층에서 추정하지 않는다는 §4.4 3단계 원칙과 같다. 음수 총액도 같은
+경로로 배제한다.
+
+이 판정은 Phase B 결과를 보기 전에 고정했다. 대상 4행 + 27행이 어느 종목인지는 알지만, 그
+종목들의 수익률은 보지 않았다.
 
 #### vintage distance probe — 측정 설계
 

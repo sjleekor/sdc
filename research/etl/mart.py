@@ -64,13 +64,40 @@ def _schema_hash(con: duckdb.DuckDBPyConnection, select_sql: str) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _sql_hash(select_sql: str) -> str:
+    """Hash the query text itself.
+
+    ``_schema_hash`` only sees column names and types, so a formula change that
+    keeps the same output shape — a fixed NULL guard, a corrected mapping — is
+    invisible to it and the stale mart is silently reused. That is the failure
+    this key exists to stop; see
+    docs/dev/20260731_raw_features/01_feature_candidate/10_known_issues.md I10.
+    """
+    return hashlib.sha256(select_sql.encode()).hexdigest()
+
+
 def _expected_metadata(
     con: duckdb.DuckDBPyConnection, config: LakeConfig, select_sql: str
 ) -> dict[str, str | None]:
     return {
         "analysis_config_hash": config.analysis_config_hash,
         "schema_hash": _schema_hash(con, select_sql),
+        "sql_hash": _sql_hash(select_sql),
     }
+
+
+def _cache_contract_matches(actual: dict[str, object], expected: dict[str, str | None]) -> bool:
+    """Compare a stored cache entry with the current contract.
+
+    ``sql_hash`` was added after the marts in this lake were first written, so
+    an entry without it is legacy: the keys it does carry must still match, and
+    the missing one is simply unverifiable. Legacy entries are accepted rather
+    than failed, so adding this key does not force a full lake rebuild — but a
+    formula change after this point is caught.
+    """
+    if "sql_hash" not in actual:
+        return all(actual.get(key) == value for key, value in expected.items() if key != "sql_hash")
+    return actual == expected
 
 
 def materialize(
@@ -100,7 +127,7 @@ def materialize(
             actual = json.loads(metadata_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"invalid mart cache metadata for {name!r}; use force=True") from exc
-        if actual != expected:
+        if not _cache_contract_matches(actual, expected):
             raise RuntimeError(
                 f"mart cache contract mismatch for {name!r}; use force=True to rebuild"
             )

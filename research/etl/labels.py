@@ -197,11 +197,16 @@ def _build_select_cols(spec: LabelSpec) -> str:
                 f"THEN PERCENT_RANK() OVER ({win} ORDER BY {raw}) END AS y_rank_{h}d"
             )
         if "reg" in spec.outputs:
-            # per-date winsorize via quantile clip (NULL passes through cleanly)
+            # per-date winsorize via quantile clip. The same null guard as
+            # rank/cls is required: DuckDB's GREATEST/LEAST *skip* NULL
+            # arguments, so LEAST(GREATEST(NULL, p_lo), p_hi) returns p_lo — a
+            # missing forward return would silently become the bottom clip
+            # instead of staying NULL.
             cols.append(
+                f"CASE WHEN {null_guard} THEN "
                 f"LEAST(GREATEST({raw}, "
                 f"QUANTILE_CONT({raw}, {lo}) OVER ({win})), "
-                f"QUANTILE_CONT({raw}, {hi}) OVER ({win})) AS y_reg_{h}d"
+                f"QUANTILE_CONT({raw}, {hi}) OVER ({win})) END AS y_reg_{h}d"
             )
         if "cls" in spec.outputs:
             r = f"PERCENT_RANK() OVER ({win} ORDER BY {raw})"

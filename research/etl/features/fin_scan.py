@@ -28,6 +28,19 @@ from research.etl.mart import materialize, register_mart_view
 
 FIN_SCAN_TABLE = "feat_fin_scan_daily"
 
+# §1.3 fingerprint, same role as ``EVENT_FEATURE_FORMULA_VERSION`` for the event
+# features: the formula/handling rules below are not covered by ``config_hash``
+# (the scan YAML) or ``phase_b_code_hash`` (which only hashes
+# ``horizon_scan_phase_b*.py``), so a change here would otherwise produce
+# different numbers under identical run-spec fingerprints. Bump it whenever the
+# ratio definitions, the winsorize/z-score handling, or the fs_basis rule change,
+# and do not reuse an existing artifact of the same snapshot across a bump.
+#
+#   fin_v1 — the 2026-08 rules as first scanned (§4.1-§4.3).
+#   fin_v2 — value components keep NULL through the winsorize step, so the
+#            ">= 2 valid components" rule actually binds (10_known_issues.md I1).
+FIN_FEATURE_FORMULA_VERSION = "fin_v2"
+
 # Metrics interval-joined onto the daily panel; total_assets additionally
 # carries its own value_lag_4q (B-3) for avg_assets / asset growth.
 _METRICS = (
@@ -210,25 +223,46 @@ def build_fin_scan_daily_sql(
     ),
     -- §4.1: winsorize each value component at its own (trade_date, market)
     -- 1st/99th percentile, then z-score the winsorized series.
+    --
+    -- Each clip is guarded by ``WHEN <ratio> IS NULL THEN NULL``: DuckDB's
+    -- GREATEST/LEAST *skip* NULL arguments, so a bare
+    -- ``LEAST(GREATEST(NULL, p01), p99)`` returns p01. Without the guard a
+    -- company with no financials at all is silently imputed to the market's
+    -- 1st percentile on every component, counted as 4 valid components, and
+    -- pinned to the "most expensive" end of the cross-section (fin_v1
+    -- behaviour: 29.2% of emitted values broke the >= 2 component rule — see
+    -- docs/dev/20260731_raw_features/01_feature_candidate/10_known_issues.md I1).
     winsorized AS (
         SELECT
             *,
-            LEAST(GREATEST(fin_book_to_market,
-                quantile_cont(fin_book_to_market, 0.01) OVER (PARTITION BY trade_date, market)),
-                quantile_cont(fin_book_to_market, 0.99) OVER (PARTITION BY trade_date, market)
-            ) AS w_bm,
-            LEAST(GREATEST(fin_earnings_yield,
-                quantile_cont(fin_earnings_yield, 0.01) OVER (PARTITION BY trade_date, market)),
-                quantile_cont(fin_earnings_yield, 0.99) OVER (PARTITION BY trade_date, market)
-            ) AS w_ep,
-            LEAST(GREATEST(fin_cfo_yield,
-                quantile_cont(fin_cfo_yield, 0.01) OVER (PARTITION BY trade_date, market)),
-                quantile_cont(fin_cfo_yield, 0.99) OVER (PARTITION BY trade_date, market)
-            ) AS w_cfop,
-            LEAST(GREATEST(fin_sales_to_price,
-                quantile_cont(fin_sales_to_price, 0.01) OVER (PARTITION BY trade_date, market)),
-                quantile_cont(fin_sales_to_price, 0.99) OVER (PARTITION BY trade_date, market)
-            ) AS w_sp
+            CASE WHEN fin_book_to_market IS NULL THEN NULL ELSE
+                LEAST(GREATEST(fin_book_to_market,
+                    quantile_cont(fin_book_to_market, 0.01)
+                        OVER (PARTITION BY trade_date, market)),
+                    quantile_cont(fin_book_to_market, 0.99)
+                        OVER (PARTITION BY trade_date, market))
+            END AS w_bm,
+            CASE WHEN fin_earnings_yield IS NULL THEN NULL ELSE
+                LEAST(GREATEST(fin_earnings_yield,
+                    quantile_cont(fin_earnings_yield, 0.01)
+                        OVER (PARTITION BY trade_date, market)),
+                    quantile_cont(fin_earnings_yield, 0.99)
+                        OVER (PARTITION BY trade_date, market))
+            END AS w_ep,
+            CASE WHEN fin_cfo_yield IS NULL THEN NULL ELSE
+                LEAST(GREATEST(fin_cfo_yield,
+                    quantile_cont(fin_cfo_yield, 0.01)
+                        OVER (PARTITION BY trade_date, market)),
+                    quantile_cont(fin_cfo_yield, 0.99)
+                        OVER (PARTITION BY trade_date, market))
+            END AS w_cfop,
+            CASE WHEN fin_sales_to_price IS NULL THEN NULL ELSE
+                LEAST(GREATEST(fin_sales_to_price,
+                    quantile_cont(fin_sales_to_price, 0.01)
+                        OVER (PARTITION BY trade_date, market)),
+                    quantile_cont(fin_sales_to_price, 0.99)
+                        OVER (PARTITION BY trade_date, market))
+            END AS w_sp
         FROM ratios
     ),
     zscored AS (

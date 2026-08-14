@@ -461,6 +461,40 @@ def test_fin_value_z_requires_at_least_two_components_and_cross_sections() -> No
     assert row_a[idx["fin_value_z"]] != row_b[idx["fin_value_z"]]
 
 
+def test_missing_components_stay_null_through_winsorize() -> None:
+    """Regression (fin_v2): a name with no financials must not get a value_z.
+
+    DuckDB's GREATEST/LEAST skip NULL arguments, so an unguarded
+    ``LEAST(GREATEST(NULL, p01), p99)`` returns p01 — every missing component
+    would be imputed to the market's 1st percentile, counted as valid, and the
+    name pinned to the "most expensive" end of the cross-section. See
+    docs/dev/20260731_raw_features/01_feature_candidate/10_known_issues.md I1.
+    """
+    con = _base_con()
+    # Two fully-populated names give the cross-section its 1/99% bounds...
+    _setup_full_ticker(con, "00126380", "005930")
+    _setup_full_ticker(con, "00164779", "000660")
+    trade_date = date(2024, 3, 15)
+    _insert_pit(con, ticker="005930", trade_date=trade_date, market_cap=500_000_000)
+    _insert_pit(con, ticker="000660", trade_date=trade_date, market_cap=250_000_000)
+    # ...and this one is priced but has no financial statements at all.
+    _insert_pit(con, ticker="900000", trade_date=trade_date, market_cap=100_000_000)
+    _register(con)
+
+    idx = {c: i for i, c in enumerate(_columns(con))}
+    row = _feature_row(con, "900000", trade_date)
+    assert row is not None, "a priced name should still get a row"
+    for component in (
+        "fin_book_to_market",
+        "fin_earnings_yield",
+        "fin_cfo_yield",
+        "fin_sales_to_price",
+    ):
+        assert row[idx[component]] is None
+    assert row[idx["value_component_count"]] == 0
+    assert row[idx["fin_value_z"]] is None
+
+
 def test_lag1_variant_matches_prior_valid_session() -> None:
     con = _base_con()
     _setup_full_ticker(con, "00126380", "005930")

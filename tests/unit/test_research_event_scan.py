@@ -767,6 +767,141 @@ def test_musang_gamja_is_mechanical_under_either_spelling() -> None:
         assert row[idx["ev_net_share_issuance_yoy"]] == 0.0, reason
 
 
+def test_paid_capital_reduction_makes_net_issuance_negative() -> None:
+    """Regression (issuance_v3): 유상감자 must count as an economic decrease.
+
+    The catalog only held ``감자(유상)``, which this source never writes — it
+    writes ``유상감자``. Until v3 the economic-decrease set matched nothing, so
+    the feature could not go negative and every window holding one of those 699
+    rows was dropped as unclassified. See 10_known_issues.md I3.
+    """
+    con = _base_con()
+    _insert_share_count(
+        con,
+        bsns_year=2022,
+        reprt_code="11011",
+        rcept_no="20230310000001",
+        istc_totqy=1000,
+        now_to_isu=0,
+        now_to_dcrs=0,
+        stlm_dt=date(2022, 12, 31),
+    )
+    _insert_share_count(
+        con,
+        bsns_year=2023,
+        reprt_code="11011",
+        rcept_no="20240310000002",
+        istc_totqy=900,
+        now_to_isu=0,
+        now_to_dcrs=100,
+        stlm_dt=date(2023, 12, 31),
+    )
+    _insert_capital_change(
+        con,
+        bsns_year=2023,
+        reprt_code="11011",
+        rcept_no="20240310000002",
+        isu_dcrs_de=date(2023, 6, 15),
+        isu_dcrs_stle="유상감자",
+        isu_dcrs_qy=100,
+    )
+    _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+    _register(con)
+
+    idx = {c: i for i, c in enumerate(_columns(con))}
+    row = _row(con, date(2024, 3, 15))
+    assert row[idx["issuance_classification_complete"]] is True
+    assert row[idx["issuance_identity_ok"]] is True
+    assert row[idx["ev_net_share_issuance_yoy"]] == -100 / 1000
+
+
+def test_dividend_total_with_unit_slip_falls_back_to_dps_proxy() -> None:
+    """Regression (payout_v2): a 원-denominated total must not be scaled by 1e6.
+
+    Some filers write the raw won amount into the 백만원-labelled field
+    (일양약품 2019). DPS x (issued - treasury) from the same filing catches the
+    1e6 gap. See 10_known_issues.md I5.
+    """
+    con = _base_con()
+    _insert_dividend_row(
+        con,
+        bsns_year=2023,
+        rcept_no="20240310000001",
+        row_name="현금배당금총액(백만원)",
+        value_numeric=450_000,  # already in won: DPS 500 x 900 shares
+    )
+    _insert_dividend_row(
+        con,
+        bsns_year=2023,
+        rcept_no="20240310000001",
+        row_name="주당 현금배당금(원)",
+        value_numeric=500,
+    )
+    _insert_shares_instant(
+        con, bsns_year=2023, rcept_no="20240310000002", issued=1000, treasury=100
+    )
+    _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+    _register(con)
+
+    idx = {c: i for i, c in enumerate(_columns(con))}
+    row = _row(con, date(2024, 3, 15))
+    assert row[idx["dividend_source"]] == "dps_proxy"
+    assert row[idx["cash_dividends_total"]] == 500 * (1000 - 100)
+
+
+def test_dividend_total_within_sanity_multiple_is_still_preferred() -> None:
+    """The unit check must not reject ordinary disagreement with the DPS proxy.
+
+    Share classes and timing make the two estimates differ by a small factor;
+    only a ~1e6 gap is a unit slip.
+    """
+    con = _base_con()
+    _insert_dividend_row(
+        con,
+        bsns_year=2023,
+        rcept_no="20240310000001",
+        row_name="현금배당금총액(백만원)",
+        value_numeric=2,  # 2,000,000 won vs a 450,000 won DPS proxy -> 4.4x
+    )
+    _insert_dividend_row(
+        con,
+        bsns_year=2023,
+        rcept_no="20240310000001",
+        row_name="주당 현금배당금(원)",
+        value_numeric=500,
+    )
+    _insert_shares_instant(
+        con, bsns_year=2023, rcept_no="20240310000002", issued=1000, treasury=100
+    )
+    _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+    _register(con)
+
+    idx = {c: i for i, c in enumerate(_columns(con))}
+    row = _row(con, date(2024, 3, 15))
+    assert row[idx["dividend_source"]] == "direct_total"
+    assert row[idx["cash_dividends_total"]] == 2 * 1_000_000
+
+
+def test_negative_dividend_total_is_rejected() -> None:
+    """Regression (payout_v2): a negative cash dividend is not a quantity."""
+    con = _base_con()
+    _insert_dividend_row(
+        con,
+        bsns_year=2023,
+        rcept_no="20240310000001",
+        row_name="현금배당금총액(백만원)",
+        value_numeric=-3414,
+    )
+    _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+    _register(con)
+
+    idx = {c: i for i, c in enumerate(_columns(con))}
+    row = _row(con, date(2024, 3, 15))
+    assert row[idx["cash_dividends_total"]] is None
+    assert row[idx["dividend_source"]] is None
+    assert row[idx["ev_payout_yield"]] is None
+
+
 def test_catalog_classes_stay_disjoint() -> None:
     sets = {
         "economic_increase": ECONOMIC_INCREASE_REASONS,
@@ -777,3 +912,62 @@ def test_catalog_classes_stay_disjoint() -> None:
     total = sum(len(s) for s in sets.values())
     union = set().union(*sets.values())
     assert len(union) == total, f"a reason appears in two classes: {sets}"
+
+
+def test_impossible_payout_yield_is_rejected_without_a_dps_row() -> None:
+    """payout_v2 backstop: a unit slip with no DPS row to check it against.
+
+    Ticker 344860 filed 358,740,000 into the 백만원 field; with no DPS row the
+    upstream cross-check has nothing to compare against, so the yield (1.8m%)
+    has to be caught on magnitude alone. See 10_known_issues.md I5.
+    """
+    con = _base_con()
+    _insert_dividend_row(
+        con,
+        bsns_year=2023,
+        rcept_no="20240310000001",
+        row_name="현금배당금총액(백만원)",
+        value_numeric=1_000_000,  # -> 1e12 won against a 1e9 market cap
+    )
+    _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+    _register(con)
+
+    idx = {c: i for i, c in enumerate(_columns(con))}
+    row = _row(con, date(2024, 3, 15))
+    assert row[idx["ev_payout_yield"]] is None
+
+
+def test_negative_buyback_cash_is_dropped_not_summed() -> None:
+    """payout_v2: a negative treasury acquisition must not drag payout negative.
+
+    The dividend leg stays, so the row keeps a payout — it just loses the
+    component the source could not state as a quantity.
+    """
+    con = _base_con()
+    _insert_dividend_row(
+        con,
+        bsns_year=2023,
+        rcept_no="20240310000001",
+        row_name="현금배당금총액(백만원)",
+        value_numeric=10,
+    )
+    for reprt_code, amount, rcept_no in [
+        ("11013", -1, "20230410000001"),
+        ("11012", -2, "20230810000001"),
+        ("11014", -3, "20231110000001"),
+        ("11011", -4, "20240310000002"),
+    ]:
+        con.execute(
+            "INSERT INTO dart_financial_statement_raw "
+            "(corp_code, ticker, bsns_year, reprt_code, fs_div, sj_div, account_id, "
+            "account_nm, ord, thstrm_amount, currency, rcept_no) VALUES "
+            "('00126380','005930',2023,?,'CFS','CF','dart_AcquisitionOfTreasuryShares','',1,?,'KRW',?)",
+            [reprt_code, amount, rcept_no],
+        )
+    _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+    _register(con)
+
+    idx = {c: i for i, c in enumerate(_columns(con))}
+    row = _row(con, date(2024, 3, 15))
+    assert row[idx["buyback_cash_ttm"]] is None
+    assert row[idx["ev_payout_yield"]] == pytest.approx(10 * 1_000_000 / 1_000_000_000)
