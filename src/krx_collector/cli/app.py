@@ -33,6 +33,7 @@ from krx_collector.adapters.opendart_common.client import OpenDartRequestExecuto
 from krx_collector.domain.enums import UniverseScope
 from krx_collector.infra.config.settings import get_settings
 from krx_collector.infra.logging.setup import setup_logging
+from krx_collector.service.backfill_stock_master import DEFAULT_SNAPSHOT_SOURCES
 from krx_collector.service.freshness import (
     DEFAULT_MAX_LAG_CALENDAR_DAYS,
     DEFAULT_MAX_LAG_TRADING_DAYS,
@@ -1635,6 +1636,47 @@ def _handle_universe_backfill_snapshots(args: argparse.Namespace) -> None:
     _exit_if_run_aborted(result.errors, "Snapshot backfill")
 
 
+def _handle_universe_backfill_master(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector universe backfill-master``."""
+    settings = get_settings()
+
+    from krx_collector.domain.enums import Source
+
+    sources = []
+    for token in args.sources.split(","):
+        name = token.strip().upper()
+        if not name:
+            continue
+        try:
+            sources.append(Source(name))
+        except ValueError:
+            print(f"\u274c Unknown snapshot source: {token}", file=sys.stderr)
+            sys.exit(1)
+
+    print(
+        "\u2192 universe backfill-master: "
+        f"sources={[s.value for s in sources]}, dry_run={args.dry_run}"
+    )
+
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.backfill_stock_master import (
+        backfill_stock_master_from_snapshots,
+    )
+
+    result = backfill_stock_master_from_snapshots(
+        storage=PostgresStorage(settings.db_dsn),
+        sources=sources or None,
+        dry_run=args.dry_run,
+    )
+
+    print(f"   - Snapshot-only securities: {result.candidates}")
+    print(f"   - Rows upserted:            {result.rows_upserted}")
+    if result.dry_run:
+        print("   - Dry run: nothing was written.")
+
+    _exit_if_run_aborted(result.errors, "Stock-master backfill")
+
+
 def _handle_prices_backfill(args: argparse.Namespace) -> None:
     """Handle ``krx-collector prices backfill``."""
     settings = get_settings()
@@ -3002,6 +3044,29 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     universe_backfill.set_defaults(handler=_handle_universe_backfill_snapshots)
+
+    universe_backfill_master = universe_sub.add_parser(
+        "backfill-master",
+        help=(
+            "Recover securities that appear in a historical snapshot but are "
+            "missing from stock_master, as DELISTED."
+        ),
+    )
+    universe_backfill_master.add_argument(
+        "--sources",
+        default=",".join(source.value for source in DEFAULT_SNAPSHOT_SOURCES),
+        help=(
+            "Comma-separated snapshot sources to read "
+            f"(default: {','.join(s.value for s in DEFAULT_SNAPSHOT_SOURCES)})."
+        ),
+    )
+    universe_backfill_master.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Report how many securities would be recovered without writing them.",
+    )
+    universe_backfill_master.set_defaults(handler=_handle_universe_backfill_master)
 
     # -- prices ---------------------------------------------------------------
     prices_parser = subparsers.add_parser("prices", help="Price data commands.")

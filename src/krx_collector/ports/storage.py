@@ -593,6 +593,43 @@ class Storage(Protocol):
         """
         ...
 
+    def get_stocks_seen_only_in_snapshots(
+        self,
+        sources: list[Source] | None = None,
+    ) -> list[Stock]:
+        """Return securities that appear in a snapshot but not in the stock master.
+
+        ``stock_master`` only knows what the collector has watched since it
+        started running, so every security delisted before that is absent —
+        1,299 of the 3,959 corps that ever carried a ticker, measured
+        2026-08-16. Absent from ``stock_master`` means unreachable: price
+        collection resolves its targets from that table, and naming a missing
+        ticker with ``--tickers`` returns nothing because the filter runs
+        against the same table. ``UniverseScope.HISTORICAL`` cannot reach past
+        what the master contains.
+
+        The reconstructed month-end snapshots are the point-in-time record of
+        what was listed, so they are what closes the gap.
+
+        Args:
+            sources: Snapshot sources to read.  ``None`` reads every source.
+
+        Returns:
+            One :class:`Stock` per ``(ticker, market)`` seen in a snapshot and
+            missing from the master, carrying the newest snapshot's name and
+            the first/last ``as_of_date`` it was observed on.  Status is left
+            to the caller.
+        """
+        ...
+
+    def upsert_stock_master_rows(self, stocks: list[Stock]) -> int:
+        """Upsert stock-master rows alone, writing no snapshot.
+
+        Returns:
+            Number of rows affected.
+        """
+        ...
+
     def insert_stock_master_snapshot_only(
         self,
         snapshot: StockUniverseSnapshot,

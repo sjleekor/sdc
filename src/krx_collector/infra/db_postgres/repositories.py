@@ -218,6 +218,119 @@ class PostgresStorage:
 
         return result
 
+    def get_stocks_seen_only_in_snapshots(
+        self,
+        sources: list[Source] | None = None,
+    ) -> list[Stock]:
+        """Return securities present in a snapshot and absent from stock_master.
+
+        The key is ``(ticker, market)`` because that is the master's primary
+        key: a security that transferred markets legitimately holds two rows,
+        and the older one is exactly the historical record this recovers.
+        """
+        params: list[object] = []
+        source_clause = ""
+        if sources:
+            source_clause = "WHERE s.source = ANY(%s)"
+            params.append([source.value for source in sources])
+
+        query = f"""
+            WITH seen AS (
+                SELECT
+                    i.ticker,
+                    i.market,
+                    i.name,
+                    i.listing_date,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY i.ticker, i.market ORDER BY s.as_of_date DESC
+                    ) AS recency,
+                    MIN(s.as_of_date) OVER (PARTITION BY i.ticker, i.market) AS first_seen,
+                    MAX(s.as_of_date) OVER (PARTITION BY i.ticker, i.market) AS last_seen
+                FROM stock_master_snapshot s
+                JOIN stock_master_snapshot_items i ON i.snapshot_id = s.snapshot_id
+                {source_clause}
+            )
+            SELECT ticker, market, name, listing_date, first_seen, last_seen
+            FROM seen
+            WHERE recency = 1
+              AND NOT EXISTS (
+                  SELECT 1 FROM stock_master m
+                  WHERE m.ticker = seen.ticker AND m.market = seen.market
+              )
+            ORDER BY ticker, market
+        """
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+                rows = cur.fetchall()
+
+        return [
+            Stock(
+                ticker=row[0],
+                market=Market(row[1]),
+                name=row[2] or row[0],
+                # The caller decides the status; a row recovered from a
+                # snapshot carries no claim about today.
+                status=ListingStatus.UNKNOWN,
+                last_seen_date=row[5],
+                source=Source.PYKRX_BACKFILL,
+                listing_date=row[3],
+                first_seen_date=row[4],
+            )
+            for row in rows
+        ]
+
+    def upsert_stock_master_rows(self, stocks: list[Stock]) -> int:
+        """Upsert stock-master rows on their own, with no snapshot bookkeeping.
+
+        ``upsert_stock_master`` writes a snapshot as well, which is right for a
+        universe sync and wrong for recovering historical rows: those rows come
+        *from* snapshots that already exist, so writing another would double-count
+        the audit trail.
+        """
+        if not stocks:
+            return 0
+
+        args = [
+            (
+                stock.ticker,
+                stock.market.value,
+                stock.name,
+                stock.status.value,
+                stock.last_seen_date,
+                stock.source.value,
+                stock.listing_date,
+                stock.first_seen_date,
+            )
+            for stock in stocks
+        ]
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                return _execute_values_counted(
+                    cur,
+                    """
+                    INSERT INTO stock_master
+                        (ticker, market, name, status, last_seen_date, source,
+                         listing_date, first_seen_date)
+                    VALUES %s
+                    ON CONFLICT (ticker, market) DO UPDATE SET
+                        name            = EXCLUDED.name,
+                        status          = EXCLUDED.status,
+                        last_seen_date  = EXCLUDED.last_seen_date,
+                        source          = EXCLUDED.source,
+                        listing_date    = COALESCE(EXCLUDED.listing_date,
+                                                   stock_master.listing_date),
+                        first_seen_date = LEAST(
+                            COALESCE(stock_master.first_seen_date, EXCLUDED.first_seen_date),
+                            COALESCE(EXCLUDED.first_seen_date, stock_master.first_seen_date)
+                        ),
+                        updated_at      = now()
+                    """,
+                    args,
+                )
+
     def insert_stock_master_snapshot_only(
         self,
         snapshot: StockUniverseSnapshot,
