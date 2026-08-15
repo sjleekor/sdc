@@ -1613,7 +1613,7 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
         f"new_ticker_start={args.new_ticker_start}, "
         f"allow_new_ticker_backfill={args.allow_new_ticker_backfill}, "
         f"allow_large_range={args.allow_large_range}, "
-        f"refetch={args.refetch}, include_delisted={args.include_delisted}"
+        f"refetch={args.refetch}, scope={args.universe_scope}"
     )
 
     from krx_collector.domain.enums import Market
@@ -1718,7 +1718,9 @@ def _handle_prices_market_cap_backfill(args: argparse.Namespace) -> None:
         f"rate_limit={rate_limit}, "
         f"long_rest_interval={long_rest_interval}, "
         f"long_rest_seconds={long_rest_seconds}, "
-        f"force={args.force}, scope={args.universe_scope}"
+        # No scope here: a market-cap slice is a whole market on a date, so there
+        # is no per-ticker target set for UniverseScope to select.
+        f"force={args.force}, max_consecutive_failures={args.max_consecutive_failures}"
     )
 
     from krx_collector.adapters.market_cap_pykrx.provider import PykrxMarketCapProvider
