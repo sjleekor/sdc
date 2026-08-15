@@ -7,6 +7,7 @@ Subcommands::
                                   [--tables ...] [--all-tables]
     krx-collector universe sync  [--source fdr|pykrx] [--markets ...]
     krx-collector prices backfill [--market ...] [--tickers ...] [--start ...]
+    krx-collector prices market-cap-backfill [--market ...] [--start ...] [--end ...]
     krx-collector validate       [--date ...] [--market ...]
 
 Each subcommand parses arguments and delegates to the corresponding
@@ -1576,6 +1577,71 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def _handle_prices_market_cap_backfill(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector prices market-cap-backfill``."""
+    settings = get_settings()
+
+    rate_limit = args.rate_limit_seconds
+    if rate_limit is None:
+        rate_limit = settings.rate_limit_seconds
+
+    long_rest_interval = args.long_rest_interval
+    if long_rest_interval is None:
+        long_rest_interval = settings.long_rest_interval
+
+    long_rest_seconds = args.long_rest_seconds
+    if long_rest_seconds is None:
+        long_rest_seconds = settings.long_rest_seconds
+
+    from krx_collector.domain.enums import Market
+
+    market_arg = (args.market or "ALL").upper()
+    if market_arg == "ALL":
+        markets = [Market.KOSPI, Market.KOSDAQ]
+    elif market_arg in ("KOSPI", "KOSDAQ"):
+        markets = [Market(market_arg)]
+    else:
+        print(f"❌ Unknown market: {args.market}", file=sys.stderr)
+        sys.exit(1)
+
+    print(
+        f"→ prices market-cap-backfill: markets={[m.value for m in markets]}, "
+        f"start={args.start}, end={args.end}, "
+        f"rate_limit={rate_limit}, "
+        f"long_rest_interval={long_rest_interval}, "
+        f"long_rest_seconds={long_rest_seconds}, "
+        f"force={args.force}"
+    )
+
+    from krx_collector.adapters.market_cap_pykrx.provider import PykrxMarketCapProvider
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.backfill_market_cap import backfill_market_cap
+
+    result = backfill_market_cap(
+        provider=PykrxMarketCapProvider(),
+        storage=PostgresStorage(settings.db_dsn),
+        markets=markets,
+        start=args.start,
+        end=args.end,
+        rate_limit_seconds=rate_limit,
+        long_rest_interval=long_rest_interval,
+        long_rest_seconds=long_rest_seconds,
+        force=args.force,
+    )
+
+    if result.errors:
+        print(f"⚠ Market-cap backfill completed with {len(result.errors)} errors.", file=sys.stderr)
+    else:
+        print("✅ Market-cap backfill completed successfully.")
+
+    print(f"   - Slices attempted: {result.slices_attempted}")
+    print(f"   - Slices skipped:   {result.slices_skipped}")
+    print(f"   - Slices completed: {result.slices_completed}")
+    print(f"   - Rows upserted:    {result.rows_upserted}")
+    if result.rows_dropped:
+        print(f"   - Rows dropped (zero close): {result.rows_dropped}")
+
+
 def _handle_validate(args: argparse.Namespace) -> None:
     """Handle ``krx-collector validate``."""
     settings = get_settings()
@@ -2723,6 +2789,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Allow resolved incremental price ranges larger than the safety guard.",
     )
     prices_backfill.set_defaults(handler=_handle_prices_backfill)
+
+    prices_market_cap = prices_sub.add_parser(
+        "market-cap-backfill",
+        help="Backfill daily KRX market cap / trading value / listed shares.",
+    )
+    prices_market_cap.add_argument(
+        "--market",
+        type=str,
+        default="ALL",
+        help=(
+            "KOSPI | KOSDAQ | ALL (default). ALL means KOSPI and KOSDAQ as two "
+            "separate requests per date — it is never passed to pykrx, which "
+            "would fold in KONEX and leave the market column unfillable."
+        ),
+    )
+    prices_market_cap.add_argument("--start", type=_parse_date, default=None)
+    prices_market_cap.add_argument("--end", type=_parse_date, default=None)
+    prices_market_cap.add_argument("--rate-limit-seconds", type=float, default=None)
+    prices_market_cap.add_argument("--long-rest-interval", type=int, default=None)
+    prices_market_cap.add_argument("--long-rest-seconds", type=float, default=None)
+    prices_market_cap.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Re-fetch slices that are already complete.",
+    )
+    prices_market_cap.set_defaults(handler=_handle_prices_market_cap_backfill)
 
     # -- profile --------------------------------------------------------------
     profile_parser = subparsers.add_parser(

@@ -20,6 +20,7 @@ from krx_collector.domain.models import (
     CommonFeatureObservation,
     CommonFeatureSeries,
     DailyBar,
+    DailyMarketCapRow,
     DartCapitalChangeLine,
     DartCorp,
     DartFilingReceiptLine,
@@ -3086,6 +3087,106 @@ class PostgresStorage:
                 result.updated = cur.rowcount
 
         return result
+
+    # -- Daily market cap -----------------------------------------------------
+
+    def upsert_daily_market_cap(self, rows: list[DailyMarketCapRow]) -> UpsertResult:
+        """Upsert one ``(trade_date, market)`` slice of market-cap rows.
+
+        The whole slice goes in one ``execute_values`` inside one connection
+        context, so it commits or it does not.  A slice split across
+        transactions could be left permanently half-written — see the port
+        docstring.
+        """
+        if not rows:
+            return UpsertResult()
+
+        result = UpsertResult()
+        page_size = 1000
+
+        statement = """
+            INSERT INTO daily_market_cap (
+                trade_date,
+                ticker,
+                market,
+                source_close,
+                market_cap,
+                trading_value,
+                listed_shares,
+                volume,
+                source,
+                fetched_at
+            )
+            VALUES %s
+            ON CONFLICT (trade_date, ticker, market) DO UPDATE SET
+                source_close = EXCLUDED.source_close,
+                market_cap = EXCLUDED.market_cap,
+                trading_value = EXCLUDED.trading_value,
+                listed_shares = EXCLUDED.listed_shares,
+                volume = EXCLUDED.volume,
+                source = EXCLUDED.source,
+                fetched_at = EXCLUDED.fetched_at
+        """
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        r.trade_date,
+                        r.ticker,
+                        r.market.value,
+                        r.source_close,
+                        r.market_cap,
+                        r.trading_value,
+                        r.listed_shares,
+                        r.volume,
+                        r.source.value,
+                        r.fetched_at,
+                    )
+                    for r in rows
+                ]
+
+                # Paged explicitly so the counts add up.  ``execute_values``
+                # with ``page_size`` issues one statement per page, and
+                # ``cur.rowcount`` then reports only the LAST page — a 1,704-row
+                # slice comes back as 704.  The caller reconciles this count
+                # against the response to decide whether the slice is complete,
+                # so an under-count is not cosmetic here: it would fail every
+                # slice over 1,000 rows.  (``upsert_daily_bars`` has the same
+                # pattern; there the count is only reported, not acted on.)
+                for offset in range(0, len(args), page_size):
+                    page = args[offset : offset + page_size]
+                    psycopg2.extras.execute_values(cur, statement, page, page_size=len(page))
+                    result.updated += cur.rowcount
+
+        return result
+
+    def get_market_cap_slice_row_counts(
+        self,
+        start: date,
+        end: date,
+        market: Market | None = None,
+    ) -> dict[tuple[date, Market], int]:
+        """Return stored row counts per ``(trade_date, market)`` slice."""
+        query = """
+            SELECT trade_date, market, COUNT(*)
+            FROM daily_market_cap
+            WHERE trade_date BETWEEN %s AND %s
+        """
+        params: list[object] = [start, end]
+        if market is not None:
+            query += " AND market = %s"
+            params.append(market.value)
+        query += " GROUP BY trade_date, market"
+
+        counts: dict[tuple[date, Market], int] = {}
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+                for trade_date, market_value, row_count in cur.fetchall():
+                    counts[(trade_date, Market(market_value))] = row_count
+
+        return counts
 
     # -- Ingestion runs -------------------------------------------------------
 

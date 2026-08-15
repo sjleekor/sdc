@@ -50,6 +50,7 @@ class RunType(StrEnum):
 
     UNIVERSE_SYNC = "universe_sync"
     DAILY_BACKFILL = "daily_backfill"
+    MARKET_CAP_BACKFILL = "market_cap_backfill"
     VALIDATE = "validate"
     REMOTE_DB_SYNC = "remote_db_sync"
     DART_CORP_SYNC = "dart_corp_sync"

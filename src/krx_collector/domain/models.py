@@ -116,6 +116,46 @@ class DailyBar:
 
 
 @dataclass(frozen=True, slots=True)
+class DailyMarketCapRow:
+    """Single day of KRX market cap / trading value / listed shares for a stock.
+
+    Same grain as :class:`DailyBar` but a different source, and the difference
+    matters.  ``DailyBar.close`` is the naver ADJUSTED close; ``source_close``
+    here is the KRX UNADJUSTED session close.  The name says so on purpose.
+
+    Every value field is optional because pykrx casts blanks to ``0`` and the
+    adapter maps an unusable response to ``None`` rather than storing a zero
+    that cannot be told apart from a real one.
+
+    Attributes:
+        ticker: 6-digit KRX ticker code.
+        market: Exchange market segment — comes from the CALL ARGUMENT, never
+            from the response (which has no market column) and never from a
+            ``stock_master`` join (which would leak a stock's present-day
+            market into its pre-transfer rows).
+        trade_date: Trading date.
+        source_close: KRX unadjusted session close (KRW).
+        market_cap: Market capitalisation (KRW).
+        trading_value: Traded value (KRW).
+        listed_shares: Listed share count.
+        volume: Traded volume on a KRX basis.
+        source: Data source.
+        fetched_at: KST timestamp when the data was retrieved.
+    """
+
+    ticker: str
+    market: Market
+    trade_date: date
+    source_close: int | None
+    market_cap: int | None
+    trading_value: int | None
+    listed_shares: int | None
+    volume: int | None
+    source: Source
+    fetched_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class DartCorp:
     """OpenDART corporation-code master row.
 
@@ -580,6 +620,48 @@ class DailyPriceResult:
     ticker: str = ""
     bars: list[DailyBar] = field(default_factory=list)
     error: str | None = None
+
+
+@dataclass(slots=True)
+class DailyMarketCapResult:
+    """Result of a market-cap fetch for one ``(trade_date, market)`` slice.
+
+    Attributes:
+        trade_date: Date that was fetched.
+        market: Market segment that was fetched.
+        rows: Rows retrieved (already missing-value normalised).
+        response_rows: Rows the provider saw before dropping unusable ones.
+            The service reconciles this against what storage wrote — a slice
+            is not complete just because some of its rows landed.
+        error: Error message if the fetch failed.
+    """
+
+    trade_date: date | None = None
+    market: Market | None = None
+    rows: list[DailyMarketCapRow] = field(default_factory=list)
+    response_rows: int = 0
+    error: str | None = None
+
+
+@dataclass(slots=True)
+class MarketCapBackfillResult:
+    """Outcome of a market-cap backfill run.
+
+    Attributes:
+        slices_attempted: ``(trade_date, market)`` slices requested.
+        slices_skipped: Slices already complete and skipped.
+        slices_completed: Slices fetched and stored with a matching row count.
+        rows_upserted: Total rows written.
+        rows_dropped: Response rows dropped as unusable (holiday zero-fill).
+        errors: Per-slice error messages, keyed ``"YYYY-MM-DD/MARKET"``.
+    """
+
+    slices_attempted: int = 0
+    slices_skipped: int = 0
+    slices_completed: int = 0
+    rows_upserted: int = 0
+    rows_dropped: int = 0
+    errors: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

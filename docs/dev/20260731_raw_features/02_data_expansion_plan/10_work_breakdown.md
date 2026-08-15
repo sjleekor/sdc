@@ -100,12 +100,36 @@ ledger ────────────→ N6 (16만 호출 재개)
   - [x] exporter `plan --tables daily_market_cap` → `strategy=date_month columns=10`,
         `warning: source table is empty` (데이터 없이 통과)
   - [ ] `db sync-remote --full-refresh` 미러링 확인 — **prod에 테이블이 생긴 뒤**(D-2) 가능
-- [ ] **N1-3 도메인 + 포트 + 어댑터**
-      `RunType.MARKET_CAP_BACKFILL`, `ports/market_cap.py`, `adapters/market_cap_pykrx/`
-  - [ ] `market`은 **호출 인자에서만** 채운다 — `stock_master` 조인 금지(룩어헤드)
-- [ ] **N1-4 스토리지** — 슬라이스 원자성 + 행 수 대조 (`01` §2.4), `--force`
-- [ ] **N1-5 서비스 + CLI** — `prices market-cap-backfill`, KRX 거래일 캘린더 사용
-- [ ] **N1-6 테스트** — 유닛 2 (`backfill_market_cap`, `market_cap_pykrx_provider`) + 라이브 1
+- [x] **N1-3 도메인 + 포트 + 어댑터** (2026-08-15)
+  - [x] `DailyMarketCapRow` · `DailyMarketCapResult` · `MarketCapBackfillResult`
+  - [x] `RunType.MARKET_CAP_BACKFILL`
+  - [x] `ports/market_cap.py` — 작업 단위가 ticker가 아니라 **`(trade_date, market)` 슬라이스**
+  - [x] `adapters/market_cap_pykrx/provider.py`
+  - [x] `market`은 **호출 인자에서만** 채운다 — `stock_master` 조인 없음
+  - [x] **`alternative=False`를 명시적으로 넘긴다** — `True`면 휴장일에 전 영업일 데이터가
+        그 날짜로 저장된다
+  - [x] `source_close == 0` 행 드롭, 거래량·거래대금 0은 **진짜 0으로 보존**
+- [x] **N1-4 스토리지** (2026-08-15)
+  - [x] `upsert_daily_market_cap` — **한 슬라이스 = 한 트랜잭션**
+  - [x] `get_market_cap_slice_row_counts` — boolean이 아니라 **행 수**를 준다
+  - [x] **`execute_values` rowcount 버그 수정** — `page_size` 분할 시 `cur.rowcount`가
+        마지막 페이지만 반환해 1,704행 슬라이스가 704로 잡혔다. 명시적 페이징으로 합산
+- [x] **N1-5 서비스 + CLI** (2026-08-15)
+  - [x] `service/backfill_market_cap.py` — 거래일 캘린더 선필터, 부분실패 finalizer
+  - [x] `cli/app.py` — `prices market-cap-backfill`, 인자 이름을 `prices backfill`과 맞춤
+  - [x] `--market ALL`은 KOSPI·KOSDAQ **2회 호출**로 풀린다. pykrx에 `ALL`을 넘기지 않는다
+- [x] **N1-6 테스트** (2026-08-15) — 유닛 16 + 라이브 6. 전체 **970 통과**
+  - [x] `test_backfill_market_cap.py` 9건 — 거래일만 호출, 슬라이스 원자성,
+        **행 수 미달 슬라이스 재수집**, 행 수 불일치 시 미완료 처리, 부분실패 → `partial`
+  - [x] `test_market_cap_pykrx_provider.py` 7건 — **PoC 실측 응답 모양을 픽스처로**
+        (휴장일 0 채움 · 거래정지 진짜 0 · 컬럼명 변경 감지 · `alternative=False` 고정)
+  - [x] `tests/integration/test_market_cap_live.py` 6건 — `RUN_LIVE_PYKRX_TEST=1` 게이트
+- [x] **N1 end-to-end 로컬 검증** (2024-01 한 달, 2026-08-15)
+  - [x] 44/44 슬라이스 완료, **58,435행**, 오류 0. 휴장일 2024-01-01은 호출 자체가 없음
+  - [x] **V1 항등성 위반 0** · `source_close` 0/NULL 0 · 거래대금 0 = 1,847건(거래정지)
+  - [x] **idempotent** — 재실행 시 44 skipped / 0 upserted
+  - [x] `ingestion_runs`에 `market_cap_backfill` 감사 기록 2건 (`success`)
+  - [x] exporter 실데이터 export → `year=2024/month=01` 파티션, 58,435행, 컬럼 10개
 - [x] **N1-7 결정 고정 (결과 보기 전)** — `02` §7 확정본. **근본 해결 방향으로 결정**
   - [x] **결정 1** 기존 ID는 **정의 동결**, 새 정의는 **새 ID**(`px_illiq_20d`·`mcap_krx_log`),
         **새 config에는 새 ID만 사전등록**. 근사값을 후보로 남기면 측정 오차를 알파 후보로

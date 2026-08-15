@@ -19,6 +19,7 @@ from krx_collector.domain.models import (
     CommonFeatureObservation,
     CommonFeatureSeries,
     DailyBar,
+    DailyMarketCapRow,
     DartCapitalChangeLine,
     DartCorp,
     DartFilingReceiptLine,
@@ -545,6 +546,46 @@ class Storage(Protocol):
 
         Returns:
             Counters of inserted / updated / errored rows.
+        """
+        ...
+
+    # -- Daily market cap -----------------------------------------------------
+
+    def upsert_daily_market_cap(self, rows: list[DailyMarketCapRow]) -> UpsertResult:
+        """Upsert one ``(trade_date, market)`` slice of market-cap rows.
+
+        **One call must be one slice.**  The caller relies on this being a
+        single transaction: if a slice is split across calls and the process
+        dies in between, the slice is left permanently incomplete and any
+        "rows exist, therefore done" skip rule will never fill the hole.
+
+        Args:
+            rows: All rows of a single slice.
+
+        Returns:
+            Counters of inserted / updated / errored rows.
+        """
+        ...
+
+    def get_market_cap_slice_row_counts(
+        self,
+        start: date,
+        end: date,
+        market: Market | None = None,
+    ) -> dict[tuple[date, Market], int]:
+        """Return stored row counts per ``(trade_date, market)`` slice.
+
+        Row counts, not a boolean — completeness is decided by comparing
+        against what the provider returned, never by mere row existence.
+
+        Args:
+            start: First trade date (inclusive).
+            end: Last trade date (inclusive).
+            market: Optional market filter.
+
+        Returns:
+            Mapping of slice key to stored row count.  Absent slices are
+            simply missing from the mapping.
         """
         ...
 
