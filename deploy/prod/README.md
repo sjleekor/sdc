@@ -128,6 +128,29 @@ source lock은 `/tmp/sdc-locks/<domain>.lock`에 `flock`을 걸고, lock 획득 
 | `krx_marketdata` | `prices-backfill-incremental.sh`, `flows-sync.sh`, `common-sync-krx.sh`, `common-sync-pykrx.sh` | 60s |
 | `opendart` | OpenDART sync wrappers, OpenDART backfill | 5s |
 
+### KRX 요청 페이스 (2026-08-16 정정)
+
+**`data.krx.co.kr`을 때리는 모든 수집기는 하나의 정책을 쓴다.** 어떤 라이브러리를
+경유하든 상대는 같은 포털이다.
+
+| 설정 | 기본값 | 의미 |
+|---|---:|---|
+| `KRX_MIN_DELAY_SECONDS` / `KRX_MAX_DELAY_SECONDS` | 1.5 / 4.0 | 요청 간격(랜덤) |
+| `KRX_LONG_REST_EVERY` | 15 | 롱 레스트 주기 |
+| `KRX_LONG_REST_MIN_SECONDS` / `_MAX_` | 30 / 90 | 롱 레스트 길이 |
+| `KRX_ERROR_BACKOFF_MIN_SECONDS` / `_MAX_` | 45 / 180 | **에러 후 백오프** |
+| `KRX_AUTH_COOLDOWN_SECONDS` | 10 | 로그인 후 쿨다운 |
+
+이전에는 pykrx 계열(`prices market-cap-backfill`, `universe backfill-snapshots`)만
+따로 `--rate-limit-seconds`로 **0.1~0.4초**를 썼고 **에러 백오프가 아예 없었다.**
+같은 호스트에 두 개의 페이스가 있었던 셈이고, 2026-08-16에 KRX가
+`자동화 수단을 통한 비정상 대량 조회`로 이 호스트의 IP를 제한했다.
+
+두 명령의 per-run override는 `--min-delay-seconds` / `--max-delay-seconds`뿐이다.
+나머지는 위 설정을 따른다. 래퍼는 더 이상 페이스를 고정하지 않는다.
+
+> `prices backfill`은 해당 없다. `adjusted=True`라 pykrx가 KRX가 아니라 **naver**로 간다.
+
 주의할 점:
 
 - Cronicle event definition 자체에는 `env` 필드가 없다. event script에 직접 들어간 override는 현재 `sdc_daily_opendart_share_info`의 `DART_SHARE_INFO_MAX_ATTEMPT_TARGETS=35000`뿐이다.
