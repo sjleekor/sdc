@@ -254,6 +254,9 @@ ledger ────────────→ N6 (16만 호출 재개)
 - [ ] **D-6** **KRX 계열 exit 75 lock 회피** — 기존 `sdc_daily_krx_*` 스케줄과 시간대 분리
 - [x] **D-7** `docs/operations.md` — cron 표에 신규 잡 3개, `--universe-scope` 표,
       `--refetch`, as-of 검증 설명
+- [x] **D-1b 릴리즈 v0.9.4** (2026-08-15) — O-9 정지 조건. GHCR 빌드 성공, sj2 pull 완료,
+      배포된 이미지에서 `--max-consecutive-failures` 노출 확인.
+      **릴리즈 스크립트가 로컬·원격 compose를 함께 올리도록 수정한 뒤 첫 릴리즈**
 - [ ] **D-8** 로컬 반영 — `db sync-remote --full-refresh` → `bin/raw-parquet-export-all.sh`
       → `bin/parquet-compute-all.sh`
 
@@ -421,6 +424,19 @@ ledger ────────────→ N6 (16만 호출 재개)
 - [x] **O-7 `capital_change_direction_balance`** — I3 부류.
       "카탈로그가 조용히 매칭 실패"와 "그 범주가 실제로 없음"이 구분되게
 - [ ] **O-8 `profile`을 정기 스케줄에 편입** — 지금 수동 wrapper뿐. **D 그룹 의존**
+- [x] **O-9 원천 차단 정지 조건 `ConsecutiveFailureGuard`** (2026-08-15, v0.9.4) —
+      탐지가 아니라 **정지**다. 모든 수집기가 실패를 항목 오류로 기록하고 넘어가서,
+      원천이 거부하기 시작해도 대상 목록을 끝까지 때렸다. N1은 6,000 슬라이스 × `@retry` 4회
+      = **24,000 요청**. 임계 5에서 **20 요청**에 멈춘다
+  - [x] 연속 실패만 세고 **성공 한 번에 리셋** — 흩어진 실패로는 안 걸린다
+  - [x] 연속 실패 사이 백오프 증가 + 상한. `@retry`는 항목 안에서만 백오프하고 리셋되므로
+        이게 없으면 전부 실패하는 동안 페이스가 그대로다
+  - [x] 차단 시 run은 `FAILED` + `source_blocked` — 스케줄러가 절반을 완료로 보지 않는다
+  - [x] `--max-consecutive-failures` (기본 5, 0이면 비활성) — market-cap / snapshots / prices
+  - [x] **자체 결함 1건**: `rate_limit_seconds=0`일 때 백오프가 1초로 기본값이 붙어
+        "스로틀 끔"이 조용히 "최대 60초 대기"가 됐다. 설정된 페이스에 비례시켜 수정
+  - [x] 대량 백필 래퍼 기본값을 prod의 `0.1s`가 아닌 **`0.4s`**로. 한 호출이 시장 전체
+        (~1,700행)를 반환해 종목당 호출 기준으로 튜닝된 값보다 무겁다
 
 ---
 
