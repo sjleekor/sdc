@@ -41,6 +41,7 @@ def sync_dart_financial_statements(
     allowed_year_report_pairs: set[tuple[int, str]] | None = None,
     skip_request_keys: set[str] | None = None,
     run_params_extra: dict[str, object] | None = None,
+    include_delisted: bool = False,
 ) -> DartFinancialSyncResult:
     """Synchronise OpenDART financial raw rows into local storage."""
     run = IngestionRun(
@@ -54,6 +55,7 @@ def sync_dart_financial_statements(
             "tickers": tickers,
             "rate_limit_seconds": rate_limit_seconds,
             "force": force,
+            "include_delisted": include_delisted,
             "allowed_year_report_pairs": (
                 [f"{year}:{code}" for year, code in sorted(allowed_year_report_pairs)]
                 if allowed_year_report_pairs is not None
@@ -72,7 +74,11 @@ def sync_dart_financial_statements(
     skip_request_keys = set() if force else (skip_request_keys or set())
 
     try:
-        targets = storage.get_dart_corp_master(active_only=True, tickers=tickers)
+        targets = storage.get_dart_corp_master(
+            active_only=True,
+            tickers=tickers,
+            include_delisted=include_delisted,
+        )
         if not targets:
             raise RuntimeError(
                 "No active OpenDART corp mappings found. Run `dart sync-corp` first."

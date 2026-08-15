@@ -401,9 +401,13 @@ N6 대상 집합을 확인하다 나왔다. 측정: [`poc/survivorship_gap.md`](
 **복구 경로가 둘 다 열려 있다** — corpCode.xml이 상폐 법인의 `stock_code`를 유지하고,
 pykrx가 상폐 종목 OHLCV를 상폐일까지 준다(5종목 중 4종목 확인).
 
-- [ ] **S-1 DART 대상 확장** — `active_only=False`를 CLI에 노출.
-      **저장소 메서드는 이미 인자를 받는다.** 대상 +1,302 법인
-  - [ ] DS002/DS004가 상폐 법인에도 응답하는지 확인
+- [x] **S-1 DART 대상 확장 — 구현 완료** (2026-08-15)
+  - [x] `get_dart_corp_master(include_delisted=True)` — **`active_only=False`가 아니다.**
+        전자는 ticker 없는 11만 법인까지 연다. 이건 ticker를 가진 적 있는 3,959건
+  - [x] `--include-delisted`를 DART 명령 5개에 노출 (corp-profile / financials /
+        share-info / xbrl / filings)
+  - [x] **DS001/DS002가 상폐 법인에도 응답한다** — 5종목 전부 `status=000`
+  - [x] 테스트 추가 + fake storage 7곳 갱신. 전체 **1,010 통과**
   - [ ] `sync-filings` 우선 (~15,600 호출) → 지분공시 피쳐(N5-7)의 편향 제거
   - [ ] `sync-financials` / `sync-share-info` / `sync-xbrl`
   - [ ] **N6보다 먼저다.** 편향된 대상으로 8.4만 호출을 돌리면 의미가 없다

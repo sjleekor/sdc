@@ -52,6 +52,7 @@ def sync_dart_corp_profile(
     tickers: list[str] | None = None,
     rate_limit_seconds: float = 0.2,
     force: bool = False,
+    include_delisted: bool = False,
 ) -> CompanyProfileSyncResult:
     """Fetch ``company.json`` for every ticker-mapped corporation.
 
@@ -73,6 +74,7 @@ def sync_dart_corp_profile(
             "tickers": tickers,
             "rate_limit_seconds": rate_limit_seconds,
             "force": force,
+            "include_delisted": include_delisted,
         },
     )
     executor = _get_executor(profile_provider)
@@ -93,7 +95,11 @@ def sync_dart_corp_profile(
     try:
         targets = [
             corp
-            for corp in storage.get_dart_corp_master(active_only=True, tickers=tickers)
+            for corp in storage.get_dart_corp_master(
+                active_only=True,
+                tickers=tickers,
+                include_delisted=include_delisted,
+            )
             if corp.ticker
         ]
         if not targets:

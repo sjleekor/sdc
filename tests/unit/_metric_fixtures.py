@@ -115,6 +115,7 @@ class MockMetricStorage:
         self,
         active_only: bool = True,
         tickers: list[str] | None = None,
+        include_delisted: bool = False,
     ) -> list[DartCorp]:
         records = [
             DartCorp(

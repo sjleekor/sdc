@@ -40,6 +40,7 @@ def sync_dart_xbrl(
     allowed_year_report_pairs: set[tuple[int, str]] | None = None,
     skip_request_keys: set[str] | None = None,
     run_params_extra: dict[str, object] | None = None,
+    include_delisted: bool = False,
 ) -> DartXbrlSyncResult:
     """Synchronise parsed XBRL ZIP data for filings already present in financial raw."""
     run = IngestionRun(
@@ -70,7 +71,11 @@ def sync_dart_xbrl(
     skip_request_keys = set() if force else (skip_request_keys or set())
 
     try:
-        corp_rows = storage.get_dart_corp_master(active_only=True, tickers=tickers)
+        corp_rows = storage.get_dart_corp_master(
+            active_only=True,
+            tickers=tickers,
+            include_delisted=include_delisted,
+        )
         corp_by_ticker = {corp.ticker: corp for corp in corp_rows if corp.ticker}
         if not corp_by_ticker:
             raise RuntimeError(

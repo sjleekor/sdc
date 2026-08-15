@@ -46,6 +46,7 @@ def sync_dart_share_info(
     skip_request_keys: set[str] | None = None,
     run_params_extra: dict[str, object] | None = None,
     capital_change_provider: CapitalChangeProvider | None = None,
+    include_delisted: bool = False,
 ) -> DartShareInfoSyncResult:
     """Synchronise OpenDART share-count/dividend/treasury-stock raw rows.
 
@@ -84,7 +85,11 @@ def sync_dart_share_info(
     no_data_request_keys: list[str] = []
     skip_request_keys = set() if force else (skip_request_keys or set())
     try:
-        targets = storage.get_dart_corp_master(active_only=True, tickers=tickers)
+        targets = storage.get_dart_corp_master(
+            active_only=True,
+            tickers=tickers,
+            include_delisted=include_delisted,
+        )
         if not targets:
             raise RuntimeError(
                 "No active OpenDART corp mappings found. Run `dart sync-corp` first."

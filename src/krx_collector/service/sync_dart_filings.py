@@ -38,6 +38,7 @@ def sync_dart_filings(
     rate_limit_seconds: float = 0.2,
     force: bool = False,
     today: date | None = None,
+    include_delisted: bool = False,
 ) -> DartFilingReceiptSyncResult:
     """Synchronise OpenDART disclosure-receipt (list.json) history.
 
@@ -59,6 +60,7 @@ def sync_dart_filings(
             "tickers": tickers,
             "rate_limit_seconds": rate_limit_seconds,
             "force": force,
+            "include_delisted": include_delisted,
         },
     )
     executor = _get_executor(filing_receipt_provider)
@@ -69,7 +71,11 @@ def sync_dart_filings(
     result = DartFilingReceiptSyncResult()
     today = today or now_kst().date()
     try:
-        targets = storage.get_dart_corp_master(active_only=True, tickers=tickers)
+        targets = storage.get_dart_corp_master(
+            active_only=True,
+            tickers=tickers,
+            include_delisted=include_delisted,
+        )
         if not targets:
             raise RuntimeError(
                 "No active OpenDART corp mappings found. Run `dart sync-corp` first."

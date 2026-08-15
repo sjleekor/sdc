@@ -526,6 +526,7 @@ def _handle_dart_sync_corp_profile(args: argparse.Namespace) -> None:
         tickers=tickers,
         rate_limit_seconds=args.rate_limit_seconds,
         force=args.force,
+        include_delisted=args.include_delisted,
     )
 
     _exit_if_opendart_key_exhausted(result, "OpenDART corp profile sync")
@@ -672,6 +673,7 @@ def _handle_dart_sync_financials(args: argparse.Namespace) -> None:
         allowed_year_report_pairs=allowed_year_report_pairs,
         skip_request_keys=skip_request_keys,
         run_params_extra=run_params_extra,
+        include_delisted=args.include_delisted,
     )
 
     if result.errors:
@@ -815,6 +817,7 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
         allowed_year_report_pairs=allowed_year_report_pairs,
         skip_request_keys=skip_request_keys,
         run_params_extra=run_params_extra,
+        include_delisted=args.include_delisted,
     )
 
     if result.errors:
@@ -957,6 +960,7 @@ def _handle_dart_sync_xbrl(args: argparse.Namespace) -> None:
         allowed_year_report_pairs=allowed_year_report_pairs,
         skip_request_keys=skip_request_keys,
         run_params_extra=run_params_extra,
+        include_delisted=args.include_delisted,
     )
 
     if result.errors:
@@ -1009,6 +1013,7 @@ def _handle_dart_sync_filings(args: argparse.Namespace) -> None:
         tickers=tickers,
         rate_limit_seconds=args.rate_limit_seconds,
         force=args.force,
+        include_delisted=args.include_delisted,
     )
 
     if result.errors:
@@ -2282,6 +2287,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Re-fetch corporations that already have a profile.",
     )
+    dart_sync_corp_profile.add_argument(
+        "--include-delisted",
+        action="store_true",
+        default=False,
+        help=(
+            "Target the historical listed set (every corp that ever had a "
+            "ticker, 3,959) instead of currently-listed corps only (2,657). "
+            "Delisted names are otherwise unreachable."
+        ),
+    )
     dart_sync_corp_profile.set_defaults(handler=_handle_dart_sync_corp_profile)
 
     dart_sync_financials = dart_sub.add_parser(
@@ -2343,6 +2358,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=3,
         help="Days to skip request keys that recently returned no-data.",
     )
+    dart_sync_financials.add_argument(
+        "--include-delisted",
+        action="store_true",
+        default=False,
+        help=(
+            "Target the historical listed set (every corp that ever had a "
+            "ticker, 3,959) instead of currently-listed corps only (2,657). "
+            "Delisted names are otherwise unreachable."
+        ),
+    )
     dart_sync_financials.set_defaults(handler=_handle_dart_sync_financials)
 
     dart_sync_share_info = dart_sub.add_parser(
@@ -2398,6 +2423,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=3,
         help="Days to skip request keys that recently returned no-data.",
+    )
+    dart_sync_share_info.add_argument(
+        "--include-delisted",
+        action="store_true",
+        default=False,
+        help=(
+            "Target the historical listed set (every corp that ever had a "
+            "ticker, 3,959) instead of currently-listed corps only (2,657). "
+            "Delisted names are otherwise unreachable."
+        ),
     )
     dart_sync_share_info.set_defaults(handler=_handle_dart_sync_share_info)
 
@@ -2455,6 +2490,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=3,
         help="Days to skip request keys that recently returned no-data.",
     )
+    dart_sync_xbrl.add_argument(
+        "--include-delisted",
+        action="store_true",
+        default=False,
+        help=(
+            "Target the historical listed set (every corp that ever had a "
+            "ticker, 3,959) instead of currently-listed corps only (2,657). "
+            "Delisted names are otherwise unreachable."
+        ),
+    )
     dart_sync_xbrl.set_defaults(handler=_handle_dart_sync_xbrl)
 
     dart_sync_filings = dart_sub.add_parser(
@@ -2481,6 +2526,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Re-download even when receipts already exist for a (corp, year) window.",
+    )
+    dart_sync_filings.add_argument(
+        "--include-delisted",
+        action="store_true",
+        default=False,
+        help=(
+            "Target the historical listed set (every corp that ever had a "
+            "ticker, 3,959) instead of currently-listed corps only (2,657). "
+            "Delisted names are otherwise unreachable."
+        ),
     )
     dart_sync_filings.set_defaults(handler=_handle_dart_sync_filings)
 

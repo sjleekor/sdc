@@ -90,7 +90,10 @@ class FakeStorage:
         self.recorded_runs: list = []
 
     def get_dart_corp_master(
-        self, active_only: bool = True, tickers: list[str] | None = None
+        self,
+        active_only: bool = True,
+        tickers: list[str] | None = None,
+        include_delisted: bool = False,
     ) -> list[DartCorp]:
         if tickers:
             return [c for c in self._corps if c.ticker in tickers]
@@ -235,3 +238,33 @@ def test_empty_target_set_fails_the_run() -> None:
 
     assert "pipeline" in result.errors
     assert storage.recorded_runs[-1].status is RunStatus.FAILED
+
+
+def test_include_delisted_is_threaded_to_the_target_query() -> None:
+    # poc/survivorship_gap.md: every DART raw table covers ~2% of the 1,330
+    # delisted names because targets come from active_only=True. The flag has
+    # to reach the query, not just the signature.
+    class _Recording(FakeStorage):
+        def __init__(self, corps):
+            super().__init__(corps)
+            self.calls: list[dict] = []
+
+        def get_dart_corp_master(
+            self,
+            active_only: bool = True,
+            tickers: list[str] | None = None,
+            include_delisted: bool = False,
+        ) -> list[DartCorp]:
+            self.calls.append(
+                {
+                    "active_only": active_only,
+                    "tickers": tickers,
+                    "include_delisted": include_delisted,
+                }
+            )
+            return list(self._corps)
+
+    storage = _Recording([_corp("005930")])
+    _run(storage, FakeProvider(), include_delisted=True)
+
+    assert storage.calls == [{"active_only": True, "tickers": None, "include_delisted": True}]

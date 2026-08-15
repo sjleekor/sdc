@@ -96,6 +96,7 @@ class Storage(Protocol):
         self,
         active_only: bool = True,
         tickers: list[str] | None = None,
+        include_delisted: bool = False,
     ) -> list[DartCorp]:
         """Return OpenDART corp-code rows mapped to local tickers.
 
@@ -103,6 +104,16 @@ class Storage(Protocol):
             active_only: If ``True``, restrict to rows matched to active
                 ``stock_master`` records.
             tickers: Optional ticker allowlist.
+            include_delisted: If ``True``, return the HISTORICAL listed set —
+                every corp that ever carried a stock_code, listed today or not
+                (3,959 vs 2,657).  ``active_only`` is ignored.
+
+                This is not the same as ``active_only=False``, which would also
+                return the ~112k corps that never had a ticker.  corpCode.xml
+                keeps ``stock_code`` after delisting, so the mapping for the
+                1,330 delisted names is already stored — the default filter is
+                the only reason every DART raw table covers ~2% of them
+                (`poc/survivorship_gap.md`).
 
         Returns:
             List of OpenDART corp-code rows.

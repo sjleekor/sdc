@@ -403,6 +403,7 @@ class MockShareInfoStorage:
         self,
         active_only: bool = True,
         tickers: list[str] | None = None,
+        include_delisted: bool = False,
     ) -> list[DartCorp]:
         records = [_sample_corp()]
         if tickers is None:

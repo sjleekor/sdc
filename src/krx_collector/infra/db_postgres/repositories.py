@@ -417,6 +417,7 @@ class PostgresStorage:
         self,
         active_only: bool = True,
         tickers: list[str] | None = None,
+        include_delisted: bool = False,
     ) -> list[DartCorp]:
         """Return OpenDART corp master rows mapped to local tickers."""
         records: list[DartCorp] = []
@@ -426,7 +427,13 @@ class PostgresStorage:
                 conditions: list[str] = []
                 params: list[object] = []
 
-                if active_only:
+                if include_delisted:
+                    # The HISTORICAL listed set: every corp that ever carried a
+                    # stock_code, whether or not it is listed today (3,959 vs
+                    # 2,657).  Deliberately NOT `active_only=False`, which would
+                    # also pull in the ~112k corps that never had a ticker.
+                    conditions.append("ticker IS NOT NULL AND ticker <> ''")
+                elif active_only:
                     conditions.append("is_active = TRUE")
                 if tickers:
                     conditions.append("ticker = ANY(%s)")
