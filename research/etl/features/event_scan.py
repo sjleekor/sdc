@@ -75,7 +75,11 @@ _CAL_TABLE = "_event_scan_calendar"
 # nothing at all (the source never writes 감자(유상)), so the feature could not
 # produce a negative value and every window holding a 유상감자 row was dropped
 # as unclassified. See 10_known_issues.md I3.
-EVENT_FEATURE_FORMULA_VERSION = "issuance_v3"
+#
+# v4 (2026-08-15) is not a catalog change: the position and vintage selectors
+# got total-order tiebreakers so the issuance figures stop depending on scan
+# order (10_known_issues.md I12). Bumped because the values move.
+EVENT_FEATURE_FORMULA_VERSION = "issuance_v4"
 
 # The payout feature shares this module but not this catalog: its formula is the
 # dividend/buyback TTM sum over PIT market cap. Fingerprinting it separately
@@ -86,7 +90,10 @@ EVENT_FEATURE_FORMULA_VERSION = "issuance_v3"
 #   payout_v1 — the 2026-08 rules as first scanned (§4.5).
 #   payout_v2 — direct dividend totals are unit-checked against the DPS-implied
 #               amount and negative totals rejected (10_known_issues.md I5).
-PAYOUT_FEATURE_FORMULA_VERSION = "payout_v2"
+#   payout_v3 — dividend rows are restricted to the common share (or an unsplit
+#               filing) and every winner-selection ORDER BY is a total order, so
+#               the mart stops depending on scan order (10_known_issues.md I12).
+PAYOUT_FEATURE_FORMULA_VERSION = "payout_v3"
 
 ECONOMIC_INCREASE_REASONS = frozenset(
     {
@@ -114,6 +121,27 @@ MECHANICAL_DECREASE_REASONS = frozenset(
         "무상감자",  # v2 — the same action, spelled the other way round
         "소각",
     }
+)
+
+# payout_v3: which share class a dividend row describes. ``stock_knd`` is not in
+# the row's key, so a company reporting 보통주 and 우선주 separately puts several
+# rows in one (ticker, bsns_year, row_name) group. The DPS proxy multiplies the
+# winning per-share figure by *all* shares outstanding, so picking the preferred
+# row silently prices common shares at the preferred dividend.
+#
+# Rank 0 is the common share, rank 1 is a filer that did not split by class at
+# all (one class, so the figure is the common one). Everything else — preferred
+# in its several spellings, 종류주식, and the shareholder-category rows that leak
+# into this section — is excluded rather than ranked: we cannot know what share
+# count it belongs to. Exact match only, per 04_specific_plan_B.md §4.4.2.
+COMMON_STOCK_KINDS = frozenset({"보통주", "보통주식"})
+UNSPLIT_STOCK_KINDS = frozenset({"-", ""})
+_STOCK_KIND_RANK_SQL = (
+    "CASE WHEN sr.stock_knd IN ("
+    + ", ".join(f"'{k}'" for k in sorted(COMMON_STOCK_KINDS))
+    + ") THEN 0 WHEN sr.stock_knd IS NULL OR sr.stock_knd IN ("
+    + ", ".join(f"'{k}'" for k in sorted(UNSPLIT_STOCK_KINDS))
+    + ") THEN 1 END"
 )
 
 # Unverified best guess — see module docstring. DPS's row_name is the one
@@ -252,7 +280,11 @@ def _position_vintage_sql(policy: str) -> str:
          AND v.vintage_available_from <= wp.available_from
         QUALIFY ROW_NUMBER() OVER (
             PARTITION BY wp.ticker, wp.bsns_year, wp.reprt_code
-            ORDER BY v.vintage_available_from DESC NULLS LAST, v.vintage_rcept_no DESC
+            ORDER BY v.vintage_available_from DESC NULLS LAST, v.vintage_rcept_no DESC,
+                     -- total order (I12): a filer catching up on several years at
+                     -- once (001470 filed 2018-2021 on 2023-12-12) puts multiple
+                     -- vintages at the same availability.
+                     v.vintage_bsns_year DESC NULLS LAST
         ) = 1
     ),"""
 
@@ -303,7 +335,12 @@ def build_issuance_sql(
         FROM positions
         QUALIFY ROW_NUMBER() OVER (
             PARTITION BY ticker, bsns_year, reprt_code
-            ORDER BY disclosed_date ASC NULLS LAST, rcept_no ASC
+            ORDER BY disclosed_date ASC NULLS LAST, rcept_no ASC,
+                     -- total order (I12): duplicate '합계' rows under one receipt
+                     -- would otherwise resolve by scan order.
+                     stlm_dt DESC NULLS LAST, istc_totqy DESC NULLS LAST,
+                     now_to_isu_stock_totqy DESC NULLS LAST,
+                     now_to_dcrs_stock_totqy DESC NULLS LAST
         ) = 1
     ),
     with_available AS (
@@ -427,6 +464,8 @@ def build_payout_sql(
     WITH dividend_rows AS (
         SELECT
             sr.ticker, sr.bsns_year, sr.rcept_no, sr.row_name, sr.value_numeric, sr.value_text,
+            sr.stock_knd,
+            {_STOCK_KIND_RANK_SQL} AS stock_kind_rank,
             CASE WHEN sr.rcept_no ~ '^[0-9]{{14}}$'
                  THEN strptime(left(sr.rcept_no, 8), '%Y%m%d')::DATE END AS disclosed_date
         FROM {shareholder_return_view} sr
@@ -437,9 +476,16 @@ def build_payout_sql(
     dividend_winners AS (
         SELECT *
         FROM dividend_rows
+        WHERE stock_kind_rank IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (
             PARTITION BY ticker, bsns_year, row_name
-            ORDER BY disclosed_date ASC NULLS LAST, rcept_no ASC
+            ORDER BY stock_kind_rank ASC,
+                     disclosed_date ASC NULLS LAST, rcept_no ASC,
+                     -- total order: without these, rows tying on every key above
+                     -- (the same filing's several dividend lines) resolve by scan
+                     -- order, which is parallelism-dependent. See I12.
+                     value_numeric DESC NULLS LAST, stock_knd ASC NULLS LAST,
+                     value_text ASC NULLS LAST
         ) = 1
     ),
     dividend_wide AS (
@@ -463,7 +509,9 @@ def build_payout_sql(
         WHERE metric_code IN ('issued_shares', 'treasury_shares') AND reprt_code = '11011'
         QUALIFY ROW_NUMBER() OVER (
             PARTITION BY ticker, bsns_year, metric_code
-            ORDER BY COALESCE(is_revision, FALSE) ASC, available_from ASC, rcept_no ASC
+            ORDER BY COALESCE(is_revision, FALSE) ASC, available_from ASC, rcept_no ASC,
+                     -- total order (I12)
+                     value_numeric DESC NULLS LAST
         ) = 1
     ),
     shares_wide AS (

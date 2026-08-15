@@ -131,11 +131,12 @@ def _insert_dividend_row(
     row_name: str,
     value_numeric: float | None,
     value_text: str = "",
+    stock_knd: str = "보통주",
 ) -> None:
     con.execute(
         "INSERT INTO dart_shareholder_return_raw VALUES "
-        "('00126380','005930',?,'11011',?,'dividend',?,'보통주','','','','thstrm',?,?,NULL)",
-        [bsns_year, rcept_no, row_name, value_numeric, value_text],
+        "('00126380','005930',?,'11011',?,'dividend',?,?,'','','','thstrm',?,?,NULL)",
+        [bsns_year, rcept_no, row_name, stock_knd, value_numeric, value_text],
     )
 
 
@@ -971,3 +972,78 @@ def test_negative_buyback_cash_is_dropped_not_summed() -> None:
     row = _row(con, date(2024, 3, 15))
     assert row[idx["buyback_cash_ttm"]] is None
     assert row[idx["ev_payout_yield"]] == pytest.approx(10 * 1_000_000 / 1_000_000_000)
+
+
+def test_dps_proxy_uses_the_common_share_row_not_the_preferred_one() -> None:
+    """payout_v3: stock_knd is not in the row key, so both classes compete.
+
+    The proxy multiplies the winning per-share figure by all shares outstanding,
+    so picking the preferred row prices common shares at the preferred dividend.
+    Both rows come from one filing and tie on every other key, which is also
+    what made the mart depend on scan order. See 10_known_issues.md I12.
+    """
+    con = _base_con()
+    for stock_knd, dps in [("우선주", 900), ("보통주", 500)]:
+        _insert_dividend_row(
+            con,
+            bsns_year=2023,
+            rcept_no="20240310000001",
+            row_name="주당 현금배당금(원)",
+            value_numeric=dps,
+            stock_knd=stock_knd,
+        )
+    _insert_shares_instant(
+        con, bsns_year=2023, rcept_no="20240310000002", issued=1000, treasury=100
+    )
+    _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+    _register(con)
+
+    idx = {c: i for i, c in enumerate(_columns(con))}
+    row = _row(con, date(2024, 3, 15))
+    assert row[idx["dividend_source"]] == "dps_proxy"
+    assert row[idx["cash_dividends_total"]] == 500 * (1000 - 100)
+
+
+def test_dividend_row_of_an_unknown_share_class_is_not_used() -> None:
+    """A 종류주식 row cannot be matched to a share count, so it is dropped."""
+    con = _base_con()
+    _insert_dividend_row(
+        con,
+        bsns_year=2023,
+        rcept_no="20240310000001",
+        row_name="주당 현금배당금(원)",
+        value_numeric=500,
+        stock_knd="종류주식",
+    )
+    _insert_shares_instant(
+        con, bsns_year=2023, rcept_no="20240310000002", issued=1000, treasury=100
+    )
+    _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+    _register(con)
+
+    idx = {c: i for i, c in enumerate(_columns(con))}
+    row = _row(con, date(2024, 3, 15))
+    assert row[idx["cash_dividends_total"]] is None
+    assert row[idx["ev_payout_yield"]] is None
+
+
+def test_unsplit_dividend_row_is_treated_as_the_common_share() -> None:
+    """A filer with one share class writes '-'; that figure is still usable."""
+    con = _base_con()
+    _insert_dividend_row(
+        con,
+        bsns_year=2023,
+        rcept_no="20240310000001",
+        row_name="주당 현금배당금(원)",
+        value_numeric=500,
+        stock_knd="-",
+    )
+    _insert_shares_instant(
+        con, bsns_year=2023, rcept_no="20240310000002", issued=1000, treasury=100
+    )
+    _insert_pit(con, trade_date=date(2024, 3, 15), market_cap=1_000_000_000)
+    _register(con)
+
+    idx = {c: i for i, c in enumerate(_columns(con))}
+    row = _row(con, date(2024, 3, 15))
+    assert row[idx["cash_dividends_total"]] == 500 * (1000 - 100)
