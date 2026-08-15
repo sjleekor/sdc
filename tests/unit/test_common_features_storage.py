@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
@@ -260,3 +261,25 @@ def test_execute_values_counted_omits_template_when_unset(monkeypatch) -> None:
     repositories._execute_values_counted(cur, "INSERT ...", [(1,)], template="(%s)")
 
     assert seen == [{}, {"template": "(%s)"}]
+
+
+def test_the_helper_is_the_only_execute_values_call_site() -> None:
+    """Every batched write goes through the counting helper.
+
+    O-6 replaced 19 call sites and left three behind, and one of them --
+    ``upsert_stock_master`` -- read ``cur.rowcount`` straight after a paged
+    write. stock_master holds 2,794 rows against a 1,000-row page, so the daily
+    universe sync recorded roughly 794 in ``ingestion_runs`` every single day.
+
+    Counting call sites by hand is how the three got missed, so the rule is
+    mechanical instead: the module may name ``execute_values`` exactly once, in
+    the helper. A new caller that wants no count still routes through it and
+    ignores the return value.
+    """
+    source = inspect.getsource(repositories)
+    call_sites = source.count("psycopg2.extras.execute_values(")
+
+    assert call_sites == 1, (
+        f"{call_sites} execute_values call sites; batched writes must go through "
+        "_execute_values_counted so cur.rowcount cannot report only the last page"
+    )

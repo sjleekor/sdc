@@ -183,15 +183,19 @@ class PostgresStorage:
                     for s in stocks
                 ]
 
-                # psycopg2 execute_values doesn't easily tell us inserted vs updated count directly
-                # We will approximate or just use rowcount for total affected.
-                # Actually, DO UPDATE returns the affected rows if we append RETURNING.
-
-                # To accurately count, we can do a standard execute_values.
+                # The upsert cannot separate inserted from updated, so the whole
+                # affected count is reported as `updated`.
+                #
+                # It goes through the counting helper because `cur.rowcount`
+                # after a paged execute_values reports the LAST page only: with
+                # 2,794 stocks and a 1,000-row page this silently reported ~794
+                # every day (O-6 replaced the other call sites and missed this
+                # one).
+                #
                 # listing_date: a fresh non-NULL source value wins (corrections
                 #   propagate); a source NULL never clobbers a stored value.
                 # first_seen_date: set once on first insert, never overwritten.
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO stock_master
@@ -210,10 +214,7 @@ class PostgresStorage:
                         updated_at      = now()
                     """,
                     master_args,
-                    page_size=1000,
                 )
-                # Approximation: we can just count total as updated for upsert
-                result.updated = cur.rowcount
 
         return result
 
@@ -453,7 +454,7 @@ class PostgresStorage:
                     for record in records
                 ]
 
-                psycopg2.extras.execute_values(
+                _execute_values_counted(
                     cur,
                     """
                     INSERT INTO dart_corp_master (
@@ -480,7 +481,6 @@ class PostgresStorage:
                         updated_at = now()
                     """,
                     args,
-                    page_size=1000,
                 )
 
         return result
@@ -3078,7 +3078,7 @@ class PostgresStorage:
                     )
                 ]
                 if input_args:
-                    psycopg2.extras.execute_values(
+                    _execute_values_counted(
                         cur,
                         """
                         INSERT INTO common_feature_catalog_input (
@@ -3090,7 +3090,6 @@ class PostgresStorage:
                         ON CONFLICT (feature_code, series_id, role) DO NOTHING
                         """,
                         input_args,
-                        page_size=1000,
                     )
         return result
 
