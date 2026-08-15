@@ -43,6 +43,7 @@ import contextlib
 import io
 import logging
 import os
+import time
 from collections.abc import Callable
 from functools import lru_cache
 from types import ModuleType
@@ -56,6 +57,59 @@ class KrxLoginUnavailableError(RuntimeError):
     """KRX's login endpoint did not answer with JSON, so pykrx cannot be used."""
 
 
+# A failed login must not be retried per call.
+#
+# ``lru_cache`` does not cache exceptions, and a failed ``from pykrx import
+# stock`` leaves nothing in ``sys.modules``, so every caller re-runs the whole
+# import — including ``webio``'s import-time login, which is a warmup GET, a
+# login-page GET and a login POST. Three requests to KRX's login endpoint, per
+# call, producing nothing.
+#
+# Measured on one 20-minute run during the 2026-08-16 block: 32 failed dates
+# became 32 login flows, ~96 requests to MDCCOMS001D1.cmd with zero useful work.
+# KRX restricted the IP for "자동화 수단을 통한 비정상 대량 조회", and repeatedly
+# retrying the *login* is the single worst-looking thing to do while blocked.
+#
+# So the failure is cached with a cooldown that grows: a network blip still
+# recovers within a minute, while a real block costs four login attempts an hour
+# instead of hundreds.
+_LOGIN_FAILURE_COOLDOWNS = (60.0, 300.0, 900.0, 3600.0)
+
+_login_failure: tuple[float, KrxLoginUnavailableError] | None = None
+_login_failure_count = 0
+
+
+def reset_krx_login_failure_state() -> None:
+    """Forget a cached login failure. For tests, and for an operator retrying."""
+    global _login_failure, _login_failure_count
+    _login_failure = None
+    _login_failure_count = 0
+
+
+def _cached_login_failure(now: float) -> KrxLoginUnavailableError | None:
+    if _login_failure is None:
+        return None
+    failed_at, error = _login_failure
+    index = min(_login_failure_count, len(_LOGIN_FAILURE_COOLDOWNS)) - 1
+    cooldown = _LOGIN_FAILURE_COOLDOWNS[max(index, 0)]
+    remaining = cooldown - (now - failed_at)
+    if remaining <= 0:
+        return None
+    logger.warning(
+        "Skipping the KRX login: it failed %.0fs ago and the cooldown has %.0fs left. "
+        "Retrying the login while blocked is what gets an IP restricted.",
+        now - failed_at,
+        remaining,
+    )
+    return error
+
+
+def _record_login_failure(error: KrxLoginUnavailableError, now: float) -> None:
+    global _login_failure, _login_failure_count
+    _login_failure_count += 1
+    _login_failure = (now, error)
+
+
 @lru_cache(maxsize=1)
 def get_pykrx_stock_module() -> ModuleType:
     """Import pykrx.stock after loading KRX credentials, suppressing auth chatter.
@@ -63,8 +117,15 @@ def get_pykrx_stock_module() -> ModuleType:
     Raises:
         KrxLoginUnavailableError: KRX's login endpoint returned something other
             than JSON. ``pykrx.website.comm.webio`` logs in at *import* time, so
-            this takes the whole library down, not one call.
+            this takes the whole library down, not one call. A failure is cached
+            for a growing cooldown, so callers after the first one fail without
+            touching KRX at all.
     """
+    now = time.monotonic()
+    cached = _cached_login_failure(now)
+    if cached is not None:
+        raise cached
+
     configure_krx_credentials_from_settings()
     captured_output = io.StringIO()
     try:
@@ -80,13 +141,16 @@ def get_pykrx_stock_module() -> ModuleType:
         # repeated once per target, with nothing naming the actual cause —
         # which is what a KRX maintenance window looks like from in here.
         # Observed 2026-08-16 from roughly 23:54 KST onward.
-        raise KrxLoginUnavailableError(
+        error = KrxLoginUnavailableError(
             "KRX login returned a non-JSON response, so `import pykrx` fails and "
             "every pykrx collector is blocked. This is an upstream condition "
             "(maintenance window or a block), not a credential problem — verify "
             "with a KRX MDC collector, which authenticates separately. Re-run "
             f"when KRX answers again. Underlying error: {exc}"
-        ) from exc
+        )
+        error.__cause__ = exc
+        _record_login_failure(error, now)
+        raise error
 
     output = captured_output.getvalue()
     if "KRX 로그인 실패" in output:
@@ -94,15 +158,25 @@ def get_pykrx_stock_module() -> ModuleType:
     elif "KRX 로그인 완료" in output:
         logger.info("pykrx KRX login completed.")
 
+    reset_krx_login_failure_state()
     return stock
 
 
 def refresh_pykrx_session() -> bool:
     """Force pykrx to log in to KRX again, regardless of its expiry clock.
 
+    Shares the login-failure cooldown with :func:`get_pykrx_stock_module`. A
+    refresh is another three requests to the login endpoint, and during a block
+    the empty-streak trigger would fire one every few calls — the same
+    amplification, through a different door.
+
     Returns:
         ``True`` when a new session was established.
     """
+    now = time.monotonic()
+    if _cached_login_failure(now) is not None:
+        return False
+
     configure_krx_credentials_from_settings()
     login_id = os.getenv("KRX_ID")
     login_pw = os.getenv("KRX_PW")
@@ -122,11 +196,26 @@ def refresh_pykrx_session() -> bool:
         return False
 
     captured_output = io.StringIO()
-    with contextlib.redirect_stdout(captured_output), contextlib.redirect_stderr(captured_output):
-        refreshed = bool(session.refresh(login_id, login_pw))
+    try:
+        with (
+            contextlib.redirect_stdout(captured_output),
+            contextlib.redirect_stderr(captured_output),
+        ):
+            refreshed = bool(session.refresh(login_id, login_pw))
+    except ValueError as exc:
+        # Same non-JSON login response as the import path; record it so the
+        # cooldown covers both doors.
+        error = KrxLoginUnavailableError(
+            f"KRX login returned a non-JSON response during a session refresh: {exc}"
+        )
+        error.__cause__ = exc
+        _record_login_failure(error, now)
+        logger.warning("KRX session refresh failed: the login endpoint is not answering.")
+        return False
 
     if refreshed:
         logger.info("KRX session re-established after a failed response.")
+        reset_krx_login_failure_state()
     else:
         logger.warning("KRX session refresh failed.")
     return refreshed
