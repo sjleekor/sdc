@@ -44,6 +44,7 @@ class CommonSeriesFreshness:
 @dataclass(frozen=True, slots=True)
 class FreshnessReport:
     price_latest_date: date | None
+    market_cap_latest_date: date | None = None
     flow_metric_latest_dates: dict[str, date] = field(default_factory=dict)
     flow_group_latest_dates: dict[str, date | None] = field(default_factory=dict)
     common_series: list[CommonSeriesFreshness] = field(default_factory=list)
@@ -102,6 +103,7 @@ def build_freshness_report(storage: Storage, *, running_limit: int = 20) -> Fres
 
     return FreshnessReport(
         price_latest_date=storage.get_latest_daily_price_date(),
+        market_cap_latest_date=storage.get_latest_market_cap_date(),
         flow_metric_latest_dates=flow_metric_latest_dates,
         flow_group_latest_dates=flow_group_latest_dates,
         common_series=common_series,
@@ -189,6 +191,7 @@ def evaluate_staleness(
             )
 
     check("daily_ohlcv", report.price_latest_date, trading_threshold, "trading")
+    check("daily_market_cap", report.market_cap_latest_date, trading_threshold, "trading")
 
     for group, latest in sorted(report.flow_group_latest_dates.items()):
         check(f"krx_security_flow_raw:{group}", latest, trading_threshold, "trading")

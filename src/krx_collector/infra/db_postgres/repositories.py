@@ -3744,3 +3744,14 @@ class PostgresStorage:
         if not row or row[0] is None:
             return None
         return row[0]
+
+    def get_latest_market_cap_date(self) -> date | None:
+        """Return the latest stored ``daily_market_cap`` trade_date."""
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT MAX(trade_date) FROM daily_market_cap")
+                row = cur.fetchone()
+
+        if not row or row[0] is None:
+            return None
+        return row[0]

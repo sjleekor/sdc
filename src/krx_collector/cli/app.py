@@ -302,6 +302,7 @@ def _handle_ops_freshness_report(args: argparse.Namespace) -> None:
 
     print("✅ Freshness report generated.")
     print(f"   - daily_ohlcv latest: {report.price_latest_date or '-'}")
+    print(f"   - daily_market_cap latest: {report.market_cap_latest_date or '-'}")
 
     print("   - flow group latest:")
     for group, latest in sorted(report.flow_group_latest_dates.items()):

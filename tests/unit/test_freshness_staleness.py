@@ -35,11 +35,13 @@ NO_HOLIDAYS: set[date] = set()
 def _report(
     *,
     price: date | None = FRIDAY,
+    market_cap: date | None = FRIDAY,
     flows: dict[str, date | None] | None = None,
     common: list[CommonSeriesFreshness] | None = None,
 ) -> FreshnessReport:
     return FreshnessReport(
         price_latest_date=price,
+        market_cap_latest_date=market_cap,
         flow_group_latest_dates={"investor_net_buy": FRIDAY} if flows is None else flows,
         common_series=common or [],
     )
@@ -60,6 +62,7 @@ def test_reproduces_the_2026_08_14_outage() -> None:
     # evening window looked like in the database.
     report = _report(
         price=THURSDAY,
+        market_cap=THURSDAY,
         flows={"investor_net_buy": THURSDAY, "short_selling": THURSDAY},
         common=[
             CommonSeriesFreshness("market_kospi_close_krx", Source.KRX, THURSDAY),
@@ -71,6 +74,7 @@ def test_reproduces_the_2026_08_14_outage() -> None:
 
     assert {finding.domain for finding in findings} == {
         "daily_ohlcv",
+        "daily_market_cap",
         "krx_security_flow_raw:investor_net_buy",
         "krx_security_flow_raw:short_selling",
         "common:market_kospi_close_krx",
@@ -100,6 +104,16 @@ def test_an_empty_table_is_stale_rather_than_skipped() -> None:
 
     assert [finding.domain for finding in findings] == ["daily_ohlcv"]
     assert findings[0].latest is None
+
+
+def test_market_cap_is_gated_alongside_prices() -> None:
+    # daily_market_cap becomes a daily job, so leaving it out of the gate would
+    # recreate the exact hole the gate exists to close. It is empty until the
+    # N1 backfill lands, and empty is stale -- so schedule the gate after the
+    # backfill, do not carve out an exemption for it.
+    findings = _evaluate(_report(market_cap=None))
+
+    assert [finding.domain for finding in findings] == ["daily_market_cap"]
 
 
 def test_release_lagged_sources_get_a_calendar_budget() -> None:

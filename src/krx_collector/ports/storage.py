@@ -834,3 +834,7 @@ class Storage(Protocol):
     ) -> date | None:
         """Return the latest stored daily OHLCV trade_date for selected tickers."""
         ...
+
+    def get_latest_market_cap_date(self) -> date | None:
+        """Return the latest stored ``daily_market_cap`` trade_date."""
+        ...
