@@ -99,7 +99,7 @@ ledger ────────────→ N6 (16만 호출 재개)
   - [x] `db init` → 테이블·인덱스 3개 생성 확인 (컬럼 10개, nullable 정확)
   - [x] exporter `plan --tables daily_market_cap` → `strategy=date_month columns=10`,
         `warning: source table is empty` (데이터 없이 통과)
-  - [ ] `db sync-remote --full-refresh` 미러링 확인 — **prod에 테이블이 생긴 뒤**(D-2) 가능
+  - [x] `db sync-remote` 미러링 확인 (2026-08-15, D-2 이후) — 오류 0
 - [x] **N1-3 도메인 + 포트 + 어댑터** (2026-08-15)
   - [x] `DailyMarketCapRow` · `DailyMarketCapResult` · `MarketCapBackfillResult`
   - [x] `RunType.MARKET_CAP_BACKFILL`
@@ -239,13 +239,21 @@ ledger ────────────→ N6 (16만 호출 재개)
 
 차수마다 반복한다. 체크박스는 차수별로 복제해 쓴다.
 
-- [ ] **D-1** **`sdc-release` 스킬**로 릴리즈 — 버전 범프 → lint+unit → 커밋 → 태그 → sj2 compose
-- [ ] **D-2** prod DDL 적용 (`db init`) — 새 테이블·컬럼
-- [ ] **D-3** `deploy/prod/bin/` 래퍼 스크립트 추가
+- [x] **D-0 (신규) main 정합화** — v0.9.0~v0.9.2가 **브랜치에서만 태깅돼 main에 없었다.**
+      prod가 main에 없는 코드로 돌던 상태. PR #1로 58커밋 머지
+- [x] **D-1 릴리즈 v0.9.3** (2026-08-15) — main에서 태그, GHCR 빌드 성공, 이미지 pull 완료
+  - [x] **부수 결함 수정** — 릴리즈는 원격 compose만 갱신하고 저장소 파일은 그대로 둔다.
+        `deploy_to_sj2.sh`가 그걸 덮어쓰므로 **문서대로 배포하면 prod가 조용히 롤백된다.**
+        실제로 원격 v0.9.3 / 저장소 v0.8.16으로 **네 릴리즈만큼 벌어져 있었다**
+- [x] **D-2 prod DDL 적용** — `daily_market_cap`(인덱스 3개) + `dart_corp_master` 컬럼 6개.
+      `db sync-remote` 미러링도 통과 → **등록 6곳이 실제 환경에서 끝까지 확인됐다**
+- [x] **D-3 `deploy/prod/bin/` 래퍼 3개** — market-cap / backfill-snapshots / corp-profile.
+      pykrx 계열은 `krx_marketdata` 락 공유(exit 75 회피), DART는 `opendart`
 - [ ] **D-4** Cronicle **일회성 백필 이벤트** 등록 → **끝나면 삭제** (`common-backfill-2015` 사례)
 - [ ] **D-5** Cronicle **정기 증분 이벤트** 추가 — N1 일별, N4 월별, N2·N5 주기적 refresh
 - [ ] **D-6** **KRX 계열 exit 75 lock 회피** — 기존 `sdc_daily_krx_*` 스케줄과 시간대 분리
-- [ ] **D-7** `docs/operations.md` cron 표·런북 갱신
+- [x] **D-7** `docs/operations.md` — cron 표에 신규 잡 3개, `--universe-scope` 표,
+      `--refetch`, as-of 검증 설명
 - [ ] **D-8** 로컬 반영 — `db sync-remote --full-refresh` → `bin/raw-parquet-export-all.sh`
       → `bin/parquet-compute-all.sh`
 
