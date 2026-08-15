@@ -38,12 +38,14 @@ family가 무엇을 재는지, 그 뒤 표를 어떤 순서로 읽어야 하는�
 | 파일 | family | 등급 | 등급 근거 요약 |
 |---|---|:---:|---|
 | [08_fin_log_mcap.md](08_fin_log_mcap.md) | 규모(로그 시총) | **A** | IC -0.1115, 4개 셀 전부 A — **25개 중 요구 게이트 3개를 다 통과한 유일한 family** |
-| [09_ev_net_share_issuance_yoy.md](09_ev_net_share_issuance_yoy.md) | 순주식발행 | **A** | IC -0.0083(25개 중 최소), 4개 셀 중 1개만 A. 값의 96.3%가 0 |
-| [10_ev_payout_yield.md](10_ev_payout_yield.md) | 주주환원 수익률 | **B** | IC +0.0972(cum 120일)로 크지만 정정 비율 0.1146이 A를 막음. 장기 셀은 placebo 실패 |
-| [11_fin_value_z.md](11_fin_value_z.md) | 밸류 종합 z | **B** | 방향 일치·유의하나 표본이 2019-10부터 5년뿐. **결측 처리 버그 발견(§4)** |
+| [09_ev_net_share_issuance_yoy.md](09_ev_net_share_issuance_yoy.md) | 순주식발행 | **A** | IC -0.0221, 4개 셀 중 1개만 A. 값의 88.4%가 0 |
+| [10_ev_payout_yield.md](10_ev_payout_yield.md) | 주주환원 수익률 | **B** | IC +0.0975(cum 120일)로 크지만 정정 비율 0.1146이 A를 막음. 장기 셀은 placebo 실패 |
+| [11_fin_value_z.md](11_fin_value_z.md) | 밸류 종합 z | **B** | IC +0.1384(cum 120일)로 T2 2위. 표본은 2019-10부터 5년뿐 |
 
-**이 4개는 다른 실행의 숫자다.** Phase B `20260812T231507-f9117ce1` + 결합 AB
-`20260813T130307-f9117ce1`(snapshot `2026-08-12`, config `e55c3046…`)를 인용한다.
+**이 4개는 다른 실행의 숫자다.** Phase B `20260815T133014-8f47b5fc` + 결합 AB
+`20260815T190659-8f47b5fc`(snapshot `2026-08-12`, config `e55c3046…`)를 인용한다.
+**2026-08-15 재실행분**이며, 그 전 라운드에서 발견된 결함 수정이 반영돼 있다
+(`../10_known_issues.md`).
 config·표본 구간·BH 모집단(75개 → 113개)이 모두 달라 **01~06의 숫자와 직접
 비교하면 안 된다.** holdout 경계(2025-08-01)만 동일하다.
 
