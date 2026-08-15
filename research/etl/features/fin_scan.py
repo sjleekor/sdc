@@ -39,7 +39,9 @@ FIN_SCAN_TABLE = "feat_fin_scan_daily"
 #   fin_v1 — the 2026-08 rules as first scanned (§4.1-§4.3).
 #   fin_v2 — value components keep NULL through the winsorize step, so the
 #            ">= 2 valid components" rule actually binds (10_known_issues.md I1).
-FIN_FEATURE_FORMULA_VERSION = "fin_v2"
+#   fin_v3 — same-day metric candidates resolve to the latest fiscal period
+#            instead of scan order (10_known_issues.md I12).
+FIN_FEATURE_FORMULA_VERSION = "fin_v3"
 
 # Metrics interval-joined onto the daily panel; total_assets additionally
 # carries its own value_lag_4q (B-3) for avg_assets / asset growth.
@@ -66,7 +68,7 @@ def _metric_intervals_cte(vintage_view: str) -> str:
     return f"""
     metric_points AS (
         SELECT
-            ticker, metric_code, fs_basis, seq_key,
+            ticker, metric_code, fs_basis, seq_key, rcept_no,
             CASE WHEN metric_kind IN ('direct_interim', 'cumulative_reported')
                  THEN ttm_value ELSE standalone_value END AS daily_value,
             CASE WHEN metric_kind IN ('direct_interim', 'cumulative_reported')
@@ -75,6 +77,26 @@ def _metric_intervals_cte(vintage_view: str) -> str:
         FROM {vintage_view}
         WHERE metric_code IN {metrics_in}
     ),
+    -- fin_v3: a filer catching up files several periods at once, so more than
+    -- one value can become available on the same day — 6,024 such groups, e.g.
+    -- 038530 on 2020-08-10 carrying net income for 2016 Q4 through 2020 Q1.
+    -- ``daily_available_from`` alone is then not a total order and the interval
+    -- boundaries (and so the value read on every later date) depended on scan
+    -- order. Same-day candidates are resolved to the *latest fiscal period* —
+    -- the figure describing the company's most recent state, which is what the
+    -- daily feature means — and the losers dropped before LEAD runs, so the
+    -- interval chain is built from one row per availability date.
+    -- See 10_known_issues.md I12.
+    metric_points_ranked AS (
+        SELECT
+            *,
+            ROW_NUMBER() OVER (
+                PARTITION BY ticker, metric_code, fs_basis, daily_available_from
+                ORDER BY seq_key DESC, rcept_no DESC
+            ) AS same_day_rank
+        FROM metric_points
+        WHERE daily_available_from IS NOT NULL AND daily_value IS NOT NULL
+    ),
     metric_intervals AS (
         SELECT
             ticker, metric_code, fs_basis, daily_value, value_lag_4q,
@@ -82,8 +104,8 @@ def _metric_intervals_cte(vintage_view: str) -> str:
             LEAD(daily_available_from) OVER (
                 PARTITION BY ticker, metric_code, fs_basis ORDER BY daily_available_from
             ) AS next_available_from
-        FROM metric_points
-        WHERE daily_available_from IS NOT NULL AND daily_value IS NOT NULL
+        FROM metric_points_ranked
+        WHERE same_day_rank = 1
     )
     """
 

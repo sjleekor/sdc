@@ -443,6 +443,15 @@ def build_issuance_sql(
             THEN (economic_increase_1y - economic_decrease_1y) / istc_totqy_prior
         END AS ev_net_share_issuance_yoy
     FROM issuance_summary
+    -- issuance_v4: one position per availability date, same reason as the payout
+    -- side. 001470 filed its 2018-2021 positions together on 2023-12-12, so four
+    -- rows shared an availability and which one owned the interval depended on
+    -- scan order. Resolved to the latest fiscal period.
+    -- See 10_known_issues.md I12.
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY ticker, available_from
+        ORDER BY seq_key DESC
+    ) = 1
     """
 
 
@@ -589,6 +598,16 @@ def build_payout_sql(
         ) AS payout_available_from
     FROM dividend_resolved dr
     LEFT JOIN buyback_wide bw ON bw.ticker = dr.ticker AND bw.bsns_year = dr.bsns_year
+    -- payout_v3: one position per availability date. A filer catching up files
+    -- several years at once, and the daily interval join reads
+    -- [payout_available_from, next) — with two rows sharing a date the interval
+    -- chain, and so every later date's value, depended on scan order. Resolved
+    -- to the latest fiscal year, matching the daily feature's meaning.
+    -- See 10_known_issues.md I12.
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY dr.ticker, payout_available_from
+        ORDER BY dr.bsns_year DESC
+    ) = 1
     """
 
 
