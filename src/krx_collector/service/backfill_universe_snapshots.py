@@ -25,8 +25,6 @@ from __future__ import annotations
 
 import calendar
 import logging
-import random
-import time
 from datetime import date
 
 from krx_collector.domain.enums import Market, RunStatus, RunType, Source
@@ -36,6 +34,8 @@ from krx_collector.ports.storage import Storage
 from krx_collector.ports.universe import UniverseProvider
 from krx_collector.util.pipeline import (
     ConsecutiveFailureGuard,
+    HumanThrottle,
+    HumanThrottlePolicy,
     SourceBlockedError,
     build_run_counts,
     complete_run,
@@ -81,7 +81,7 @@ def backfill_universe_snapshots(
     markets: list[Market] | None = None,
     start: date | None = None,
     end: date | None = None,
-    rate_limit_seconds: float = 0.5,
+    throttle: HumanThrottle | None = None,
     force: bool = False,
     max_consecutive_failures: int = 5,
 ) -> UniverseSnapshotBackfillResult:
@@ -94,7 +94,8 @@ def backfill_universe_snapshots(
         markets: Markets to include in each snapshot.  Defaults to KOSPI+KOSDAQ.
         start: First date to consider.  Defaults to ``DEFAULT_START``.
         end: Last date to consider.  Defaults to today (KST).
-        rate_limit_seconds: Base delay between snapshots.
+        throttle: KRX pacing policy.  ``None`` means no pacing, which is for
+            tests; the CLI always supplies one built from the KRX settings.
         force: Re-fetch dates that already have a backfilled snapshot.
 
     Returns:
@@ -112,7 +113,6 @@ def backfill_universe_snapshots(
             "markets": [m.value for m in resolved_markets],
             "start": str(resolved_start),
             "end": str(resolved_end),
-            "rate_limit": rate_limit_seconds,
             "force": force,
             "max_consecutive_failures": max_consecutive_failures,
             "source": Source.PYKRX_BACKFILL.value,
@@ -121,12 +121,13 @@ def backfill_universe_snapshots(
     storage.record_run(run)
 
     result = UniverseSnapshotBackfillResult()
+    pacer = throttle or HumanThrottle(HumanThrottlePolicy(), logger_instance=logger)
     guard = ConsecutiveFailureGuard(
         max_consecutive_failures,
         label="universe snapshot backfill",
-        # Scales with the configured pace; 0 when throttling is off, so
-        # "no throttle" does not silently become "back off 60s".
-        backoff_seconds=rate_limit_seconds * 10,
+        # The throttle already backs off 45-180s after each error, so the guard
+        # only needs to decide when to stop, not how long to wait.
+        backoff_seconds=0.0,
         logger_instance=logger,
     )
 
@@ -151,23 +152,26 @@ def backfill_universe_snapshots(
                 result.snapshots_skipped += 1
                 continue
 
+            label = as_of.isoformat()
+            pacer.before_request(label)
             fetch = provider.fetch_universe(markets=resolved_markets, as_of=as_of)
-
-            if rate_limit_seconds > 0:
-                jitter = random.uniform(-0.2, 0.2) * rate_limit_seconds
-                time.sleep(max(0.0, rate_limit_seconds + jitter))
+            pacer.after_request()
 
             if fetch.error or fetch.snapshot is None:
                 message = fetch.error or "provider returned no snapshot"
-                result.errors[as_of.isoformat()] = message
+                result.errors[label] = message
                 logger.warning("Snapshot %s failed: %s", as_of, message)
+                pacer.backoff_after_error(label)
                 guard.record_failure(f"{as_of}: {message}")
                 continue
 
             snapshot = fetch.snapshot
             if not snapshot.records:
-                result.errors[as_of.isoformat()] = "provider returned an empty universe"
+                result.errors[label] = "provider returned an empty universe"
                 logger.warning("Snapshot %s returned no records", as_of)
+                # An empty universe on a trading day is a refusal wearing an
+                # ordinary face, so it backs off like any other error.
+                pacer.backoff_after_error(label)
                 guard.record_failure(f"{as_of}: empty universe")
                 continue
 

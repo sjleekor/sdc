@@ -96,7 +96,7 @@ class FakeStorage:
 
 
 def _run(storage: FakeStorage, provider: FakeProvider, **kwargs):
-    defaults = dict(start=START, end=END, rate_limit_seconds=0.0)
+    defaults = dict(start=START, end=END)
     defaults.update(kwargs)
     return backfill_universe_snapshots(provider=provider, storage=storage, **defaults)
 
@@ -206,3 +206,34 @@ def test_start_after_end_fails_the_run() -> None:
 
     assert "pipeline" in result.errors
     assert storage.recorded_runs[-1].status is RunStatus.FAILED
+
+
+def test_an_empty_universe_backs_off_like_any_other_error() -> None:
+    """An empty ticker list on a trading day is a refusal wearing an ordinary face.
+
+    pykrx's ``dataframe_empty_handler`` swallows the JSON decode error a blocked
+    session produces and returns an empty result, so "no records" and "the
+    source is refusing" arrive identically. Treating the empty case as a quiet
+    skip meant the run kept its normal pace straight through a block -- which is
+    what KRX restricted the collector's IP for on 2026-08-16.
+    """
+    from krx_collector.util.pipeline import HumanThrottle, HumanThrottlePolicy
+
+    slept: list[float] = []
+    throttle = HumanThrottle(
+        HumanThrottlePolicy(
+            min_delay_seconds=1.0,
+            max_delay_seconds=1.0,
+            error_backoff_min_seconds=45.0,
+            error_backoff_max_seconds=180.0,
+        ),
+        sleep_fn=slept.append,
+        monotonic_fn=lambda: 0.0,
+    )
+
+    storage = FakeStorage()
+    provider = FakeProvider(empty_on={EXPECTED_MONTH_ENDS[0]})
+
+    _run(storage, provider, throttle=throttle, max_consecutive_failures=0)
+
+    assert [s for s in slept if 45.0 <= s <= 180.0], "an empty universe must back off"

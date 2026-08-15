@@ -16,13 +16,20 @@ and a mismatch leaves the slice incomplete and retryable.
 non-session date — it returns every ticker with the prices zeroed.  The KRX
 trading calendar filters those out before any request is made; the adapter's
 zero-close drop is the second line of defence, not the first.
+
+**Pacing is the KRX policy, not a local number.**  pykrx reaches the same
+``data.krx.co.kr`` portal the MDC collectors do, so it gets the same
+:class:`~krx_collector.util.pipeline.HumanThrottle`: randomised spacing, a
+periodic long rest, and a real backoff after an error.  This service used to
+sleep a flat ``rate_limit_seconds`` with no error backoff at all — 0.4s in the
+deployed wrapper against the MDC path's 1.5–4.0s — and on 2026-08-16 KRX
+restricted the collector's IP for "자동화 수단을 통한 비정상 대량 조회".  One
+setting for one host is the point; two paces for the same portal was the defect.
 """
 
 from __future__ import annotations
 
 import logging
-import random
-import time
 from datetime import date
 
 from krx_collector.domain.enums import Market, RunStatus, RunType
@@ -36,12 +43,13 @@ from krx_collector.ports.market_cap import MarketCapProvider
 from krx_collector.ports.storage import Storage
 from krx_collector.util.pipeline import (
     ConsecutiveFailureGuard,
+    HumanThrottle,
+    HumanThrottlePolicy,
     SourceBlockedError,
     build_run_counts,
     complete_run,
     fail_run,
 )
-from krx_collector.util.retry import retry
 from krx_collector.util.time import now_kst, today_kst
 
 logger = logging.getLogger(__name__)
@@ -63,9 +71,7 @@ def backfill_market_cap(
     markets: list[Market] | None = None,
     start: date | None = None,
     end: date | None = None,
-    rate_limit_seconds: float = 0.3,
-    long_rest_interval: int = 200,
-    long_rest_seconds: float = 15.0,
+    throttle: HumanThrottle | None = None,
     force: bool = False,
     max_consecutive_failures: int = 5,
 ) -> MarketCapBackfillResult:
@@ -79,13 +85,12 @@ def backfill_market_cap(
             required, not an option.
         start: First trade date.  Defaults to ``DEFAULT_START``.
         end: Last trade date.  Defaults to today (KST).
-        rate_limit_seconds: Base delay between requests.
-        long_rest_interval: Take a long rest every N requests (0 disables).
-        long_rest_seconds: Length of the long rest.
+        throttle: KRX pacing policy.  ``None`` means no pacing, which is for
+            tests; the CLI always supplies one built from the KRX settings.
         force: Re-fetch slices that are already complete.
         max_consecutive_failures: Stop the run after this many slices fail in a
             row (0 disables).  Without it a blocked source is met with 6,000
-            slices x 4 retries; see ``ConsecutiveFailureGuard``.
+            slices; see ``ConsecutiveFailureGuard``.
 
     Returns:
         ``MarketCapBackfillResult`` with per-slice counters and errors.
@@ -102,9 +107,6 @@ def backfill_market_cap(
             "markets": [m.value for m in resolved_markets],
             "start": str(resolved_start),
             "end": str(resolved_end),
-            "rate_limit": rate_limit_seconds,
-            "long_rest_interval": long_rest_interval,
-            "long_rest_seconds": long_rest_seconds,
             "force": force,
             "max_consecutive_failures": max_consecutive_failures,
         },
@@ -112,21 +114,35 @@ def backfill_market_cap(
     storage.record_run(run)
 
     result = MarketCapBackfillResult()
-    requests_made = 0
+    pacer = throttle or HumanThrottle(HumanThrottlePolicy(), logger_instance=logger)
     guard = ConsecutiveFailureGuard(
         max_consecutive_failures,
         label="market-cap backfill",
-        # Scales with the configured pace; 0 when throttling is off, so
-        # "no throttle" does not silently become "back off 60s".
-        backoff_seconds=rate_limit_seconds * 10,
+        # The throttle already backs off 45-180s after each error, so the guard
+        # only needs to decide when to stop, not how long to wait.
+        backoff_seconds=0.0,
         logger_instance=logger,
     )
 
-    @retry(max_attempts=4, base_delay=0.5, backoff_factor=2.0)
-    def _fetch_with_retry(d: date, m: Market) -> DailyMarketCapResult:
+    def _fetch_slice(d: date, m: Market, label: str) -> DailyMarketCapResult:
+        """One attempt, then one more after a KRX-grade backoff.
+
+        This used to be ``@retry(max_attempts=4, base_delay=0.5)``: four
+        requests half a second apart at the exact moment the source is
+        struggling. That is the shape KRX restricted the IP for, so the retry
+        is now single and waits out the throttle's error backoff first.
+        """
+        pacer.before_request(label)
         res = provider.fetch_by_date(trade_date=d, market=m)
+        pacer.after_request()
+        if not res.error:
+            return res
+
+        pacer.backoff_after_error(label)
+        pacer.before_request(label)
+        res = provider.fetch_by_date(trade_date=d, market=m)
+        pacer.after_request()
         if res.error:
-            # Raise so @retry can back off; the caller records the final failure.
             raise RuntimeError(res.error)
         return res
 
@@ -162,7 +178,7 @@ def backfill_market_cap(
                     continue
 
                 try:
-                    fetch = _fetch_with_retry(trade_date, market)
+                    fetch = _fetch_slice(trade_date, market, label)
                 except SourceBlockedError:
                     raise
                 except Exception as exc:  # noqa: BLE001 - collected, not raised
@@ -170,14 +186,6 @@ def backfill_market_cap(
                     logger.warning("Slice %s failed: %s", label, exc)
                     guard.record_failure(f"{label}: {exc}")
                     continue
-                finally:
-                    requests_made += 1
-                    _throttle(
-                        requests_made,
-                        rate_limit_seconds,
-                        long_rest_interval,
-                        long_rest_seconds,
-                    )
 
                 dropped = max(0, fetch.response_rows - len(fetch.rows))
                 result.rows_dropped += dropped
@@ -212,7 +220,7 @@ def backfill_market_cap(
                 slices_completed=result.slices_completed,
                 rows_upserted=result.rows_upserted,
                 rows_dropped=result.rows_dropped,
-                requests_made=requests_made,
+                requests_made=pacer.completed_requests,
             ),
             errors=result.errors,
             partial_subject="market-cap slices",
@@ -249,20 +257,3 @@ def _looks_short(
         return False
     median = same_market[len(same_market) // 2]
     return stored < median * 0.9
-
-
-def _throttle(
-    requests_made: int,
-    rate_limit_seconds: float,
-    long_rest_interval: int,
-    long_rest_seconds: float,
-) -> None:
-    """Sleep between requests, with a periodic longer rest."""
-    if long_rest_interval > 0 and requests_made % long_rest_interval == 0:
-        logger.info("Long rest for %.1fs after %d requests", long_rest_seconds, requests_made)
-        time.sleep(long_rest_seconds)
-        return
-
-    if rate_limit_seconds > 0:
-        jitter = random.uniform(-0.2, 0.2) * rate_limit_seconds
-        time.sleep(max(0.0, rate_limit_seconds + jitter))

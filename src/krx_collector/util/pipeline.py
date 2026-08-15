@@ -86,6 +86,16 @@ class HumanThrottle:
         self._completed_requests = 0
         self._last_request_finished_at: float | None = None
 
+    @property
+    def completed_requests(self) -> int:
+        """How many requests this throttle has paced.
+
+        Recorded in ``ingestion_runs`` counts: the number of requests a run
+        actually sent is the number that matters when a source starts pushing
+        back, and it is otherwise nowhere.
+        """
+        return self._completed_requests
+
     def before_request(self, label: str) -> None:
         if not self._policy.enabled():
             return

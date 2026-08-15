@@ -92,13 +92,9 @@ class FakeStorage:
 
 
 def _run(storage: FakeStorage, provider: FakeProvider, **kwargs):
-    defaults = dict(
-        start=START,
-        end=END,
-        rate_limit_seconds=0.0,
-        long_rest_interval=0,
-        long_rest_seconds=0.0,
-    )
+    # No throttle: a disabled HumanThrottlePolicy sleeps nothing, and these
+    # tests are about the loop, not the pacing.
+    defaults = dict(start=START, end=END)
     defaults.update(kwargs)
     return backfill_market_cap(provider=provider, storage=storage, **defaults)
 
@@ -244,12 +240,14 @@ def test_a_blocked_source_stops_the_run_instead_of_grinding_through_it(monkeypat
 
     result = _run(storage, provider, max_consecutive_failures=3)
 
-    # Three slices, not three requests: @retry still makes four attempts per
-    # slice, so the guard caps a blocked source at threshold x attempts (12
-    # here) instead of the full 8-slice run.
+    # Three slices, six requests. It used to be twelve: @retry made four
+    # attempts half a second apart per slice, which is the shape KRX restricted
+    # the collector's IP for on 2026-08-16. The retry is now single and waits
+    # out the throttle's error backoff first, so a blocked source costs two
+    # requests per slice instead of four.
     assert len({call for call in provider.calls}) == 3
     assert result.slices_attempted == 3
-    assert len(provider.calls) == 12
+    assert len(provider.calls) == 6
     assert "source_blocked" in result.errors
     assert storage.recorded_runs[-1].status is RunStatus.FAILED
 
@@ -278,3 +276,42 @@ def test_guard_can_be_disabled(monkeypatch) -> None:
 
     assert result.slices_attempted == len(SESSIONS) * 2
     assert "source_blocked" not in result.errors
+
+
+def test_the_throttle_paces_and_backs_off_around_every_request() -> None:
+    """KRX gets KRX pacing, whichever library makes the call.
+
+    This service used to sleep a flat ``rate_limit_seconds`` between slices with
+    no error backoff at all -- 0.4s in the deployed wrapper, against the MDC
+    path's 1.5-4.0s spacing and 45-180s post-error backoff, on the same
+    ``data.krx.co.kr`` host. On 2026-08-16 KRX restricted the collector's IP for
+    "자동화 수단을 통한 비정상 대량 조회". Two paces for one portal was the defect,
+    so the pykrx path now takes the same HumanThrottle the MDC path does.
+    """
+    from krx_collector.util.pipeline import HumanThrottle, HumanThrottlePolicy
+
+    slept: list[float] = []
+    throttle = HumanThrottle(
+        HumanThrottlePolicy(
+            min_delay_seconds=1.5,
+            max_delay_seconds=4.0,
+            error_backoff_min_seconds=45.0,
+            error_backoff_max_seconds=180.0,
+        ),
+        sleep_fn=slept.append,
+        monotonic_fn=lambda: 0.0,
+    )
+
+    storage = FakeStorage()
+    provider = FakeProvider(fail_on={(SESSIONS[0], Market.KOSPI)})
+
+    _run(storage, provider, throttle=throttle, max_consecutive_failures=0)
+
+    assert throttle.completed_requests == len(provider.calls)
+    # Every gap is inside the configured spacing, and the one failed slice
+    # bought a real backoff rather than another immediate request.
+    spacings = [s for s in slept if s <= 4.0]
+    backoffs = [s for s in slept if 45.0 <= s <= 180.0]
+    assert spacings, "requests must be spaced"
+    assert all(1.5 <= s <= 4.0 for s in spacings)
+    assert len(backoffs) == 1

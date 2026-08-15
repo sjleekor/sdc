@@ -299,6 +299,82 @@ def _handle_db_with_remote_dsn(args: argparse.Namespace) -> None:
 ABORTED_RUN_ERROR_KEYS = ("source_blocked", "pipeline")
 
 
+def _build_krx_throttle(
+    args: argparse.Namespace,
+    *,
+    logger_instance: logging.Logger | None = None,
+) -> object:
+    """Build the KRX pacing policy for a pykrx-backed backfill.
+
+    pykrx reaches the same ``data.krx.co.kr`` portal the MDC collectors do, so
+    it gets the same policy from the same settings. They used to differ by two
+    orders of magnitude — the MDC path spacing requests 1.5-4.0s apart with a
+    45-180s backoff after an error, the pykrx path sleeping a flat 0.4s with no
+    error backoff at all — and on 2026-08-16 KRX restricted the collector's IP
+    for "자동화 수단을 통한 비정상 대량 조회".
+
+    One host, one policy. ``--min-delay-seconds`` / ``--max-delay-seconds``
+    override per run; everything else comes from ``KRX_*`` settings, which is
+    the same way the MDC path is tuned.
+    """
+    from krx_collector.util.pipeline import HumanThrottle, HumanThrottlePolicy
+
+    settings = get_settings()
+    min_delay = (
+        args.min_delay_seconds
+        if args.min_delay_seconds is not None
+        else settings.krx_min_delay_seconds
+    )
+    max_delay = (
+        args.max_delay_seconds
+        if args.max_delay_seconds is not None
+        else settings.krx_max_delay_seconds
+    )
+    if min_delay > max_delay:
+        print(
+            f"❌ --min-delay-seconds ({min_delay}) must be <= "
+            f"--max-delay-seconds ({max_delay}).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    return HumanThrottle(
+        HumanThrottlePolicy(
+            min_delay_seconds=min_delay,
+            max_delay_seconds=max_delay,
+            long_rest_every=settings.krx_long_rest_every,
+            long_rest_min_seconds=settings.krx_long_rest_min_seconds,
+            long_rest_max_seconds=settings.krx_long_rest_max_seconds,
+            auth_cooldown_seconds=settings.krx_auth_cooldown_seconds,
+            error_backoff_min_seconds=settings.krx_error_backoff_min_seconds,
+            error_backoff_max_seconds=settings.krx_error_backoff_max_seconds,
+        ),
+        logger_instance=logger_instance or logger,
+    )
+
+
+def _add_krx_throttle_arguments(parser: argparse.ArgumentParser) -> None:
+    """Attach the per-run KRX pacing overrides to a pykrx-backed command."""
+    parser.add_argument(
+        "--min-delay-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Minimum spacing between KRX requests "
+            "(default: KRX_MIN_DELAY_SECONDS, the same setting the MDC path uses)."
+        ),
+    )
+    parser.add_argument(
+        "--max-delay-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Maximum spacing between KRX requests; the actual gap is random in "
+            "[min, max] (default: KRX_MAX_DELAY_SECONDS)."
+        ),
+    )
+
+
 def _exit_if_run_aborted(errors: Mapping[str, str], label: str) -> None:
     """Turn an aborted run into a non-zero exit code.
 
@@ -1598,10 +1674,12 @@ def _handle_universe_backfill_snapshots(args: argparse.Namespace) -> None:
             print(f"❌ Unknown market: {m}", file=sys.stderr)
             sys.exit(1)
 
+    throttle = _build_krx_throttle(args)
+
     print(
         f"→ universe backfill-snapshots: markets={[m.value for m in markets]}, "
-        f"start={args.start}, end={args.end}, "
-        f"rate_limit={args.rate_limit_seconds}, force={args.force}"
+        f"start={args.start}, end={args.end}, force={args.force}, "
+        f"min_delay={args.min_delay_seconds}, max_delay={args.max_delay_seconds}"
     )
 
     from krx_collector.adapters.universe_pykrx.provider import (
@@ -1618,7 +1696,7 @@ def _handle_universe_backfill_snapshots(args: argparse.Namespace) -> None:
         markets=markets,
         start=args.start,
         end=args.end,
-        rate_limit_seconds=args.rate_limit_seconds,
+        throttle=throttle,
         force=args.force,
         max_consecutive_failures=args.max_consecutive_failures,
     )
@@ -1781,18 +1859,6 @@ def _handle_prices_market_cap_backfill(args: argparse.Namespace) -> None:
     """Handle ``krx-collector prices market-cap-backfill``."""
     settings = get_settings()
 
-    rate_limit = args.rate_limit_seconds
-    if rate_limit is None:
-        rate_limit = settings.rate_limit_seconds
-
-    long_rest_interval = args.long_rest_interval
-    if long_rest_interval is None:
-        long_rest_interval = settings.long_rest_interval
-
-    long_rest_seconds = args.long_rest_seconds
-    if long_rest_seconds is None:
-        long_rest_seconds = settings.long_rest_seconds
-
     from krx_collector.domain.enums import Market
 
     market_arg = (args.market or "ALL").upper()
@@ -1804,12 +1870,12 @@ def _handle_prices_market_cap_backfill(args: argparse.Namespace) -> None:
         print(f"❌ Unknown market: {args.market}", file=sys.stderr)
         sys.exit(1)
 
+    throttle = _build_krx_throttle(args)
+
     print(
         f"→ prices market-cap-backfill: markets={[m.value for m in markets]}, "
         f"start={args.start}, end={args.end}, "
-        f"rate_limit={rate_limit}, "
-        f"long_rest_interval={long_rest_interval}, "
-        f"long_rest_seconds={long_rest_seconds}, "
+        f"min_delay={args.min_delay_seconds}, max_delay={args.max_delay_seconds}, "
         # No scope here: a market-cap slice is a whole market on a date, so there
         # is no per-ticker target set for UniverseScope to select.
         f"force={args.force}, max_consecutive_failures={args.max_consecutive_failures}"
@@ -1825,9 +1891,7 @@ def _handle_prices_market_cap_backfill(args: argparse.Namespace) -> None:
         markets=markets,
         start=args.start,
         end=args.end,
-        rate_limit_seconds=rate_limit,
-        long_rest_interval=long_rest_interval,
-        long_rest_seconds=long_rest_seconds,
+        throttle=throttle,
         force=args.force,
         max_consecutive_failures=args.max_consecutive_failures,
     )
@@ -3026,7 +3090,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     universe_backfill.add_argument("--start", type=_parse_date, default=None)
     universe_backfill.add_argument("--end", type=_parse_date, default=None)
-    universe_backfill.add_argument("--rate-limit-seconds", type=float, default=0.5)
+    _add_krx_throttle_arguments(universe_backfill)
     universe_backfill.add_argument(
         "--force",
         action="store_true",
@@ -3208,9 +3272,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prices_market_cap.add_argument("--start", type=_parse_date, default=None)
     prices_market_cap.add_argument("--end", type=_parse_date, default=None)
-    prices_market_cap.add_argument("--rate-limit-seconds", type=float, default=None)
-    prices_market_cap.add_argument("--long-rest-interval", type=int, default=None)
-    prices_market_cap.add_argument("--long-rest-seconds", type=float, default=None)
+    _add_krx_throttle_arguments(prices_market_cap)
     prices_market_cap.add_argument(
         "--force",
         action="store_true",
