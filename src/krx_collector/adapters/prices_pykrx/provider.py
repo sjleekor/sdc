@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-from krx_collector.adapters.pykrx_auth import get_pykrx_stock_module
+from krx_collector.adapters.pykrx_auth import call_with_session_retry, get_pykrx_stock_module
 from krx_collector.domain.enums import Market, Source
 from krx_collector.domain.models import DailyBar, DailyPriceResult
 from krx_collector.util.time import now_kst
@@ -56,7 +56,16 @@ class PykrxDailyPriceProvider:
             logger.debug(
                 "Fetching OHLCV for %s (%s) from %s to %s", ticker, market.value, start_str, end_str
             )
-            df = stock.get_market_ohlcv_by_date(start_str, end_str, ticker)
+            # An empty frame is ambiguous here: a delisted or not-yet-listed
+            # ticker has no rows in the range, and so does a ticker fetched over
+            # a dropped KRX session. The helper only acts once empties cluster,
+            # which is what a dead session looks like and scattered absent data
+            # does not. See adapters/pykrx_auth.py.
+            df = call_with_session_retry(
+                lambda: stock.get_market_ohlcv_by_date(start_str, end_str, ticker),
+                is_empty=lambda frame: frame is None or frame.empty,
+                label=f"ohlcv {ticker} {start_str}-{end_str}",
+            )
 
             if df is None or df.empty:
                 return DailyPriceResult(ticker=ticker, bars=[])

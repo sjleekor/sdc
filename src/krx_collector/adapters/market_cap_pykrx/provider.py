@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-from krx_collector.adapters.pykrx_auth import get_pykrx_stock_module
+from krx_collector.adapters.pykrx_auth import call_with_session_retry, get_pykrx_stock_module
 from krx_collector.domain.enums import Market, Source
 from krx_collector.domain.models import DailyMarketCapResult, DailyMarketCapRow
 from krx_collector.util.time import now_kst
@@ -82,7 +82,18 @@ class PykrxMarketCapProvider:
             date_str = trade_date.strftime("%Y%m%d")
 
             logger.debug("Fetching market cap for %s on %s", market.value, date_str)
-            df = stock.get_market_cap_by_ticker(date_str, market=market.value, alternative=False)
+            # The caller pre-filters to trading days, so an empty frame here is
+            # a dropped KRX session far more often than a closed market, and
+            # pykrx cannot tell because its expiry clock still says the session
+            # is good. This backfill is ~6,000 slices, long enough that the
+            # session will be dropped mid-run. See adapters/pykrx_auth.py.
+            df = call_with_session_retry(
+                lambda: stock.get_market_cap_by_ticker(
+                    date_str, market=market.value, alternative=False
+                ),
+                is_empty=lambda frame: frame is None or frame.empty,
+                label=f"market cap {market.value} {date_str}",
+            )
 
             if df is None or df.empty:
                 return DailyMarketCapResult(trade_date=trade_date, market=market, rows=[])

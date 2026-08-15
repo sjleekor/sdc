@@ -23,7 +23,7 @@ import logging
 import uuid
 from datetime import date
 
-from krx_collector.adapters.pykrx_auth import get_pykrx_stock_module
+from krx_collector.adapters.pykrx_auth import call_with_session_retry, get_pykrx_stock_module
 from krx_collector.domain.enums import ListingStatus, Market, Source
 from krx_collector.domain.models import Stock, StockUniverseSnapshot, UniverseResult
 from krx_collector.util.time import now_kst, today_kst
@@ -145,7 +145,15 @@ class PykrxHistoricalUniverseProvider:
             records: list[Stock] = []
 
             for market in markets:
-                tickers = stock.get_market_ticker_list(date_str, market=market.value)
+                # An empty ticker list on a trading day is almost always a
+                # dropped KRX session rather than an empty market, and pykrx
+                # will not notice because its expiry clock still says the
+                # session is good. See adapters/pykrx_auth.py.
+                tickers = call_with_session_retry(
+                    lambda: stock.get_market_ticker_list(date_str, market=market.value),
+                    is_empty=lambda result: not result,
+                    label=f"ticker list {market.value} {date_str}",
+                )
                 if not tickers:
                     logger.warning("pykrx returned no tickers for %s on %s", market.value, date_str)
                     continue
