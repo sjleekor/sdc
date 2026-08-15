@@ -1605,7 +1605,8 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
         f"max_auto_range_days={args.max_auto_range_days}, "
         f"new_ticker_start={args.new_ticker_start}, "
         f"allow_new_ticker_backfill={args.allow_new_ticker_backfill}, "
-        f"allow_large_range={args.allow_large_range}"
+        f"allow_large_range={args.allow_large_range}, "
+        f"refetch={args.refetch}, include_delisted={args.include_delisted}"
     )
 
     from krx_collector.domain.enums import Market
@@ -1651,6 +1652,8 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
         new_ticker_start=args.new_ticker_start,
         allow_new_ticker_backfill=args.allow_new_ticker_backfill,
         allow_large_range=args.allow_large_range,
+        refetch=args.refetch,
+        include_delisted=args.include_delisted,
     )
 
     if result.errors:
@@ -1667,6 +1670,9 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
             f"   - Clamped new-ticker starts: {result.baseline_clamped_tickers} "
             "(run full-history repair separately)"
         )
+    if "pipeline" in result.errors:
+        # A validation/pipeline failure fetched nothing; never exit 0 on it.
+        sys.exit(1)
     if args.incremental and result.errors:
         sys.exit(1)
 
@@ -2919,6 +2925,25 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Allow resolved incremental price ranges larger than the safety guard.",
+    )
+    prices_backfill.add_argument(
+        "--refetch",
+        action="store_true",
+        default=False,
+        help=(
+            "Re-fetch and overwrite the whole range instead of only filling gaps. "
+            "Needed to repair rows whose adjusted prices went stale after a split. "
+            "Cannot be combined with --incremental."
+        ),
+    )
+    prices_backfill.add_argument(
+        "--include-delisted",
+        action="store_true",
+        default=False,
+        help=(
+            "Target the full stock master instead of the active universe. "
+            "Delisted tickers are unreachable otherwise, even via --tickers."
+        ),
     )
     prices_backfill.set_defaults(handler=_handle_prices_backfill)
 

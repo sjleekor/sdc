@@ -277,3 +277,126 @@ def test_t8b_non_incremental_default_start_clamps_to_min() -> None:
 
     # start is None -> default early date is clamped up to MIN(trade_date).
     assert storage.missing_day_queries == [(ticker, stored_min, END)]
+
+
+# ---------------------------------------------------------------------------
+# --refetch / --include-delisted (poc/n1_adjusted_price_vintage.md,
+# poc/survivorship_gap.md)
+# ---------------------------------------------------------------------------
+
+
+class _RepairStorage(FakeStorage):
+    """FakeStorage plus the full-master accessor and a delisted row."""
+
+    def __init__(self, stocks: list[Stock], delisted: list[Stock] | None = None, **kwargs) -> None:
+        super().__init__(stocks, **kwargs)
+        self._delisted = delisted or []
+        self.get_stocks_calls: list[tuple] = []
+
+    def get_stocks(self, market=None, statuses=None, tickers=None):  # noqa: ANN001
+        self.get_stocks_calls.append((market, statuses, tuple(tickers or ())))
+        rows = list(self._stocks) + list(self._delisted)
+        if tickers:
+            wanted = set(tickers)
+            rows = [s for s in rows if s.ticker in wanted]
+        return rows
+
+
+def _delisted_stock(ticker: str) -> Stock:
+    return Stock(
+        ticker=ticker,
+        market=Market.KOSPI,
+        name="Gone Corp",
+        status=ListingStatus.DELISTED,
+        last_seen_date=date(2024, 6, 24),
+        source=Source.PYKRX,
+    )
+
+
+def test_refetch_ignores_gap_detection_and_covers_the_whole_range() -> None:
+    # Gap detection reports no missing days, so a plain run fetches nothing.
+    # That is exactly why a stale adjusted row can never be corrected.
+    ticker = "005930"
+    storage = _RepairStorage([_stock(ticker)], missing_days={ticker: []})
+    provider = FakeProvider()
+
+    plain = _run(storage, provider, incremental=False, start=date(2026, 6, 1), tickers=[ticker])
+    assert provider.calls == []
+    assert plain.bars_upserted == 0
+
+    provider2 = FakeProvider()
+    repaired = _run(
+        storage,
+        _p := provider2,
+        incremental=False,
+        refetch=True,
+        start=date(2026, 6, 1),
+        tickers=[ticker],
+    )
+    assert len(provider2.calls) == 1
+    assert provider2.calls[0][2] == date(2026, 6, 1)
+    assert repaired.bars_upserted == 1
+    # Gap detection must not even be consulted in refetch mode.
+    assert storage.missing_day_queries == [(ticker, date(2026, 6, 1), END)]
+
+
+def test_refetch_with_incremental_is_rejected() -> None:
+    # incremental starts after MAX(trade_date), so combining the two would
+    # re-fetch nothing while looking like a successful repair.
+    storage = _RepairStorage([_stock()])
+    provider = FakeProvider()
+
+    result = _run(storage, provider, incremental=True, refetch=True)
+
+    assert "pipeline" in result.errors
+    assert "cannot be combined" in result.errors["pipeline"]
+    assert provider.calls == []
+
+
+def test_include_delisted_reaches_a_delisted_ticker() -> None:
+    # Without the flag a delisted ticker is unreachable even by name, because
+    # --tickers filters the active-only result.
+    active, gone = "005930", "058530"
+    storage = _RepairStorage([_stock(active)], delisted=[_delisted_stock(gone)])
+
+    without = FakeProvider()
+    _run(
+        storage,
+        without,
+        incremental=False,
+        refetch=True,
+        start=date(2024, 1, 1),
+        tickers=[gone],
+    )
+    assert without.calls == []
+
+    with_flag = FakeProvider()
+    _run(
+        storage,
+        with_flag,
+        incremental=False,
+        refetch=True,
+        start=date(2024, 1, 1),
+        tickers=[gone],
+        include_delisted=True,
+    )
+    # The range is chunked yearly, so assert on which ticker was reached.
+    assert {c[0] for c in with_flag.calls} == {gone}
+
+
+def test_include_delisted_passes_the_ticker_filter_to_storage() -> None:
+    # The allowlist must be applied in the query, not by filtering an
+    # active-only result afterwards.
+    storage = _RepairStorage([_stock("005930")], delisted=[_delisted_stock("058530")])
+
+    _run(
+        storage,
+        FakeProvider(),
+        incremental=False,
+        refetch=True,
+        start=date(2024, 1, 1),
+        tickers=["058530"],
+        include_delisted=True,
+    )
+
+    assert storage.get_stocks_calls == [(Market.KOSPI, None, ("058530",))]

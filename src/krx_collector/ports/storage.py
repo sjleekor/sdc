@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from datetime import date
 from typing import Protocol, runtime_checkable
 
-from krx_collector.domain.enums import Market, RunType, Source
+from krx_collector.domain.enums import ListingStatus, Market, RunType, Source
 from krx_collector.domain.models import (
     CommonFeatureCatalogEntry,
     CommonFeatureDailyFact,
@@ -554,6 +554,31 @@ class Storage(Protocol):
 
         Returns:
             List of active stocks.
+        """
+        ...
+
+    def get_stocks(
+        self,
+        market: Market | None = None,
+        statuses: list[ListingStatus] | None = None,
+        tickers: list[str] | None = None,
+    ) -> list[Stock]:
+        """Return stock-master rows without assuming they are still listed.
+
+        ``get_active_stocks`` answers "who is listed now", which is the right
+        question for universe sync and the wrong one for a historical backfill:
+        a delisted ticker can never be targeted through it, so its price and
+        filing history stay permanently absent
+        (`poc/survivorship_gap.md`: 2.0-2.3% coverage of 1,330 delisted names).
+
+        Args:
+            market: Optional market filter.
+            statuses: Listing statuses to include.  ``None`` means every status.
+            tickers: Optional ticker allowlist, applied in SQL rather than by
+                filtering an active-only result.
+
+        Returns:
+            Matching stock-master rows.
         """
         ...
 

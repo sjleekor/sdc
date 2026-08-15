@@ -284,6 +284,50 @@ class PostgresStorage:
                 )
                 return {row[0] for row in cur.fetchall()}
 
+    def get_stocks(
+        self,
+        market: Market | None = None,
+        statuses: list[ListingStatus] | None = None,
+        tickers: list[str] | None = None,
+    ) -> list[Stock]:
+        """Return stock-master rows without assuming they are still listed."""
+        sql = "SELECT * FROM stock_master"
+        conditions: list[str] = []
+        params: list[object] = []
+
+        if statuses:
+            conditions.append("status = ANY(%s)")
+            params.append([s.value for s in statuses])
+        if market:
+            conditions.append("market = %s")
+            params.append(market.value)
+        if tickers:
+            conditions.append("ticker = ANY(%s)")
+            params.append(list(tickers))
+
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        sql += " ORDER BY ticker, market"
+
+        stocks: list[Stock] = []
+        with get_connection(self._dsn) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute(sql, params)
+                for row in cur.fetchall():
+                    stocks.append(
+                        Stock(
+                            ticker=row["ticker"],
+                            market=Market(row["market"]),
+                            name=row["name"],
+                            status=ListingStatus(row["status"]),
+                            last_seen_date=row["last_seen_date"],
+                            source=Source(row["source"]),
+                            listing_date=row["listing_date"],
+                            first_seen_date=row["first_seen_date"],
+                        )
+                    )
+        return stocks
+
     def get_active_stocks(self, market: Market | None = None) -> list[Stock]:
         """Return currently active stocks from stock_master."""
         stocks = []

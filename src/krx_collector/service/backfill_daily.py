@@ -84,10 +84,23 @@ def backfill_daily_prices(
     new_ticker_start: date | None = None,
     allow_new_ticker_backfill: bool = False,
     allow_large_range: bool = False,
+    refetch: bool = False,
+    include_delisted: bool = False,
 ) -> BackfillResult:
     """Backfill daily OHLCV bars from *provider* into *storage*.
 
     Args:
+        refetch: If ``True``, ignore what is already stored and fetch the whole
+            resolved range again, overwriting it.  Gap detection can only fill
+            holes, so without this a stored row is never corrected — and naver's
+            adjusted series is restated retroactively on every split, which
+            leaves a spurious return at the split date for any ticker whose
+            history was backfilled before it
+            (``poc/n1_adjusted_price_vintage.md``: 279 such jumps across 252
+            tickers in four months).  Mutually exclusive with ``incremental``.
+        include_delisted: If ``True``, resolve targets from the full stock
+            master rather than the active universe.  Required to reach the
+            delisted names at all — see ``poc/survivorship_gap.md``.
         incremental: If ``True``, skip per-day gap detection and instead
             fetch a single contiguous range starting from
             ``MAX(trade_date) + 1`` for each ticker. This trusts that
@@ -117,6 +130,8 @@ def backfill_daily_prices(
             "new_ticker_start": str(new_ticker_start) if new_ticker_start else None,
             "allow_new_ticker_backfill": allow_new_ticker_backfill,
             "allow_large_range": allow_large_range,
+            "refetch": refetch,
+            "include_delisted": include_delisted,
         },
     )
     storage.record_run(run)
@@ -138,12 +153,25 @@ def backfill_daily_prices(
     try:
         if lookback_days < 0:
             raise ValueError("lookback_days must be >= 0")
+        if refetch and incremental:
+            # incremental starts after MAX(trade_date) and would re-fetch
+            # nothing; silently doing that would look like a successful repair.
+            raise ValueError("refetch cannot be combined with incremental")
         if max_auto_range_days is not None and max_auto_range_days <= 0:
             raise ValueError("max_auto_range_days must be positive")
 
         # 1. Resolve ticker list
         target_stocks: list[Stock] = []
-        if tickers:
+        if include_delisted:
+            # Historical repair path.  get_active_stocks() answers "who is
+            # listed now", so a delisted ticker can never be reached through
+            # it — not even by naming it in --tickers, which filters the
+            # active result.  That is why every raw table covers only ~2% of
+            # the 1,330 delisted names (poc/survivorship_gap.md).
+            target_stocks = storage.get_stocks(market=market, tickers=tickers)
+            if not target_stocks:
+                logger.warning("No stocks matched (include_delisted=True).")
+        elif tickers:
             all_active = storage.get_active_stocks()
             ticker_set = set(tickers)
             target_stocks = [s for s in all_active if s.ticker in ticker_set]
@@ -259,8 +287,11 @@ def backfill_daily_prices(
                 continue
             try:
                 ranges: list[tuple[date, date]] = []
-                if incremental:
+                if incremental or refetch:
                     # Single contiguous range from resolved_start to resolved_end.
+                    # refetch takes the same shape as incremental but for the
+                    # opposite reason: incremental trusts stored history and
+                    # skips it, refetch distrusts it and overwrites it.
                     ranges.append((resolved_start, resolved_end))
                 else:
                     # 1. Query missing days to optimize fetching
@@ -357,5 +388,9 @@ def backfill_daily_prices(
         run.ended_at = now_kst()
         run.status = RunStatus.FAILED
         run.error_summary = str(exc)
+        # Surface the failure in the result too. Without this the run is FAILED
+        # in ingestion_runs while the CLI prints a success line and exits 0,
+        # so a scheduler sees a green run that fetched nothing.
+        result.errors["pipeline"] = str(exc)
         storage.record_run(run)
         return result
