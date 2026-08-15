@@ -24,6 +24,7 @@ import signal
 import subprocess
 import sys
 import threading
+from collections.abc import Mapping
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -288,6 +289,29 @@ def _handle_db_with_remote_dsn(args: argparse.Namespace) -> None:
         exit_code = _run_child_with_env_var(command, "SDC_REMOTE_DSN", dsn)
 
     sys.exit(exit_code)
+
+
+# Error keys that mean the run stopped early rather than finished with some
+# items failing. A run that ends with per-item errors is `partial` by design and
+# exits cleanly; these two are not partial, because the remaining work was never
+# attempted.
+ABORTED_RUN_ERROR_KEYS = ("source_blocked", "pipeline")
+
+
+def _exit_if_run_aborted(errors: Mapping[str, str], label: str) -> None:
+    """Turn an aborted run into a non-zero exit code.
+
+    The N3 snapshot backfill stopped at 5 consecutive failures exactly as
+    designed, printed the reason, wrote 23 of 146 snapshots -- and exited 0, so
+    Cronicle recorded it as a success. A stop condition the scheduler cannot see
+    is not a stop condition. Every backfill command routes its aborted cases
+    through here so a new one cannot quietly omit it (enforced by
+    tests/unit/test_cli_handler_arguments.py).
+    """
+    for key in ABORTED_RUN_ERROR_KEYS:
+        if key in errors:
+            print(f"❌ {label} aborted ({key}): {errors[key]}", file=sys.stderr)
+            sys.exit(1)
 
 
 def _handle_ops_freshness_report(args: argparse.Namespace) -> None:
@@ -1608,6 +1632,8 @@ def _handle_universe_backfill_snapshots(args: argparse.Namespace) -> None:
     print(f"   - Snapshots written:   {result.snapshots_written}")
     print(f"   - Items written:       {result.items_written}")
 
+    _exit_if_run_aborted(result.errors, "Snapshot backfill")
+
 
 def _handle_prices_backfill(args: argparse.Namespace) -> None:
     """Handle ``krx-collector prices backfill``."""
@@ -1702,10 +1728,10 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
             f"   - Clamped new-ticker starts: {result.baseline_clamped_tickers} "
             "(run full-history repair separately)"
         )
-    if "pipeline" in result.errors:
-        # A validation/pipeline failure fetched nothing; never exit 0 on it.
-        sys.exit(1)
+    _exit_if_run_aborted(result.errors, "Backfill")
     if args.incremental and result.errors:
+        # A daily catch-up that lost tickers has a gap to fill, so it must not
+        # report success even though a bulk backfill in the same state may.
         sys.exit(1)
 
 
@@ -1775,6 +1801,8 @@ def _handle_prices_market_cap_backfill(args: argparse.Namespace) -> None:
     print(f"   - Rows upserted:    {result.rows_upserted}")
     if result.rows_dropped:
         print(f"   - Rows dropped (zero close): {result.rows_dropped}")
+
+    _exit_if_run_aborted(result.errors, "Market-cap backfill")
 
 
 def _handle_validate(args: argparse.Namespace) -> None:

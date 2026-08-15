@@ -24,6 +24,8 @@ import argparse
 import ast
 import inspect
 
+import pytest
+
 from krx_collector.cli import app
 
 
@@ -111,3 +113,50 @@ def test_the_scan_actually_covers_the_cli() -> None:
 
     reads = _args_attributes_read_by_handlers()
     assert "include_delisted" not in reads["_handle_prices_backfill"]
+
+
+# Handlers that run a collector with a ConsecutiveFailureGuard. Each one can
+# abort mid-run, and an aborted run has to reach the scheduler as a non-zero
+# exit code.
+_ABORTABLE_HANDLERS = (
+    "_handle_prices_backfill",
+    "_handle_prices_market_cap_backfill",
+    "_handle_universe_backfill_snapshots",
+)
+
+
+def test_every_abortable_backfill_turns_an_aborted_run_into_a_failure() -> None:
+    # The N3 snapshot backfill stopped at 5 consecutive failures exactly as
+    # designed, wrote 23 of 146 snapshots, printed why -- and exited 0, so
+    # Cronicle filed it as a success. Two of the three commands had no exit path
+    # at all for this.
+    tree = ast.parse(inspect.getsource(app))
+    bodies = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name in _ABORTABLE_HANDLERS
+    }
+    assert set(bodies) == set(_ABORTABLE_HANDLERS), "handler renamed; update this list"
+
+    missing = [
+        name
+        for name, node in bodies.items()
+        if not any(
+            isinstance(call.func, ast.Name) and call.func.id == "_exit_if_run_aborted"
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call)
+        )
+    ]
+    assert not missing, f"aborted runs would exit 0 in: {missing}"
+
+
+def test_exit_if_run_aborted_covers_both_abort_keys_and_passes_partial_runs() -> None:
+    for key in app.ABORTED_RUN_ERROR_KEYS:
+        with pytest.raises(SystemExit) as excinfo:
+            app._exit_if_run_aborted({key: "stopped"}, "Backfill")
+        assert excinfo.value.code == 1
+
+    # Per-item failures are `partial` by design and must still exit cleanly,
+    # otherwise every bulk backfill with one bad ticker looks like an outage.
+    app._exit_if_run_aborted({"005930": "timeout"}, "Backfill")
+    app._exit_if_run_aborted({}, "Backfill")
