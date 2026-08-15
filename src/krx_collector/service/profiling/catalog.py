@@ -341,8 +341,21 @@ DART_CORP_MASTER = TableProfileSpec(
     weight=ProfileWeight.LIGHT,
     role=ProfileTableRole.RAW,
     natural_key=("corp_code",),
-    category_cols=("market", "is_active", "source"),
-    null_cols=("ticker", "market", "stock_name", "modify_date"),
+    # corp_cls is low-cardinality (Y/K/N/E); induty_code is not — it belongs in
+    # top_n_cols, and its null ratio is how N2 coverage is tracked.
+    category_cols=("market", "is_active", "source", "corp_cls"),
+    top_n_cols=("induty_code",),
+    null_cols=(
+        "ticker",
+        "market",
+        "stock_name",
+        "modify_date",
+        "induty_code",
+        "corp_cls",
+        "est_dt",
+        "acc_mt",
+        "profile_fetched_at",
+    ),
     ingest_col="updated_at",
     cost_class=CostClass.CHEAP,
     sampling=SamplingPolicy(sample_pct=None),

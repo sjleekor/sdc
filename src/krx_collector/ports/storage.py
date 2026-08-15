@@ -18,6 +18,7 @@ from krx_collector.domain.models import (
     CommonFeatureDailyFact,
     CommonFeatureObservation,
     CommonFeatureSeries,
+    CompanyProfile,
     DailyBar,
     DailyMarketCapRow,
     DartCapitalChangeLine,
@@ -105,6 +106,30 @@ class Storage(Protocol):
 
         Returns:
             List of OpenDART corp-code rows.
+        """
+        ...
+
+    def upsert_company_profiles(self, profiles: list[CompanyProfile]) -> UpsertResult:
+        """Write ``company.json`` fields onto existing ``dart_corp_master`` rows.
+
+        An UPDATE, not an upsert: a profile for a corp_code that is not already
+        in the master is a bug upstream, not a row to create.
+
+        Args:
+            profiles: Profiles to persist.
+
+        Returns:
+            Counters for the rows updated.
+        """
+        ...
+
+    def get_profiled_corp_codes(self) -> set[str]:
+        """Return corp_codes whose profile has already been fetched.
+
+        The skip-if-present key: ``profile_fetched_at IS NOT NULL``.
+
+        Returns:
+            Set of corp_codes to skip.
         """
         ...
 

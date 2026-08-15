@@ -19,6 +19,7 @@ from krx_collector.domain.models import (
     CommonFeatureDailyFact,
     CommonFeatureObservation,
     CommonFeatureSeries,
+    CompanyProfile,
     DailyBar,
     DailyMarketCapRow,
     DartCapitalChangeLine,
@@ -407,6 +408,72 @@ class PostgresStorage:
                         )
                     )
         return records
+
+    def upsert_company_profiles(self, profiles: list[CompanyProfile]) -> UpsertResult:
+        """Write company.json fields onto existing ``dart_corp_master`` rows.
+
+        An UPDATE, not an upsert — a profile whose corp_code is not already in
+        the master would be an upstream bug, and inserting it would create a row
+        with no corp_name (NOT NULL) anyway.
+        """
+        import json
+
+        if not profiles:
+            return UpsertResult()
+
+        result = UpsertResult()
+        page_size = 1000
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        p.corp_code,
+                        p.induty_code,
+                        p.corp_cls,
+                        p.est_dt,
+                        p.acc_mt,
+                        json.dumps(p.raw_payload, ensure_ascii=False),
+                        p.fetched_at,
+                    )
+                    for p in profiles
+                ]
+
+                for offset in range(0, len(args), page_size):
+                    page = args[offset : offset + page_size]
+                    psycopg2.extras.execute_values(
+                        cur,
+                        """
+                        UPDATE dart_corp_master AS m SET
+                            induty_code        = v.induty_code,
+                            corp_cls           = v.corp_cls,
+                            est_dt             = v.est_dt,
+                            acc_mt             = v.acc_mt,
+                            profile_raw        = v.profile_raw,
+                            profile_fetched_at = v.profile_fetched_at,
+                            updated_at         = now()
+                        FROM (VALUES %s) AS v (
+                            corp_code, induty_code, corp_cls, est_dt, acc_mt,
+                            profile_raw, profile_fetched_at
+                        )
+                        WHERE m.corp_code = v.corp_code
+                        """,
+                        page,
+                        template=("(%s, %s, %s, %s::date, %s, %s::jsonb, %s::timestamptz)"),
+                        page_size=len(page),
+                    )
+                    result.updated += cur.rowcount
+
+        return result
+
+    def get_profiled_corp_codes(self) -> set[str]:
+        """Return corp_codes whose profile has already been fetched."""
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT corp_code FROM dart_corp_master WHERE profile_fetched_at IS NOT NULL"
+                )
+                return {row[0] for row in cur.fetchall()}
 
     def get_existing_dart_financial_statement_keys(
         self,

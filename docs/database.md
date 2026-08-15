@@ -156,6 +156,36 @@ OpenDART `corp_code`와 KRX ticker를 연결하는 기준 테이블입니다.
 | `fetched_at`   | TIMESTAMPTZ     | 데이터를 수집한 시간               |
 | `updated_at`   | TIMESTAMPTZ     | Insert/Update 시 자동 갱신         |
 
+아래는 **기업개황 `company.json`(DS001)에서 채우는 컬럼**입니다. 위 컬럼들은
+`corpCode.xml` 벌크 zip에서 오는데 거기엔 업종이 없어서, corp_code당 1회 호출하는
+별도 API로 받습니다. 그래서 수집 시각도 따로 기록합니다.
+
+| 컬럼명               | 타입        | 비고                                       |
+|----------------------|-------------|--------------------------------------------|
+| `induty_code`        | TEXT        | KSIC 업종코드. **자릿수가 2~5로 섞입니다**  |
+| `corp_cls`           | TEXT        | Y(유가) \| K(코스닥) \| N(코넥스) \| E(기타) |
+| `est_dt`             | DATE        | 설립일 — 기업 연령(firm age) 재료          |
+| `acc_mt`             | TEXT        | 결산월 `MM`                                 |
+| `profile_raw`        | JSONB       | 원본 응답 전체 (지금 안 쓰는 필드 보존)     |
+| `profile_fetched_at` | TIMESTAMPTZ | **skip-if-present 키.** NULL이면 미수집     |
+
+**`induty_code` 자릿수가 섞이는 것이 중요합니다.** 실측(150 법인 표본)에서 2자리 3건,
+3자리 52건, 4자리 21건, 5자리 74건이 나왔습니다. 삼성전자 `264`, 크래프톤 `5821`,
+셀트리온 `21100`입니다.
+
+> 따라서 그룹핑 규칙은 **반드시 prefix**여야 합니다. `code[:2]`는 원본 길이와 무관하게
+> KSIC 중분류를 줍니다. 고정 폭을 가정한 규칙은 틀립니다.
+> 그룹 매핑은 `krx_collector.definitions.industry_groups`에 순수 코드로 있습니다.
+
+**한계 두 가지.**
+
+- **금융업과 지주회사가 갈리지 않습니다.** LG(비금융 지주)와 KB금융(은행지주)이 5자리
+  원본까지 똑같이 `64992`이고 `corp_cls`도 둘 다 `Y`입니다. 이 필드로는 분리할 수 없습니다
+- **`acc_mt != '12'`가 약 4%입니다.** 마트(`research/etl/marts/metric_vintages.py`)가
+  결산월을 12월로 하드코딩하고 있어 비12월 결산 법인의 `period_end`가 어긋납니다
+
+**인덱스(Index):** `induty_code`
+
 **기본키(Primary key):** `corp_code`
 **인덱스(Index):** `ticker`
 

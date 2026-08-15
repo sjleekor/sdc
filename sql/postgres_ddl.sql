@@ -176,6 +176,31 @@ CREATE INDEX IF NOT EXISTS ix_dart_corp_master_ticker
 CREATE INDEX IF NOT EXISTS ix_dart_corp_master_sync_cursor
     ON dart_corp_master (updated_at, corp_code);
 
+-- 7b) dart_corp_master profile columns (N2) — from company.json (DS001).
+--
+-- corpCode.xml, which fills the columns above, carries only
+-- corp_code/corp_name/stock_code/modify_date.  Industry, incorporation date and
+-- fiscal-year-end come from a separate per-corp_code endpoint, so they are
+-- added here rather than to a new table (same key, same nature) with their own
+-- fetch timestamp.
+--
+-- induty_code is KSIC and its LENGTH VARIES: 2, 3, 4 and 5 digits all occur
+-- (measured 3/52/21/74 over a 150-corp sample).  Any grouping rule must take a
+-- 2-digit prefix, which yields the KSIC middle category regardless of the
+-- source length; a rule that assumes a fixed width is wrong.
+--
+-- profile_fetched_at is the skip-if-present key: NULL means never fetched.
+ALTER TABLE dart_corp_master
+    ADD COLUMN IF NOT EXISTS induty_code        TEXT,
+    ADD COLUMN IF NOT EXISTS corp_cls           TEXT,
+    ADD COLUMN IF NOT EXISTS est_dt             DATE,
+    ADD COLUMN IF NOT EXISTS acc_mt             TEXT,
+    ADD COLUMN IF NOT EXISTS profile_raw        JSONB,
+    ADD COLUMN IF NOT EXISTS profile_fetched_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS ix_dart_corp_master_induty
+    ON dart_corp_master (induty_code);
+
 -- 8) dart_financial_statement_raw ─ raw rows from fnlttSinglAcntAll / XBRL facts
 CREATE TABLE IF NOT EXISTS dart_financial_statement_raw (
     raw_id               BIGSERIAL   PRIMARY KEY,

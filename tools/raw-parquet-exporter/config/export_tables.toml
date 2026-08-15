@@ -106,6 +106,8 @@ priority = "P1"
 extract_strategy = "full_table"
 output_partitions = []
 order_by = ["ticker", "corp_code", "modify_date"]
+# N2: without this the column exports as a string instead of JSON.
+jsonb_columns = ["profile_raw"]
 
 [[tables]]
 name = "stock_master"

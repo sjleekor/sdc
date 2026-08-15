@@ -231,8 +231,7 @@ def sync_common_features(
             elif fetch_result.no_data:
                 result.no_data_requests += 1
                 logger.info(
-                    "Common feature series returned no data: source=%s series=%s "
-                    "range=%s..%s",
+                    "Common feature series returned no data: source=%s series=%s " "range=%s..%s",
                     series.source.value,
                     series.series_id,
                     effective_start.isoformat(),
@@ -240,8 +239,7 @@ def sync_common_features(
                 )
             elif fetch_result.records:
                 logger.info(
-                    "Common feature series fetched: source=%s series=%s "
-                    "range=%s..%s records=%d",
+                    "Common feature series fetched: source=%s series=%s " "range=%s..%s records=%d",
                     series.source.value,
                     series.series_id,
                     effective_start.isoformat(),

@@ -664,6 +664,67 @@ class MarketCapBackfillResult:
     errors: dict[str, str] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class CompanyProfile:
+    """OpenDART company profile (``company.json``, DS001) for one corporation.
+
+    Attributes:
+        corp_code: OpenDART corporation code.
+        induty_code: KSIC industry code.  **Length varies** — 2, 3, 4 and 5
+            digits all occur, so any grouping rule must take a prefix rather
+            than assume a fixed width.
+        corp_cls: Y (KOSPI) / K (KOSDAQ) / N (KONEX) / E (other).
+        est_dt: Incorporation date — the input for firm age.
+        acc_mt: Fiscal-year-end month as ``MM``.  Anything other than ``12``
+            breaks the mart's hardcoded period-end calendar.
+        raw_payload: Full response, kept so unused fields stay recoverable.
+        fetched_at: KST timestamp when the profile was retrieved.
+    """
+
+    corp_code: str
+    induty_code: str | None
+    corp_cls: str | None
+    est_dt: date | None
+    acc_mt: str | None
+    raw_payload: dict
+    fetched_at: datetime
+
+
+@dataclass(slots=True)
+class CompanyProfileResult:
+    """Result of a single ``company.json`` fetch."""
+
+    profile: CompanyProfile | None = None
+    error: str | None = None
+    status_code: str | None = None
+    retryable: bool = False
+    no_data: bool = False
+    all_rate_limited: bool = False
+
+
+@dataclass(slots=True)
+class CompanyProfileSyncResult:
+    """Outcome of the DART company-profile sync.
+
+    Attributes:
+        requests_attempted: Corporations fetched.
+        requests_skipped: Corporations skipped as already profiled.
+        no_data: Corporations OpenDART had no profile for.
+        rows_upserted: Profile rows written.
+        errors: Per-corporation error messages.
+        opendart_exhaustion_reason: Set to ``"all_rate_limited"`` when every
+            OpenDART key hit its daily limit, so the CLI can exit 75 and the
+            scheduler resumes tomorrow.
+    """
+
+    requests_attempted: int = 0
+    requests_skipped: int = 0
+    no_data: int = 0
+    rows_upserted: int = 0
+    errors: dict[str, str] = field(default_factory=dict)
+    opendart_exhaustion_reason: str | None = None
+
+
 @dataclass(slots=True)
 class UniverseSnapshotBackfillResult:
     """Outcome of a historical universe-snapshot backfill run.

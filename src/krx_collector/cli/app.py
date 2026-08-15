@@ -500,6 +500,50 @@ def _handle_dart_sync_corp(args: argparse.Namespace) -> None:
         print(f"   - Sample unmatched active tickers: {preview}")
 
 
+def _handle_dart_sync_corp_profile(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector dart sync-corp-profile``."""
+    settings = get_settings()
+    tickers = _split_csv(args.tickers)
+
+    print(
+        f"→ dart sync-corp-profile: tickers={tickers}, "
+        f"rate_limit={args.rate_limit_seconds}, force={args.force}"
+    )
+
+    from krx_collector.adapters.opendart_corp.provider import OpenDartCorpCodeProvider
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.sync_dart_corp_profile import sync_dart_corp_profile
+
+    try:
+        request_executor = _build_opendart_request_executor()
+    except Exception as exc:
+        print(f"❌ OpenDART corp profile sync failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    result = sync_dart_corp_profile(
+        profile_provider=OpenDartCorpCodeProvider(request_executor=request_executor),
+        storage=PostgresStorage(settings.db_dsn),
+        tickers=tickers,
+        rate_limit_seconds=args.rate_limit_seconds,
+        force=args.force,
+    )
+
+    _exit_if_opendart_key_exhausted(result, "OpenDART corp profile sync")
+
+    if result.errors:
+        print(
+            f"⚠ OpenDART corp profile sync completed with {len(result.errors)} errors.",
+            file=sys.stderr,
+        )
+    else:
+        print("✅ OpenDART corp profile sync completed.")
+
+    print(f"   - Requests attempted: {result.requests_attempted}")
+    print(f"   - Requests skipped:   {result.requests_skipped}")
+    print(f"   - Rows upserted:      {result.rows_upserted}")
+    print(f"   - No data:            {result.no_data}")
+
+
 def _handle_dart_sync_financials(args: argparse.Namespace) -> None:
     """Handle ``krx-collector dart sync-financials``."""
     settings = get_settings()
@@ -2215,6 +2259,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Re-download even if a previous successful corp sync is recorded.",
     )
     dart_sync_corp.set_defaults(handler=_handle_dart_sync_corp)
+
+    dart_sync_corp_profile = dart_sub.add_parser(
+        "sync-corp-profile",
+        help="Fetch company.json (industry code, incorporation date, fiscal-year end).",
+    )
+    dart_sync_corp_profile.add_argument(
+        "--tickers",
+        default=None,
+        help="Comma-separated ticker allowlist (default: all ticker-mapped corps).",
+    )
+    dart_sync_corp_profile.add_argument("--rate-limit-seconds", type=float, default=0.2)
+    dart_sync_corp_profile.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Re-fetch corporations that already have a profile.",
+    )
+    dart_sync_corp_profile.set_defaults(handler=_handle_dart_sync_corp_profile)
 
     dart_sync_financials = dart_sub.add_parser(
         "sync-financials",

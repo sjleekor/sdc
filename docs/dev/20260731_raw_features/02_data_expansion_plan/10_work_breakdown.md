@@ -155,26 +155,33 @@ ledger ────────────→ N6 (16만 호출 재개)
 
 상세: [`03_w1_company_profile.md`](03_w1_company_profile.md) · 약 3,959 호출 · 단일 실행
 
-- [ ] **N2-1 PoC** (20 호출) → `poc/n2_company_profile.md`
-  - [ ] **`induty_code` 실제 자릿수 분포** — §5 결정에 직결
-  - [ ] 2자리 prefix 그룹 수와 그룹당 종목 수
-  - [ ] `acc_mt != '12'` 사례가 실제로 나오는가
-  - [ ] 지주회사·금융지주가 받는 코드
-- [ ] **N2-2 ALTER + 등록 4곳** (새 테이블이 아니라 컬럼 추가)
-  - [ ] `sql/postgres_ddl.sql` — 6개 컬럼 + `induty_code` 인덱스
-  - [ ] `remote_sync.py` — **`SYNC_TABLE_SPECS` 컬럼 목록에 추가.** 빠뜨리면 조용히 누락되고 테스트가 안 잡는다
-  - [ ] `profiling/catalog.py` — `category_cols` / `null_cols`
-  - [ ] `export_tables.toml` — `jsonb_columns = ["profile_raw"]`
-  - [ ] `docs/database.md`
-- [ ] **N2-3 어댑터 + 포트** — `opendart_corp`에 메서드 추가, 다중키 실행기 (`01` §2.2)
-- [ ] **N2-4 서비스 + CLI** — `dart sync-corp-profile`, 대상은 **ticker 매핑 3,959건만**
-- [ ] **N2-5 테스트** — 픽스처에 `acc_mt='03'`·업종 결측·필드 결측 포함
-- [ ] **N2-6 결정 3개 고정 (결과 보기 전)**
-  - [ ] 매핑안 A/B/C — **권고: B** (2자리 prefix + 금융·지주 override)
-  - [ ] 최소 그룹 크기 — **권고: 20**
-  - [ ] 금융·지주 취급 — **권고: 제외가 아니라 별도 그룹**
-- [ ] **N2-7 실행** — `dart sync-corp-profile`
-- [ ] **N2-8 `definitions/industry_groups.py`** — 순수 코드, Storage 의존 없음
+- [x] **N2-1 PoC** (158 호출) → [`poc/n2_company_profile.md`](poc/n2_company_profile.md)
+  - [x] **`induty_code` 자릿수가 2·3·4·5로 섞인다** (150 표본: 3/52/21/74). 결측 0, 오류 0
+  - [x] 2자리 prefix 36그룹, **1종목 그룹 15개** → 병합 규칙이 실제로 필요
+  - [x] **`acc_mt != '12'`가 4%** (150 중 6건 → 3,959 환산 약 158 법인)
+  - [x] **LG와 KB금융이 똑같이 `64992`** → 금융·지주 override 불가
+- [x] **N2-2 ALTER + 등록 4곳** (2026-08-15)
+  - [x] `sql/postgres_ddl.sql` — `7b)` 블록, 6개 컬럼 + `induty_code` 인덱스
+  - [x] `remote_sync.py` — 신규 6컬럼을 `updated_at` **뒤에** 붙여 커서 인덱스 9 유지
+  - [x] `profiling/catalog.py` — `corp_cls`는 `category_cols`, `induty_code`는 `top_n_cols`,
+        결측률 추적용 `null_cols` 5개 추가
+  - [x] `export_tables.toml` — `jsonb_columns = ["profile_raw"]`
+  - [x] `docs/database.md` — 컬럼 설명 + 자릿수·금융/지주·`acc_mt` 한계
+- [x] **N2-3 어댑터 + 포트** — `COMPANY_PROFILE_POLICY`, `fetch_company_profile`,
+      `CorpProfileProvider`. 다중키 실행기 + exit 75 재개
+- [x] **N2-4 서비스 + CLI** — `dart sync-corp-profile`, 대상은 **ticker 매핑된 법인만**
+- [x] **N2-5 테스트** — 유닛 18 (프로필 9 + 그룹 9). 픽스처는 **실측 코드**
+      (`264`/`5821`/`21100`/`64992`, `acc_mt='03'`)
+- [x] **N2-6 결정 3개 고정 (결과 보기 전)** — **PoC 실측에 맞춰 초안을 뒤집었다**
+  - [x] 매핑: **2자리 prefix.** 원본 길이가 2~5로 섞이므로 "N자리로 자른다"가 아니라
+        **prefix**여야 한다. 길이에 무관하게 KSIC 중분류가 나온다
+  - [x] 최소 그룹 크기 **20**, 미달 시 **KSIC 대분류(알파벳)로 병합**. 결측은 병합하지 않는다
+  - [x] 금융: **override 불가**(LG=KB금융=64992). 64·65·66을 별도 그룹으로 두되
+        **지주회사가 섞인다는 사실을 명시.** 실제 금융 판정은 계정 구조 = `metric_rules` 영역
+- [x] **N2-7 로컬 검증** — 40건 시드 → 32건 수집(결측 0), 재실행 32 skip,
+      자릿수 3/4/5 혼재 그대로 저장, 그룹 병합 동작 확인
+- [ ] **N2-7b 전량 실행** — 3,959 호출 단일 run. **prod 배포 후**
+- [x] **N2-8 `definitions/industry_groups.py`** — 순수 코드, Storage 의존 없음
 - [ ] **N2-9 `fin_scan.py` 업종 중립 variant** — 기존 경로 유지, **진단 전용**
 - [ ] **N2-10 검증 V1~V6 + 후속 판단**
   - [ ] V6 업종별 `fin_value_z` 중앙값 분산 — **이 작업의 핵심 산출물**

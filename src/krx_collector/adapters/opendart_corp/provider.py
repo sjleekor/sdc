@@ -9,18 +9,37 @@ from datetime import date
 from xml.etree import ElementTree as ET
 
 from krx_collector.adapters.opendart_common import (
+    COMPANY_PROFILE_POLICY,
     CORP_CODE_POLICY,
     OpenDartCallResult,
     OpenDartRequestExecutor,
     apply_call_result_meta,
+    decode_json_payload,
 )
 from krx_collector.domain.enums import Source
-from krx_collector.domain.models import DartCorp, DartCorpCodeResult
+from krx_collector.domain.models import (
+    CompanyProfile,
+    CompanyProfileResult,
+    DartCorp,
+    DartCorpCodeResult,
+)
 from krx_collector.util.time import now_kst
 
 logger = logging.getLogger(__name__)
 
 OPENDART_CORP_CODE_URL = "https://opendart.fss.or.kr/api/corpCode.xml"
+OPENDART_COMPANY_PROFILE_URL = "https://opendart.fss.or.kr/api/company.json"
+
+
+def _parse_yyyymmdd(value: str | None) -> date | None:
+    """Parse an OpenDART ``YYYYMMDD`` string, tolerating junk."""
+    text = (value or "").strip()
+    if len(text) != 8 or not text.isdigit():
+        return None
+    try:
+        return date.fromisoformat(f"{text[:4]}-{text[4:6]}-{text[6:8]}")
+    except ValueError:
+        return None
 
 
 def parse_corp_code_zip_bytes(payload: bytes) -> list[DartCorp]:
@@ -110,3 +129,44 @@ class OpenDartCorpCodeProvider:
             )
         except Exception as exc:
             return DartCorpCodeResult(error=str(exc))
+
+    def fetch_company_profile(self, corp: DartCorp) -> CompanyProfileResult:
+        """Fetch ``company.json`` (DS001) for one corporation.
+
+        A separate endpoint from ``corpCode.xml``: the bulk zip carries only
+        corp_code / corp_name / stock_code / modify_date, so industry,
+        incorporation date and fiscal-year-end need one call per corporation.
+
+        Args:
+            corp: Corporation to profile.
+
+        Returns:
+            ``CompanyProfileResult`` with the profile or an error.  Never raises.
+        """
+        try:
+            call_result = self._request_executor.fetch_bytes(
+                endpoint_url=OPENDART_COMPANY_PROFILE_URL,
+                params={"corp_code": corp.corp_code},
+                request_label=f"{corp.ticker or corp.corp_code}:company",
+                parser=COMPANY_PROFILE_POLICY.classify_json_payload,
+                timeout_seconds=self._timeout_seconds,
+            )
+            if call_result.error or call_result.no_data:
+                return apply_call_result_meta(CompanyProfileResult(), call_result)
+
+            payload = decode_json_payload(call_result.payload or b"{}")
+
+            profile = CompanyProfile(
+                corp_code=corp.corp_code,
+                # Blank string and missing field both mean "no industry"; keep
+                # them as NULL so the coverage metric is honest.
+                induty_code=(payload.get("induty_code") or "").strip() or None,
+                corp_cls=(payload.get("corp_cls") or "").strip() or None,
+                est_dt=_parse_yyyymmdd(payload.get("est_dt")),
+                acc_mt=(payload.get("acc_mt") or "").strip() or None,
+                raw_payload=payload,
+                fetched_at=now_kst(),
+            )
+            return apply_call_result_meta(CompanyProfileResult(profile=profile), call_result)
+        except Exception as exc:
+            return CompanyProfileResult(error=str(exc))

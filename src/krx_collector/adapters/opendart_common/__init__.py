@@ -13,6 +13,7 @@ from krx_collector.adapters.opendart_common.client import (
 )
 from krx_collector.adapters.opendart_common.policy import (
     CAPITAL_CHANGE_POLICY,
+    COMPANY_PROFILE_POLICY,
     CORP_CODE_POLICY,
     DIVIDEND_POLICY,
     FILING_RECEIPT_POLICY,
@@ -26,6 +27,7 @@ from krx_collector.adapters.opendart_common.policy import (
 
 __all__ = [
     "CAPITAL_CHANGE_POLICY",
+    "COMPANY_PROFILE_POLICY",
     "CORP_CODE_POLICY",
     "DIVIDEND_POLICY",
     "FILING_RECEIPT_POLICY",

@@ -60,6 +60,7 @@ class RunType(StrEnum):
     VALIDATE = "validate"
     REMOTE_DB_SYNC = "remote_db_sync"
     DART_CORP_SYNC = "dart_corp_sync"
+    DART_CORP_PROFILE_SYNC = "dart_corp_profile_sync"
     DART_FINANCIAL_SYNC = "dart_financial_sync"
     DART_SHARE_COUNT_SYNC = "dart_share_count_sync"
     DART_SHAREHOLDER_RETURN_SYNC = "dart_shareholder_return_sync"

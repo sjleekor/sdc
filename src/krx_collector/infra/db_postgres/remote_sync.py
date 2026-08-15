@@ -321,9 +321,15 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
     ),
     TableSyncSpec(
         name="dart_corp_master",
+        # N2 profile columns are appended AFTER updated_at so the cursor stays
+        # at index 9.  They must be listed here explicitly: this select/insert
+        # list is not derived from the DDL, so a column missing here is dropped
+        # from the mirror silently — and unlike the profile catalog, no test
+        # catches it for free.
         select_list=(
             "corp_code, ticker, corp_name, market, stock_name, modify_date, is_active, "
-            "source, fetched_at, updated_at"
+            "source, fetched_at, updated_at, "
+            "induty_code, corp_cls, est_dt, acc_mt, profile_raw, profile_fetched_at"
         ),
         from_clause="dart_corp_master",
         order_columns=("updated_at", "corp_code"),
@@ -338,6 +344,12 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
             "source",
             "fetched_at",
             "updated_at",
+            "induty_code",
+            "corp_cls",
+            "est_dt",
+            "acc_mt",
+            "profile_raw",
+            "profile_fetched_at",
         ),
         conflict_columns=("corp_code",),
         update_columns=(
@@ -350,6 +362,12 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
             "source",
             "fetched_at",
             "updated_at",
+            "induty_code",
+            "corp_cls",
+            "est_dt",
+            "acc_mt",
+            "profile_raw",
+            "profile_fetched_at",
         ),
         local_cursor_sql=(
             "SELECT updated_at, corp_code "
