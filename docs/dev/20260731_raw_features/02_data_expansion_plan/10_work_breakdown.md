@@ -250,13 +250,27 @@ ledger ────────────→ N6 (16만 호출 재개)
 - [x] **D-3 `deploy/prod/bin/` 래퍼 3개** — market-cap / backfill-snapshots / corp-profile.
       pykrx 계열은 `krx_marketdata` 락 공유(exit 75 회피), DART는 `opendart`
 - [ ] **D-4** Cronicle **일회성 백필 이벤트** 등록 → **끝나면 삭제** (`common-backfill-2015` 사례)
+  - [x] `SDC Backfill DART Corp Profile (one-time)` — `emsugdoe907` (N2-7b)
+  - [x] `SDC Backfill N3 Universe Snapshots (one-time)` — `emsugmrjp0a` (N3-5b)
+  - [ ] V-1b / N1-8 / S-2 이벤트
+  - [ ] **검증 끝나면 전부 삭제.** 선례 `emr0r4xgb0h`가 2026-07-04 완료 후 아직 남아 있다
 - [ ] **D-5** Cronicle **정기 증분 이벤트** 추가 — N1 일별, N4 월별, N2·N5 주기적 refresh
-- [ ] **D-6** **KRX 계열 exit 75 lock 회피** — 기존 `sdc_daily_krx_*` 스케줄과 시간대 분리
+- [x] **D-6** **KRX 계열 동시 실행 차단** (2026-08-15) — 계획은 "시간대 분리"였으나
+      **락 자체가 꺼져 있었다.** `SDC_DAILY_USE_SOURCE_LOCK`이 opt-in이고 prod은 켠 적이
+      없다 — `.env`에도, 호스트 env에도, Cronicle 이벤트 스크립트에도 없다.
+      `/tmp/sdc-locks`가 아예 존재하지 않았다. 락을 잡는 것처럼 읽히는 래퍼 7개가
+      **아무것도 잡고 있지 않았다**
+  - [x] 기본값을 `:-0` → `:-1`로. **안전장치는 기본이 ON이고 우회가 명시적이어야 한다**
+  - [x] 시간대 분리는 대체재가 아니다 — 창을 넘기는 run(flows 실측 775s, 백필은 구조적으로
+        수 시간)이 조용히 동시 실행을 되살린다
+  - [x] 호스트 실검증 — flock 백엔드, 두 번째 호출 exit 75, 해제 후 재획득, 명시적 OFF 동작
 - [x] **D-7** `docs/operations.md` — cron 표에 신규 잡 3개, `--universe-scope` 표,
       `--refetch`, as-of 검증 설명
 - [x] **D-1b 릴리즈 v0.9.4** (2026-08-15) — O-9 정지 조건. GHCR 빌드 성공, sj2 pull 완료,
       배포된 이미지에서 `--max-consecutive-failures` 노출 확인.
       **릴리즈 스크립트가 로컬·원격 compose를 함께 올리도록 수정한 뒤 첫 릴리즈**
+- [x] **D-1c 릴리즈 v0.9.5** (2026-08-15) — O-10 CLI 인자 결함 수정. **v0.9.4가
+      `prices backfill`과 `prices market-cap-backfill`을 깨진 채로 배포했다** (아래 O-10)
 - [ ] **D-8** 로컬 반영 — `db sync-remote --full-refresh` → `bin/raw-parquet-export-all.sh`
       → `bin/parquet-compute-all.sh`
 
@@ -423,7 +437,16 @@ ledger ────────────→ N6 (16만 호출 재개)
       공용 헬퍼로 교체. 헬퍼 불변식 테스트 4건
 - [x] **O-7 `capital_change_direction_balance`** — I3 부류.
       "카탈로그가 조용히 매칭 실패"와 "그 범주가 실제로 없음"이 구분되게
-- [ ] **O-8 `profile`을 정기 스케줄에 편입** — 지금 수동 wrapper뿐. **D 그룹 의존**
+- [ ] **O-8 탐지를 스케줄에 편입** — **D 그룹 의존**
+  - [x] **`ops freshness-report --fail-if-stale`** (2026-08-15) — 게이트 신설.
+        기존 명령은 출력만 하고 **무조건 exit 0**이라 스케줄에 넣어도 알람이 되지 않았다.
+        `evaluate_staleness`가 각 raw 도메인의 최신 행을 KRX 거래일 달력과 비교한다
+  - [x] 거래일 예산(`daily_ohlcv`·`daily_market_cap`·flow 그룹·KRX/FDR/PYKRX common)과
+        달력 예산(ECOS·FRED)을 분리. **매일 걸리는 게이트는 아무도 안 본다**
+  - [x] `daily_market_cap`도 게이트에 포함 — 일별 잡이 될 예정이라 빼면 같은 구멍을
+        한 칸 옆에 다시 만든다. 빈 테이블은 stale로 센다 → **N1-8 이후에 스케줄**
+  - [ ] Cronicle 이벤트 등록 (23:00, 저녁 수집 창 종료 후)
+  - [ ] `profile`을 정기 스케줄에 편입 — 지금 수동 wrapper뿐
 - [x] **O-9 원천 차단 정지 조건 `ConsecutiveFailureGuard`** (2026-08-15, v0.9.4) —
       탐지가 아니라 **정지**다. 모든 수집기가 실패를 항목 오류로 기록하고 넘어가서,
       원천이 거부하기 시작해도 대상 목록을 끝까지 때렸다. N1은 6,000 슬라이스 × `@retry` 4회
@@ -437,6 +460,24 @@ ledger ────────────→ N6 (16만 호출 재개)
         "스로틀 끔"이 조용히 "최대 60초 대기"가 됐다. 설정된 페이스에 비례시켜 수정
   - [x] 대량 백필 래퍼 기본값을 prod의 `0.1s`가 아닌 **`0.4s`**로. 한 호출이 시장 전체
         (~1,700행)를 반환해 종목당 호출 기준으로 튜닝된 값보다 무겁다
+- [x] **O-10 CLI 핸들러 인자 정적 검사** (2026-08-15, v0.9.5) —
+      v0.9.4의 `prices backfill`과 `prices market-cap-backfill`이 **첫 줄에서 죽었다.**
+      `AttributeError: 'Namespace' object has no attribute 'include_delisted'`.
+      T 묶음이 `--include-delisted`를 `--universe-scope`로 바꾸면서 f-string 안에 남은
+      참조다. **파이프라인에서 물량이 가장 큰 명령 둘**이고, 갭 복구로 일별 체인을
+      돌려보고 나서야 드러났다
+  - [x] 원인은 오타가 아니라 **핸들러가 파서에 없는 인자를 읽는 걸 막는 게 없다**는 것.
+        유닛 테스트는 서비스를 직접 부르므로 CLI 배선을 한 번도 통과하지 않는다
+  - [x] 파서 트리를 걸어 각 leaf 명령의 dest 집합을 모으고, 핸들러를 AST로 훑어
+        `args.X` 참조가 그 부분집합인지 검사. **수정 전 소스에서 실패하는 것 확인**
+  - [x] market-cap에는 scope 개념이 없다 — 슬라이스가 특정일의 시장 전체라
+        `UniverseScope`가 고를 종목 집합이 없다
+- [x] **O-11 (발견) 호스트 다운이 무탐지로 지나갔다** — sj2-server가 2026-08-14
+      16:37~00:08 다운. **18:30 KRX 체인과 20:30 common이 통째로 누락**됐고
+      `daily_ohlcv`·`krx_security_flow_raw`·`common_feature_observation_raw`가
+      전부 08-13에 멈춰 있었다. 아무도 몰랐다
+  - [x] 재부팅은 systemd 정상 종료(장애 아님). 현재 22시간 연속 가동
+  - [ ] **탐지가 없다는 게 결함이다.** `ops freshness-report`는 있는데 스케줄에 없다 → O-8/D-5
 
 ---
 
