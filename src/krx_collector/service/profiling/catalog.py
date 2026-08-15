@@ -50,6 +50,44 @@ DAILY_OHLCV = TableProfileSpec(
     ),
 )
 
+# KRX market cap / trading value / listed shares.  Same grain as daily_ohlcv but
+# a different source: KRX unadjusted (source_close) vs naver adjusted (close).
+# No FK to daily_ohlcv — the two are backfilled independently and a missing
+# counterpart is a coverage finding, not a referential error.
+DAILY_MARKET_CAP = TableProfileSpec(
+    table="daily_market_cap",
+    weight=ProfileWeight.FULL,
+    role=ProfileTableRole.RAW,
+    entity_key="ticker",
+    time_col="trade_date",
+    natural_key=("trade_date", "ticker", "market"),
+    numeric_cols=(
+        "source_close",
+        "market_cap",
+        "trading_value",
+        "listed_shares",
+        "volume",
+    ),
+    category_cols=("market", "source"),
+    null_cols=(
+        "source_close",
+        "market_cap",
+        "trading_value",
+        "listed_shares",
+        "volume",
+    ),
+    ingest_col="fetched_at",
+    fk_relations=(
+        ForeignKeyProfileSpec(
+            ref_table="stock_master",
+            columns=(("ticker", "ticker"), ("market", "market")),
+        ),
+    ),
+    cost_class=CostClass.EXPENSIVE,
+    sampling=SamplingPolicy(sample_pct=1.0, large_row_threshold=5_000_000),
+    domain_checks=(),
+)
+
 
 # ---------------------------------------------------------------------------
 # Wave 1 — large / long-format tables (sampling + drilldown)
@@ -385,6 +423,7 @@ _CATALOG: tuple[TableProfileSpec, ...] = (
     # operating tables were decommissioned (refactor §5) — recomputed by the
     # DuckDB marts — so they are no longer profiled here.
     DAILY_OHLCV,
+    DAILY_MARKET_CAP,
     KRX_SECURITY_FLOW_RAW,
     COMMON_FEATURE_OBSERVATION_RAW,
     DART_FINANCIAL_STATEMENT_RAW,

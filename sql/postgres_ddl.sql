@@ -101,6 +101,38 @@ CREATE INDEX IF NOT EXISTS ix_stock_master_snapshot_sync_cursor
 CREATE INDEX IF NOT EXISTS ix_daily_ohlcv_sync_cursor
     ON daily_ohlcv (fetched_at, trade_date, ticker, market);
 
+-- 4b) daily_market_cap ─ daily KRX market cap / trading value / listed shares
+--
+-- Separate from daily_ohlcv on purpose: different pykrx endpoint and a
+-- different price basis.  daily_ohlcv comes from the naver ADJUSTED path
+-- (pykrx get_market_ohlcv_by_date defaults to adjusted=True, which routes to
+-- naver); this table comes from KRX get_market_cap_by_ticker and carries the
+-- UNADJUSTED session close.  The column is named source_close, not close, so
+-- the difference is visible at the call site.
+--
+-- market is filled from the CALL ARGUMENT (one request per market), never by
+-- joining stock_master — that join would stamp a stock's present-day market
+-- onto its pre-transfer rows (look-ahead).
+CREATE TABLE IF NOT EXISTS daily_market_cap (
+    trade_date      DATE        NOT NULL,
+    ticker          TEXT        NOT NULL,
+    market          TEXT        NOT NULL,
+    source_close    BIGINT,                 -- KRX unadjusted session close
+    market_cap      BIGINT,                 -- KRW
+    trading_value   BIGINT,                 -- KRW
+    listed_shares   BIGINT,
+    volume          BIGINT,                 -- KRX basis; cross-check vs daily_ohlcv (naver)
+    source          TEXT        NOT NULL,
+    fetched_at      TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (trade_date, ticker, market)
+);
+
+CREATE INDEX IF NOT EXISTS ix_daily_market_cap_ticker_date
+    ON daily_market_cap (ticker, market, trade_date DESC);
+
+CREATE INDEX IF NOT EXISTS ix_daily_market_cap_sync_cursor
+    ON daily_market_cap (fetched_at, trade_date, ticker, market);
+
 -- 5) ingestion_runs ─ audit log for every pipeline execution
 CREATE TABLE IF NOT EXISTS ingestion_runs (
     run_id          UUID        PRIMARY KEY,

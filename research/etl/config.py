@@ -53,6 +53,7 @@ DEFAULT_SNAPSHOT_DATE = os.environ.get("SDC_SNAPSHOT_DATE", "2026-06-19")
 
 RAW_TABLES: tuple[str, ...] = (
     "daily_ohlcv",
+    "daily_market_cap",
     "krx_security_flow_raw",
     "dart_xbrl_fact_raw",
     "dart_financial_statement_raw",

@@ -68,6 +68,52 @@
 **기본키(Primary key):** `(trade_date, ticker, market)`
 **인덱스(Index):** `(ticker, market, trade_date DESC)` - 특정 종목별 조회를 위한 인덱스.
 
+### 4b. `daily_market_cap`
+
+KRX가 일별로 공표하는 시가총액·거래대금·상장주식수입니다. `daily_ohlcv`와 **격자는 같지만
+원천이 다릅니다.**
+
+| | `daily_ohlcv` | `daily_market_cap` |
+|---|---|---|
+| pykrx 엔드포인트 | `get_market_ohlcv_by_date` | `get_market_cap_by_ticker` |
+| 실제 원천 | **naver** (`adjusted=True` 기본) | **KRX** |
+| 가격 | **수정주가** | **당일 실제 종가(미수정)** |
+
+그래서 종가 컬럼 이름이 `close`가 아니라 `source_close`입니다 — 호출부에서 의미 차이가
+드러나게 하기 위해서입니다.
+
+| 컬럼명          | 타입            | 비고                                   |
+|-----------------|-----------------|----------------------------------------|
+| `trade_date`    | DATE NOT NULL   | 거래일 (PK part 1)                     |
+| `ticker`        | TEXT NOT NULL   | 6자리 KRX 종목 코드 (PK part 2)        |
+| `market`        | TEXT NOT NULL   | KOSPI \| KOSDAQ (PK part 3)            |
+| `source_close`  | BIGINT          | KRX 당일 실제 종가 (미수정)            |
+| `market_cap`    | BIGINT          | 시가총액 (KRW)                         |
+| `trading_value` | BIGINT          | 거래대금 (KRW)                         |
+| `listed_shares` | BIGINT          | 상장주식수                             |
+| `volume`        | BIGINT          | KRX 기준 거래량 (naver 기준과 대조용)  |
+| `source`        | TEXT NOT NULL   | PYKRX                                  |
+| `fetched_at`    | TIMESTAMPTZ NOT NULL | 데이터를 수집한 시간              |
+
+**기본키(Primary key):** `(trade_date, ticker, market)`
+**인덱스(Index):** `(ticker, market, trade_date DESC)`, `(fetched_at, trade_date, ticker, market)`
+
+**`market`은 호출 인자로만 채웁니다.** 응답에 시장 구분 컬럼이 없어서
+`market='ALL'` 한 번이 아니라 **날짜마다 시장별로 따로 호출**합니다. `stock_master`를 조인해
+채우면 KOSDAQ→KOSPI 이전상장 종목의 과거 행에 확정 이후의 시장이 붙어 룩어헤드가 됩니다.
+`ALL`을 쓰지 않는 두 번째 이유는 KONEX가 섞이기 때문입니다(2024-01-02 기준 129종목).
+
+**결측 규칙.** pykrx가 빈 값을 `0`으로 캐스팅해 진짜 0과 결측이 구분되지 않습니다.
+
+- `source_close == 0` → **행 전체가 결측**입니다. 휴장일에 pykrx가 빈 응답 대신
+  가격만 0인 전종목 행을 돌려주기 때문입니다
+- `source_close > 0`인데 `volume`·`trading_value`가 0이면 **진짜 0**(거래정지)입니다.
+  NULL로 바꾸지 않습니다
+
+**항등식.** `market_cap = source_close × listed_shares`가 정확히 성립합니다
+(PoC 6,904행 전수 확인). 즉 `market_cap`은 파생값이고, 이 테이블이 새로 가져오는 정보는
+`listed_shares`와 `trading_value`입니다.
+
 ### 5. `ingestion_runs`
 
 파이프라인의 모든 실행 이력을 기록하는 감사(Audit) 로그입니다.
@@ -390,6 +436,26 @@ ON CONFLICT (trade_date, ticker, market) DO UPDATE SET
 ```
 
 **설계 이유:** KRX에서 가끔 가격 데이터를 수정하는 경우가 있기 때문에, `DO NOTHING` 대신 `DO UPDATE`를 사용하여 재수집 시 기존(수정 전) 데이터를 덮어쓰도록 했습니다.
+
+### `daily_market_cap`
+
+```sql
+INSERT INTO daily_market_cap (trade_date, ticker, market, source_close, market_cap,
+                              trading_value, listed_shares, volume, source, fetched_at)
+VALUES (...)
+ON CONFLICT (trade_date, ticker, market) DO UPDATE SET
+    source_close = EXCLUDED.source_close,
+    market_cap = EXCLUDED.market_cap,
+    trading_value = EXCLUDED.trading_value,
+    listed_shares = EXCLUDED.listed_shares,
+    volume = EXCLUDED.volume,
+    source = EXCLUDED.source,
+    fetched_at = EXCLUDED.fetched_at;
+```
+
+**설계 이유:** `daily_ohlcv`와 같습니다. 추가로 **한 응답(= 한 날짜 · 한 시장)의 전체 행을
+한 트랜잭션으로** upsert합니다. 배치를 쪼개면 중간에 중단됐을 때 그 슬라이스가 영구히
+불완전하게 남고, "행이 있으면 완료"로 판정하는 skip 규칙이 다시는 그 구멍을 채우지 않습니다.
 
 ### `stock_master`
 

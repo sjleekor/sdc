@@ -53,6 +53,14 @@ output_partitions = ["year(trade_date)", "month(trade_date)"]
 order_by = ["trade_date", "ticker", "market"]
 
 [[tables]]
+name = "daily_market_cap"
+priority = "P0"
+extract_strategy = "date_month"
+date_column = "trade_date"
+output_partitions = ["year(trade_date)", "month(trade_date)"]
+order_by = ["trade_date", "ticker", "market"]
+
+[[tables]]
 name = "dart_share_count_raw"
 priority = "P1"
 extract_strategy = "raw_id_range"

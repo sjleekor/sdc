@@ -99,6 +99,7 @@ PIPELINE_FULL_REFRESH_TABLE_NAMES: tuple[str, ...] = (
     "stock_master_snapshot_items",
     # prices backfill
     "daily_ohlcv",
+    "daily_market_cap",
     # KRX security-level flow metrics
     "krx_security_flow_raw",
     # account / financial / XBRL pipeline
@@ -243,6 +244,46 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
         cursor_indexes=(9, 0, 1, 2),
         copy_merge_enabled=True,
         conflict_update_where_sql="daily_ohlcv.fetched_at <= EXCLUDED.fetched_at",
+    ),
+    TableSyncSpec(
+        name="daily_market_cap",
+        select_list=(
+            "trade_date, ticker, market, source_close, market_cap, trading_value, "
+            "listed_shares, volume, source, fetched_at"
+        ),
+        from_clause="daily_market_cap",
+        order_columns=("fetched_at", "trade_date", "ticker", "market"),
+        insert_columns=(
+            "trade_date",
+            "ticker",
+            "market",
+            "source_close",
+            "market_cap",
+            "trading_value",
+            "listed_shares",
+            "volume",
+            "source",
+            "fetched_at",
+        ),
+        conflict_columns=("trade_date", "ticker", "market"),
+        update_columns=(
+            "source_close",
+            "market_cap",
+            "trading_value",
+            "listed_shares",
+            "volume",
+            "source",
+            "fetched_at",
+        ),
+        local_cursor_sql=(
+            "SELECT fetched_at, trade_date, ticker, market "
+            "FROM daily_market_cap "
+            "ORDER BY fetched_at DESC, trade_date DESC, ticker DESC, market DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(9, 0, 1, 2),
+        copy_merge_enabled=True,
+        conflict_update_where_sql="daily_market_cap.fetched_at <= EXCLUDED.fetched_at",
     ),
     TableSyncSpec(
         name="krx_security_flow_raw",

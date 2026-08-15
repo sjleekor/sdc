@@ -125,7 +125,7 @@ def test_managed_mirror_tables_exclude_local_audit_tables() -> None:
 
     # The mirror only carries raw + the shared common_feature_series config now;
     # the derived/catalog tables are recomputed by the DuckDB marts (refactor §5.2).
-    assert len(pipeline_names) == 15
+    assert len(pipeline_names) == 16  # +daily_market_cap (N1)
     assert set(pipeline_names).issubset(spec_names)  # every mirrored table has a spec
     assert "ingestion_runs" not in pipeline_names
     assert "sync_checkpoints" not in pipeline_names
@@ -135,6 +135,56 @@ def test_managed_mirror_tables_exclude_local_audit_tables() -> None:
     assert "stock_metric_fact" not in pipeline_names
     assert "common_feature_daily_fact" not in pipeline_names
     assert "metric_catalog" not in pipeline_names
+
+
+def test_daily_market_cap_spec_matches_ddl_and_cursor() -> None:
+    # N1.  The mirror's select/insert column lists are explicit, so a column
+    # added to the DDL but not here is dropped silently — no test catches that
+    # for free the way the profile catalog does.  Pin the shape.
+    spec = next(spec for spec in SYNC_TABLE_SPECS if spec.name == "daily_market_cap")
+
+    select_columns = tuple(col.strip() for col in spec.select_list.split(","))
+    # insert_columns must be a positional prefix of select_list
+    assert select_columns[: len(spec.insert_columns)] == spec.insert_columns
+
+    assert spec.insert_columns == (
+        "trade_date",
+        "ticker",
+        "market",
+        "source_close",
+        "market_cap",
+        "trading_value",
+        "listed_shares",
+        "volume",
+        "source",
+        "fetched_at",
+    )
+    assert spec.conflict_columns == ("trade_date", "ticker", "market")
+    # PK columns are never in update_columns; every value column is.
+    assert set(spec.update_columns) == set(spec.insert_columns) - set(spec.conflict_columns)
+    # cursor_indexes point at (fetched_at, trade_date, ticker, market)
+    assert tuple(select_columns[i] for i in spec.cursor_indexes) == (
+        "fetched_at",
+        "trade_date",
+        "ticker",
+        "market",
+    )
+
+
+def test_daily_market_cap_registered_in_every_required_place() -> None:
+    # `01_implementation_checklist.md` §1: a new table must land in six places.
+    # Places 2 (this module), 3 (profile catalog) and 6 (research config) are
+    # importable, so assert them together — the other three are config/shell.
+    from research.etl.config import RAW_TABLES
+
+    from krx_collector.infra.db_postgres.remote_sync import (
+        PIPELINE_FULL_REFRESH_TABLE_NAMES,
+    )
+    from krx_collector.service.profiling import catalog
+
+    assert "daily_market_cap" in PIPELINE_FULL_REFRESH_TABLE_NAMES
+    assert "daily_market_cap" in catalog.known_tables()
+    assert "daily_market_cap" in RAW_TABLES
 
 
 def test_stock_master_spec_includes_new_date_columns() -> None:
@@ -212,6 +262,7 @@ def test_copy_merge_specs_are_limited_to_update_aware_tables() -> None:
 
     assert copy_merge_specs == {
         "daily_ohlcv",
+        "daily_market_cap",
         "krx_security_flow_raw",
         "dart_financial_statement_raw",
         "dart_share_count_raw",

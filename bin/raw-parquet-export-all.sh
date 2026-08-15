@@ -307,6 +307,7 @@ raw_id_tables=(
 date_month_tables=(
   krx_security_flow_raw
   daily_ohlcv
+  daily_market_cap
 )
 
 non_resumable_tables=(
