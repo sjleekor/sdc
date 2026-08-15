@@ -6,10 +6,11 @@ import logging
 from datetime import date
 
 from krx_collector.adapters.opendart_common.client import OpenDartRequestExecutor
-from krx_collector.domain.enums import RunStatus, RunType
+from krx_collector.domain.enums import RunStatus, RunType, UniverseScope
 from krx_collector.domain.models import DartFilingReceiptSyncResult, IngestionRun
 from krx_collector.ports.filing_receipt import FilingReceiptProvider
 from krx_collector.ports.storage import Storage
+from krx_collector.service.collection_targets import resolve_dart_targets
 from krx_collector.util.pipeline import (
     OpenDartKeyExhaustedError,
     build_run_counts,
@@ -38,7 +39,7 @@ def sync_dart_filings(
     rate_limit_seconds: float = 0.2,
     force: bool = False,
     today: date | None = None,
-    include_delisted: bool = False,
+    scope: UniverseScope = UniverseScope.CURRENT,
 ) -> DartFilingReceiptSyncResult:
     """Synchronise OpenDART disclosure-receipt (list.json) history.
 
@@ -60,7 +61,7 @@ def sync_dart_filings(
             "tickers": tickers,
             "rate_limit_seconds": rate_limit_seconds,
             "force": force,
-            "include_delisted": include_delisted,
+            "universe_scope": scope.value,
         },
     )
     executor = _get_executor(filing_receipt_provider)
@@ -71,11 +72,7 @@ def sync_dart_filings(
     result = DartFilingReceiptSyncResult()
     today = today or now_kst().date()
     try:
-        targets = storage.get_dart_corp_master(
-            active_only=True,
-            tickers=tickers,
-            include_delisted=include_delisted,
-        )
+        targets = resolve_dart_targets(storage, scope, tickers)
         if not targets:
             raise RuntimeError(
                 "No active OpenDART corp mappings found. Run `dart sync-corp` first."

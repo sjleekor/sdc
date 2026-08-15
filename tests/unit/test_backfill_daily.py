@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from krx_collector.domain.enums import ListingStatus, Market, Source
+from krx_collector.domain.enums import ListingStatus, Market, Source, UniverseScope
 from krx_collector.domain.models import DailyBar, DailyPriceResult, Stock, UpsertResult
 from krx_collector.service.backfill_daily import backfill_daily_prices
 from krx_collector.util.time import now_kst
@@ -353,9 +353,9 @@ def test_refetch_with_incremental_is_rejected() -> None:
     assert provider.calls == []
 
 
-def test_include_delisted_reaches_a_delisted_ticker() -> None:
-    # Without the flag a delisted ticker is unreachable even by name, because
-    # --tickers filters the active-only result.
+def test_historical_scope_reaches_a_delisted_ticker() -> None:
+    # Under CURRENT a delisted ticker is unreachable even by name, because the
+    # allowlist filters the active-only result.
     active, gone = "005930", "058530"
     storage = _RepairStorage([_stock(active)], delisted=[_delisted_stock(gone)])
 
@@ -378,13 +378,13 @@ def test_include_delisted_reaches_a_delisted_ticker() -> None:
         refetch=True,
         start=date(2024, 1, 1),
         tickers=[gone],
-        include_delisted=True,
+        scope=UniverseScope.HISTORICAL,
     )
     # The range is chunked yearly, so assert on which ticker was reached.
     assert {c[0] for c in with_flag.calls} == {gone}
 
 
-def test_include_delisted_passes_the_ticker_filter_to_storage() -> None:
+def test_historical_scope_passes_the_ticker_filter_to_storage() -> None:
     # The allowlist must be applied in the query, not by filtering an
     # active-only result afterwards.
     storage = _RepairStorage([_stock("005930")], delisted=[_delisted_stock("058530")])
@@ -396,7 +396,7 @@ def test_include_delisted_passes_the_ticker_filter_to_storage() -> None:
         refetch=True,
         start=date(2024, 1, 1),
         tickers=["058530"],
-        include_delisted=True,
+        scope=UniverseScope.HISTORICAL,
     )
 
     assert storage.get_stocks_calls == [(Market.KOSPI, None, ("058530",))]

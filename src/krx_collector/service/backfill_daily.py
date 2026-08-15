@@ -26,10 +26,11 @@ import random
 import time
 from datetime import date, timedelta
 
-from krx_collector.domain.enums import Market, RunStatus, RunType
+from krx_collector.domain.enums import Market, RunStatus, RunType, UniverseScope
 from krx_collector.domain.models import BackfillResult, DailyPriceResult, IngestionRun, Stock
 from krx_collector.ports.prices import PriceProvider
 from krx_collector.ports.storage import Storage
+from krx_collector.service.collection_targets import resolve_price_targets
 from krx_collector.util.retry import retry
 from krx_collector.util.time import now_kst, today_kst
 
@@ -85,7 +86,7 @@ def backfill_daily_prices(
     allow_new_ticker_backfill: bool = False,
     allow_large_range: bool = False,
     refetch: bool = False,
-    include_delisted: bool = False,
+    scope: UniverseScope = UniverseScope.CURRENT,
 ) -> BackfillResult:
     """Backfill daily OHLCV bars from *provider* into *storage*.
 
@@ -98,9 +99,10 @@ def backfill_daily_prices(
             history was backfilled before it
             (``poc/n1_adjusted_price_vintage.md``: 279 such jumps across 252
             tickers in four months).  Mutually exclusive with ``incremental``.
-        include_delisted: If ``True``, resolve targets from the full stock
-            master rather than the active universe.  Required to reach the
-            delisted names at all — see ``poc/survivorship_gap.md``.
+        scope: Which universe to target.  ``HISTORICAL`` is required to reach
+            the delisted names at all — under ``CURRENT`` even naming one in
+            ``tickers`` returns nothing, because the allowlist filters an
+            active-only result (``poc/survivorship_gap.md``).
         incremental: If ``True``, skip per-day gap detection and instead
             fetch a single contiguous range starting from
             ``MAX(trade_date) + 1`` for each ticker. This trusts that
@@ -131,7 +133,7 @@ def backfill_daily_prices(
             "allow_new_ticker_backfill": allow_new_ticker_backfill,
             "allow_large_range": allow_large_range,
             "refetch": refetch,
-            "include_delisted": include_delisted,
+            "universe_scope": scope.value,
         },
     )
     storage.record_run(run)
@@ -160,25 +162,11 @@ def backfill_daily_prices(
         if max_auto_range_days is not None and max_auto_range_days <= 0:
             raise ValueError("max_auto_range_days must be positive")
 
-        # 1. Resolve ticker list
-        target_stocks: list[Stock] = []
-        if include_delisted:
-            # Historical repair path.  get_active_stocks() answers "who is
-            # listed now", so a delisted ticker can never be reached through
-            # it — not even by naming it in --tickers, which filters the
-            # active result.  That is why every raw table covers only ~2% of
-            # the 1,330 delisted names (poc/survivorship_gap.md).
-            target_stocks = storage.get_stocks(market=market, tickers=tickers)
-            if not target_stocks:
-                logger.warning("No stocks matched (include_delisted=True).")
-        elif tickers:
-            all_active = storage.get_active_stocks()
-            ticker_set = set(tickers)
-            target_stocks = [s for s in all_active if s.ticker in ticker_set]
-            if not target_stocks:
-                logger.warning("None of the provided tickers were found as ACTIVE in stock_master.")
-        else:
-            target_stocks = storage.get_active_stocks(market)
+        # 1. Resolve ticker list — through the shared resolver, never by
+        #    reaching for an accessor directly (service/collection_targets.py).
+        target_stocks: list[Stock] = resolve_price_targets(storage, scope, market, tickers)
+        if not target_stocks and tickers:
+            logger.warning("None of the provided tickers matched under scope=%s.", scope.value)
 
         if not target_stocks:
             logger.info("No active stocks found to backfill.")

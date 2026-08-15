@@ -42,6 +42,25 @@ class Source(StrEnum):
     # KIWOOM = "KIWOOM"
 
 
+class UniverseScope(StrEnum):
+    """Which universe a collection targets.
+
+    Every collector used to resolve its own targets, and every one of them
+    reached for the currently-listed set.  That is correct for a daily sync —
+    a delisted company files nothing today — and wrong for any backfill that
+    feeds a backtest, because the companies that failed are precisely the ones
+    that leave the current set.  The result was 2.0-2.3% coverage of 1,330
+    delisted names across every raw table, and 13.9% of the 2016 cross-section
+    absent (``poc/survivorship_gap.md``).
+
+    Naming the choice makes it visible at the call site.  ``CURRENT`` is a
+    decision about time, not a neutral default.
+    """
+
+    CURRENT = "current"
+    HISTORICAL = "historical"
+
+
 class ListingStatus(StrEnum):
     """Stock listing status on KRX."""
 

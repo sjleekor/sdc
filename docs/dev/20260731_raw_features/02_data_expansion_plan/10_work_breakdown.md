@@ -416,6 +416,24 @@ ledger ────────────→ N6 (16만 호출 재개)
 
 ---
 
+## T 묶음 — 대상 해석 구조 (신규 축, 2026-08-15)
+
+플래그를 opt-in으로 두면 다음 수집기가 또 잊는다. 진짜 문제는 **"수집 대상이 무엇인가"를
+정하는 단일 지점이 없다**는 것이었다 — 여섯 서비스가 각자, 그리고 전부 같은 방향으로 틀렸다.
+
+- [x] **T-1 `UniverseScope` + `service/collection_targets.py`** —
+      `resolve_dart_targets` / `resolve_price_targets`. 대상 해석을 한 곳으로
+  - [x] `CURRENT`(일 sync) / `HISTORICAL`(백테스트용 백필)를 **이름으로** 구분.
+        `include_delisted` bool을 대체했다 — bool은 메커니즘을, enum은 의도를 말한다
+- [x] **T-2 서비스 7개를 resolver로 교체** — DART 5 + prices + flows.
+      CLI는 `--universe-scope current|historical`로 통일
+- [x] **T-3 가드 테스트** — `service/` 아래에서 유니버스 accessor를 직접 부르면 실패.
+      **작성하자마자 내가 못 본 4곳을 더 찾아냈다**(flows, xbrl 접수타깃 경로, validate 폴백,
+      그리고 오탐 1건). 예외 3곳은 테스트에 근거와 함께 명시
+- [x] **T-4 `01_implementation_checklist.md` §1에 7번째 등록 지점 추가**
+
+---
+
 ## S 묶음 — 생존편향 (신규 축, 2026-08-15 발견)
 
 N6 대상 집합을 확인하다 나왔다. 측정: [`poc/survivorship_gap.md`](poc/survivorship_gap.md)

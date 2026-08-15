@@ -34,10 +34,11 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-from krx_collector.domain.enums import Market, RunStatus, RunType, Source
+from krx_collector.domain.enums import Market, RunStatus, RunType, Source, UniverseScope
 from krx_collector.domain.models import IngestionRun
 from krx_collector.infra.calendar.trading_days import get_trading_days, load_holidays
 from krx_collector.ports.storage import Storage
+from krx_collector.service.collection_targets import resolve_price_targets
 from krx_collector.util.time import now_kst, today_kst
 
 logger = logging.getLogger(__name__)
@@ -154,7 +155,9 @@ def validate(
                 snapshot_date, expected = snapshot
                 universe_source = f"snapshot:{snapshot_date.isoformat()}"
             else:
-                expected = {s.ticker for s in storage.get_active_stocks(market)}
+                expected = {
+                    s.ticker for s in resolve_price_targets(storage, UniverseScope.CURRENT, market)
+                }
                 universe_source = "active"
 
             universe_size = len(expected)

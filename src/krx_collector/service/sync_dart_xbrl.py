@@ -5,10 +5,11 @@ from __future__ import annotations
 import logging
 
 from krx_collector.adapters.opendart_common.client import OpenDartRequestExecutor
-from krx_collector.domain.enums import RunStatus, RunType
+from krx_collector.domain.enums import RunStatus, RunType, UniverseScope
 from krx_collector.domain.models import DartXbrlSyncResult, IngestionRun, XbrlBackfillTarget
 from krx_collector.ports.storage import Storage
 from krx_collector.ports.xbrl import XbrlProvider
+from krx_collector.service.collection_targets import resolve_dart_targets
 from krx_collector.util.pipeline import (
     OpenDartKeyExhaustedError,
     build_run_counts,
@@ -40,7 +41,7 @@ def sync_dart_xbrl(
     allowed_year_report_pairs: set[tuple[int, str]] | None = None,
     skip_request_keys: set[str] | None = None,
     run_params_extra: dict[str, object] | None = None,
-    include_delisted: bool = False,
+    scope: UniverseScope = UniverseScope.CURRENT,
 ) -> DartXbrlSyncResult:
     """Synchronise parsed XBRL ZIP data for filings already present in financial raw."""
     run = IngestionRun(
@@ -71,11 +72,7 @@ def sync_dart_xbrl(
     skip_request_keys = set() if force else (skip_request_keys or set())
 
     try:
-        corp_rows = storage.get_dart_corp_master(
-            active_only=True,
-            tickers=tickers,
-            include_delisted=include_delisted,
-        )
+        corp_rows = resolve_dart_targets(storage, scope, tickers)
         corp_by_ticker = {corp.ticker: corp for corp in corp_rows if corp.ticker}
         if not corp_by_ticker:
             raise RuntimeError(
@@ -233,7 +230,10 @@ def sync_dart_xbrl_receipt_targeted(
         if not targets:
             raise RuntimeError("No receipt-targeted XBRL backfill targets were supplied.")
 
-        corp_rows = storage.get_dart_corp_master(active_only=True, tickers=None)
+        # HISTORICAL: the caller supplies explicit receipts, and a receipt can
+        # belong to a corp that has since delisted. Resolving the lookup against
+        # the current universe would silently drop those targets.
+        corp_rows = resolve_dart_targets(storage, UniverseScope.HISTORICAL)
         corp_by_ticker = {corp.ticker: corp for corp in corp_rows if corp.ticker}
 
         bsns_years = sorted({target.bsns_year for target in targets})

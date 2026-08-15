@@ -29,6 +29,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from krx_collector.adapters.opendart_common.client import OpenDartRequestExecutor
+from krx_collector.domain.enums import UniverseScope
 from krx_collector.infra.config.settings import get_settings
 from krx_collector.infra.logging.setup import setup_logging
 
@@ -526,7 +527,7 @@ def _handle_dart_sync_corp_profile(args: argparse.Namespace) -> None:
         tickers=tickers,
         rate_limit_seconds=args.rate_limit_seconds,
         force=args.force,
-        include_delisted=args.include_delisted,
+        scope=UniverseScope(args.universe_scope),
     )
 
     _exit_if_opendart_key_exhausted(result, "OpenDART corp profile sync")
@@ -673,7 +674,7 @@ def _handle_dart_sync_financials(args: argparse.Namespace) -> None:
         allowed_year_report_pairs=allowed_year_report_pairs,
         skip_request_keys=skip_request_keys,
         run_params_extra=run_params_extra,
-        include_delisted=args.include_delisted,
+        scope=UniverseScope(args.universe_scope),
     )
 
     if result.errors:
@@ -817,7 +818,7 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
         allowed_year_report_pairs=allowed_year_report_pairs,
         skip_request_keys=skip_request_keys,
         run_params_extra=run_params_extra,
-        include_delisted=args.include_delisted,
+        scope=UniverseScope(args.universe_scope),
     )
 
     if result.errors:
@@ -960,7 +961,7 @@ def _handle_dart_sync_xbrl(args: argparse.Namespace) -> None:
         allowed_year_report_pairs=allowed_year_report_pairs,
         skip_request_keys=skip_request_keys,
         run_params_extra=run_params_extra,
-        include_delisted=args.include_delisted,
+        scope=UniverseScope(args.universe_scope),
     )
 
     if result.errors:
@@ -1013,7 +1014,7 @@ def _handle_dart_sync_filings(args: argparse.Namespace) -> None:
         tickers=tickers,
         rate_limit_seconds=args.rate_limit_seconds,
         force=args.force,
-        include_delisted=args.include_delisted,
+        scope=UniverseScope(args.universe_scope),
     )
 
     if result.errors:
@@ -1658,7 +1659,7 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
         allow_new_ticker_backfill=args.allow_new_ticker_backfill,
         allow_large_range=args.allow_large_range,
         refetch=args.refetch,
-        include_delisted=args.include_delisted,
+        scope=UniverseScope(args.universe_scope),
     )
 
     if result.errors:
@@ -1715,7 +1716,7 @@ def _handle_prices_market_cap_backfill(args: argparse.Namespace) -> None:
         f"rate_limit={rate_limit}, "
         f"long_rest_interval={long_rest_interval}, "
         f"long_rest_seconds={long_rest_seconds}, "
-        f"force={args.force}"
+        f"force={args.force}, scope={args.universe_scope}"
     )
 
     from krx_collector.adapters.market_cap_pykrx.provider import PykrxMarketCapProvider
@@ -2296,13 +2297,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Re-fetch corporations that already have a profile.",
     )
     dart_sync_corp_profile.add_argument(
-        "--include-delisted",
-        action="store_true",
-        default=False,
+        "--universe-scope",
+        choices=["current", "historical"],
+        default="current",
         help=(
-            "Target the historical listed set (every corp that ever had a "
-            "ticker, 3,959) instead of currently-listed corps only (2,657). "
-            "Delisted names are otherwise unreachable."
+            "Which universe to target. 'current' = currently-listed corps "
+            "(2,657). 'historical' = every corp that ever had a ticker (3,959); "
+            "delisted names are unreachable otherwise."
         ),
     )
     dart_sync_corp_profile.set_defaults(handler=_handle_dart_sync_corp_profile)
@@ -2367,13 +2368,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Days to skip request keys that recently returned no-data.",
     )
     dart_sync_financials.add_argument(
-        "--include-delisted",
-        action="store_true",
-        default=False,
+        "--universe-scope",
+        choices=["current", "historical"],
+        default="current",
         help=(
-            "Target the historical listed set (every corp that ever had a "
-            "ticker, 3,959) instead of currently-listed corps only (2,657). "
-            "Delisted names are otherwise unreachable."
+            "Which universe to target. 'current' = currently-listed corps "
+            "(2,657). 'historical' = every corp that ever had a ticker (3,959); "
+            "delisted names are unreachable otherwise."
         ),
     )
     dart_sync_financials.set_defaults(handler=_handle_dart_sync_financials)
@@ -2433,13 +2434,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Days to skip request keys that recently returned no-data.",
     )
     dart_sync_share_info.add_argument(
-        "--include-delisted",
-        action="store_true",
-        default=False,
+        "--universe-scope",
+        choices=["current", "historical"],
+        default="current",
         help=(
-            "Target the historical listed set (every corp that ever had a "
-            "ticker, 3,959) instead of currently-listed corps only (2,657). "
-            "Delisted names are otherwise unreachable."
+            "Which universe to target. 'current' = currently-listed corps "
+            "(2,657). 'historical' = every corp that ever had a ticker (3,959); "
+            "delisted names are unreachable otherwise."
         ),
     )
     dart_sync_share_info.set_defaults(handler=_handle_dart_sync_share_info)
@@ -2499,13 +2500,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Days to skip request keys that recently returned no-data.",
     )
     dart_sync_xbrl.add_argument(
-        "--include-delisted",
-        action="store_true",
-        default=False,
+        "--universe-scope",
+        choices=["current", "historical"],
+        default="current",
         help=(
-            "Target the historical listed set (every corp that ever had a "
-            "ticker, 3,959) instead of currently-listed corps only (2,657). "
-            "Delisted names are otherwise unreachable."
+            "Which universe to target. 'current' = currently-listed corps "
+            "(2,657). 'historical' = every corp that ever had a ticker (3,959); "
+            "delisted names are unreachable otherwise."
         ),
     )
     dart_sync_xbrl.set_defaults(handler=_handle_dart_sync_xbrl)
@@ -2536,13 +2537,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Re-download even when receipts already exist for a (corp, year) window.",
     )
     dart_sync_filings.add_argument(
-        "--include-delisted",
-        action="store_true",
-        default=False,
+        "--universe-scope",
+        choices=["current", "historical"],
+        default="current",
         help=(
-            "Target the historical listed set (every corp that ever had a "
-            "ticker, 3,959) instead of currently-listed corps only (2,657). "
-            "Delisted names are otherwise unreachable."
+            "Which universe to target. 'current' = currently-listed corps "
+            "(2,657). 'historical' = every corp that ever had a ticker (3,959); "
+            "delisted names are unreachable otherwise."
         ),
     )
     dart_sync_filings.set_defaults(handler=_handle_dart_sync_filings)
@@ -2845,6 +2846,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable randomized request order and preserve deterministic traversal.",
     )
+    flows_sync.add_argument(
+        "--universe-scope",
+        choices=["current", "historical"],
+        default="current",
+        help=(
+            "Which universe to target. 'current' = the active universe. "
+            "'historical' = every stock ever listed; required to collect flows "
+            "for names that have since delisted."
+        ),
+    )
     flows_sync.set_defaults(handler=_handle_flows_sync)
 
     # -- universe -------------------------------------------------------------
@@ -3000,12 +3011,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     prices_backfill.add_argument(
-        "--include-delisted",
-        action="store_true",
-        default=False,
+        "--universe-scope",
+        choices=["current", "historical"],
+        default="current",
         help=(
-            "Target the full stock master instead of the active universe. "
-            "Delisted tickers are unreachable otherwise, even via --tickers."
+            "Which universe to target. 'current' = the active universe. "
+            "'historical' = the full stock master; delisted tickers are "
+            "unreachable otherwise, even when named in --tickers."
         ),
     )
     prices_backfill.set_defaults(handler=_handle_prices_backfill)

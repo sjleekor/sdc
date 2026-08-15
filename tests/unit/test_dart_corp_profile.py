@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from krx_collector.domain.enums import Market, RunStatus, RunType, Source
+from krx_collector.domain.enums import Market, RunStatus, RunType, Source, UniverseScope
 from krx_collector.domain.models import (
     CompanyProfile,
     CompanyProfileResult,
@@ -240,7 +240,7 @@ def test_empty_target_set_fails_the_run() -> None:
     assert storage.recorded_runs[-1].status is RunStatus.FAILED
 
 
-def test_include_delisted_is_threaded_to_the_target_query() -> None:
+def test_historical_scope_is_threaded_to_the_target_query() -> None:
     # poc/survivorship_gap.md: every DART raw table covers ~2% of the 1,330
     # delisted names because targets come from active_only=True. The flag has
     # to reach the query, not just the signature.
@@ -265,6 +265,6 @@ def test_include_delisted_is_threaded_to_the_target_query() -> None:
             return list(self._corps)
 
     storage = _Recording([_corp("005930")])
-    _run(storage, FakeProvider(), include_delisted=True)
+    _run(storage, FakeProvider(), scope=UniverseScope.HISTORICAL)
 
-    assert storage.calls == [{"active_only": True, "tickers": None, "include_delisted": True}]
+    assert storage.calls == [{"active_only": False, "tickers": None, "include_delisted": True}]

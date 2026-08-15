@@ -7,7 +7,7 @@
 
 ---
 
-## 1. 새 테이블 하나는 6곳에 등록해야 한다
+## 1. 새 테이블 하나는 7곳에 등록해야 한다
 
 **이게 이 문서에서 가장 중요한 부분이다.** 실제로 `08_phase_b_implementation_log.md` §4.1.2에서
 `dart_filing_receipt_raw`·`dart_capital_change_raw`가 exporter 설정에 빠져 있어 raw export가 한 번
@@ -21,6 +21,7 @@
 | 4 | `tools/raw-parquet-exporter/config/export_tables.toml` | `[[tables]]` 블록 | 익스포터가 테이블을 모른다 |
 | 5 | `bin/raw-parquet-export-all.sh` | `raw_id_tables` / `date_month_tables` / `non_resumable_tables` 중 하나 | 배치 스크립트가 호출하지 않는다 |
 | 6 | `research/etl/config.py` | `RAW_TABLES` 튜플 | 마트에서 `table_glob()`이 `KeyError` |
+| **7** | **`service/collection_targets.py` 경유** | **`UniverseScope`를 받아 resolver 호출** | **유닛 테스트가 깨진다**(아래 §1.3) |
 
 **3번은 선택이 아니라 강제다.** `tests/unit/test_profiling.py`의
 `test_catalog_covers_all_pipeline_tables`가 `PIPELINE_FULL_REFRESH_TABLE_NAMES`의 모든 테이블이
@@ -32,6 +33,45 @@ profile catalog에 있어야 한다고 단언한다. 2번만 하고 3번을 빠�
 
 **컬럼만 추가하는 경우에도 2번을 반드시 본다.** `SYNC_TABLE_SPECS`의 SELECT/INSERT 컬럼 목록은
 명시적이라, 추가하지 않으면 **미러링에서 조용히 누락된다.** 3번의 테스트 같은 안전장치가 없다.
+
+### 1.3 수집 대상은 직접 고르지 않는다 ★
+
+**7번은 선택이 아니라 강제다.** `tests/unit/test_collection_targets.py`의
+`test_no_service_resolves_collection_targets_on_its_own`이 `service/` 아래에서
+`get_active_stocks(` 또는 `get_dart_corp_master(`를 직접 부르는 파일을 찾아 실패시킨다.
+
+**왜 이게 필요한가.** 2026-08-15 이전에는 여섯 서비스가 각자 대상을 정했고, 여섯 번 모두
+현재 상장 종목을 골랐다.
+
+```python
+storage.get_dart_corp_master(active_only=True, tickers=tickers)   # DART 5곳
+storage.get_active_stocks(market)                                 # prices, flows
+```
+
+같은 판단이 여섯 번 독립적으로, 그리고 **보이지 않게** 내려졌다. 결과는 모든 raw 테이블에서
+상폐 법인 커버리지 2.0~2.3%, 2016년 횡단면의 13.9% 결손이다
+([`poc/survivorship_gap.md`](poc/survivorship_gap.md)).
+
+**서비스마다 opt-in 플래그를 다는 것으로는 안 고쳐진다.** 다음 수집기가 또 같은 기본값을
+쓴다. 그래서 대상 해석을 한 곳으로 모으고, 우회를 테스트로 막았다.
+
+```python
+from krx_collector.domain.enums import UniverseScope
+from krx_collector.service.collection_targets import resolve_dart_targets
+
+def sync_x(..., scope: UniverseScope = UniverseScope.CURRENT):
+    targets = resolve_dart_targets(storage, scope, tickers)
+```
+
+| scope | 의미 | 쓸 때 |
+|---|---|---|
+| `CURRENT` | 현재 상장 (DART 2,657 / 주가 active) | **일 단위 증분 sync** |
+| `HISTORICAL` | ticker를 가진 적 있는 전체 (DART 3,959) | **백테스트에 들어가는 모든 백필** |
+
+**예외는 셋뿐**이고 테스트에 명시돼 있다 — `collection_targets`(resolver 자신),
+`sync_universe`(유니버스를 만드는 곳), `sync_dart_corp`(`is_active`를 정의하는 곳).
+
+CLI에는 `--universe-scope current|historical`로 노출한다.
 
 ### 1.1 sync cursor 인덱스
 

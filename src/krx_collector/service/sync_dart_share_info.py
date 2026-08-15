@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from krx_collector.adapters.opendart_common.client import OpenDartRequestExecutor
-from krx_collector.domain.enums import RunStatus, RunType
+from krx_collector.domain.enums import RunStatus, RunType, UniverseScope
 from krx_collector.domain.models import DartShareInfoSyncResult, IngestionRun
 from krx_collector.ports.share_info import (
     CapitalChangeProvider,
@@ -13,6 +13,7 @@ from krx_collector.ports.share_info import (
     ShareholderReturnProvider,
 )
 from krx_collector.ports.storage import Storage
+from krx_collector.service.collection_targets import resolve_dart_targets
 from krx_collector.util.pipeline import (
     OpenDartKeyExhaustedError,
     build_run_counts,
@@ -46,7 +47,7 @@ def sync_dart_share_info(
     skip_request_keys: set[str] | None = None,
     run_params_extra: dict[str, object] | None = None,
     capital_change_provider: CapitalChangeProvider | None = None,
-    include_delisted: bool = False,
+    scope: UniverseScope = UniverseScope.CURRENT,
 ) -> DartShareInfoSyncResult:
     """Synchronise OpenDART share-count/dividend/treasury-stock raw rows.
 
@@ -85,11 +86,7 @@ def sync_dart_share_info(
     no_data_request_keys: list[str] = []
     skip_request_keys = set() if force else (skip_request_keys or set())
     try:
-        targets = storage.get_dart_corp_master(
-            active_only=True,
-            tickers=tickers,
-            include_delisted=include_delisted,
-        )
+        targets = resolve_dart_targets(storage, scope, tickers)
         if not targets:
             raise RuntimeError(
                 "No active OpenDART corp mappings found. Run `dart sync-corp` first."
