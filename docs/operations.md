@@ -20,8 +20,20 @@ KRX 정규장 시간: 09:00–15:30 KST. 당일의 온전한 데이터를 확보
 # --incremental: 각 티커의 MAX(trade_date) 이후만 가져오므로 일일 catch-up이 빠릅니다.
   30 16  *  *  1-5  cd /opt/krx-data-pipeline && uv run krx-collector prices backfill --market all --incremental
 
+# 일별 시가총액·거래대금·상장주식수 — 매일 16:45 KST (평일)
+# prices backfill과 같은 KRX 원천이므로 시간대를 겹치지 않게 둡니다 (exit 75 lock).
+  45 16  *  *  1-5  cd /opt/krx-data-pipeline && uv run krx-collector prices market-cap-backfill --market all
+
 # 데이터 정합성 검증 — 매일 17:00 KST (평일)
   0  17  *  *  1-5  cd /opt/krx-data-pipeline && uv run krx-collector validate --market all
+
+# 월말 유니버스 스냅샷 — 매월 1일 05:00 KST
+# 전월 말일까지의 스냅샷을 채웁니다. 이미 있는 날짜는 건너뜁니다.
+  0   5  1  *  *    cd /opt/krx-data-pipeline && uv run krx-collector universe backfill-snapshots
+
+# 기업개황 refresh — 매월 1일 05:30 KST
+# 신규 상장분만 받습니다 (profile_fetched_at이 NULL인 것).
+  30  5  1  *  *    cd /opt/krx-data-pipeline && uv run krx-collector dart sync-corp-profile --universe-scope historical
 ```
 
 > **Tip:** crontab 맨 위에 `TZ=Asia/Seoul`을 설정하거나, systemd timer의 `OnCalendar=`를 사용하여 UTC 혼동을 방지하는 것이 좋습니다.
@@ -120,10 +132,62 @@ uv run krx-collector validate --date 2024-06-15 --market all
 uv run krx-collector validate
 ```
 
+```bash
+# 유니버스 변동 임계값 조정 (0이면 해당 검사 끔)
+uv run krx-collector validate --date 2016-06-30 --universe-drift-pct 5
+```
+
 수행되는 검증 항목:
 1. **OHLC 정합성**: 저가 ≤ 시가 ≤ 고가, 저가 ≤ 종가 ≤ 고가, 가격 > 0 체크.
-2. **누락된 거래일**: 거래소 휴장일(공휴일+주말)을 제외한 정상 거래일에 누락된 데이터가 있는지 확인.
-3. **유니버스 카운트 변동**: 이전 스냅샷 대비 종목 수가 5% 이상 변동했는지 확인. (구현 예정)
+2. **누락 종목**: 그 날짜에 **실제로 상장돼 있던 종목** 기준으로 누락을 센다.
+3. **유니버스 카운트 변동**: source별로 연속 스냅샷 크기를 비교해 임계값(기본 ±5%) 초과 시 경고.
+
+**2번의 기준이 2026-08-15에 바뀌었다.** 이전에는 `get_active_stocks()`, 즉 **오늘 상장된
+종목**과 비교했다. 과거 날짜에서는 그게 구조적으로 구멍을 못 본다 — 누락된 종목이 곧 그 뒤
+상폐된 종목이라 기대 집합에서도 빠져 상쇄되기 때문이다. 실제로 2016-06-30에서 이전 코드는
+누락 0을 보고했고, 지금은 **286 / 2,056 (13.9%)** 을 보고한다.
+
+과거 날짜는 그 시점 이전의 가장 가까운 `stock_master_snapshot`을 기준으로 삼는다.
+스냅샷이 없으면 현재 유니버스로 폴백하며, 어느 쪽을 썼는지 `ingestion_runs.params`의
+`universe_source`에 남는다. **`counts.universe_size`가 같이 기록되므로 "누락 0"이
+"완전"인지 "빈 유니버스"인지 구분된다.**
+
+> 과거 구간을 검증하려면 `universe backfill-snapshots`가 먼저 돌아 있어야 한다.
+
+### 신규 수집 명령 (2026-08 추가)
+
+```bash
+# N1 — 일별 KRX 시가총액 · 거래대금 · 상장주식수
+uv run krx-collector prices market-cap-backfill --start 2014-06-02 --end 2026-08-15
+
+# N3 — 월말 역사적 유니버스 스냅샷 (생존편향 감사)
+uv run krx-collector universe backfill-snapshots --start 2014-06-01 --end 2026-08-15
+
+# N2 — OpenDART 기업개황 (업종코드 · 설립일 · 결산월)
+uv run krx-collector dart sync-corp-profile --universe-scope historical
+```
+
+**`--universe-scope`가 모든 수집 명령에 붙는다.**
+
+| 값 | 대상 | 쓸 때 |
+|---|---|---|
+| `current` (기본) | 현재 상장 (DART 2,657 / 주가 active) | 일 단위 증분 sync |
+| `historical` | ticker를 가진 적 있는 전체 (DART 3,959) | **백테스트에 들어가는 모든 백필** |
+
+기본값이 `current`인 것은 일 sync 기준이다. **백필은 거의 항상 `historical`이어야 한다** —
+상폐 법인이 빠지면 부실·전이 피쳐가 구조적으로 부풀려진다
+(`docs/dev/20260731_raw_features/02_data_expansion_plan/poc/survivorship_gap.md`).
+
+```bash
+# 조정주가가 stale해진 종목 이력 재수집 (분할 이후 소급 재조정 미반영)
+uv run krx-collector prices backfill --refetch --tickers 005930,000660 --start 2014-06-02
+
+# 상폐 종목 가격 백필
+uv run krx-collector prices backfill --universe-scope historical --start 2014-06-02
+```
+
+`--refetch`는 gap detection을 건너뛰고 구간 전체를 다시 받아 덮어쓴다.
+`--incremental`과 함께 쓸 수 없다(아무것도 재수집하지 않으면서 성공처럼 보인다).
 
 ### 데이터베이스 초기화
 
