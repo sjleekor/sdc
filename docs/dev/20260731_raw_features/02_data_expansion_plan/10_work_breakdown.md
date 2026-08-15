@@ -257,18 +257,21 @@ ledger ────────────→ N6 (16만 호출 재개)
 
 상세: [`05_w2_industry_index.md`](05_w2_industry_index.md) · 약 3,600 호출 · 선행: N2
 
-- [ ] **N4-1 PoC** → `poc/n4_index_constituent.md`
-  - [ ] **업종 지수 코드 목록 확정** — 규모별·테마 지수는 뺀다
-  - [ ] `date` 포맷 (`YYMMDD` vs `YYYYMMDD`)
-  - [ ] 2014-05-02 하한이 실제로 걸리는가
-  - [ ] 구성종목 합집합의 전체 상장 종목 커버리지
+- [x] **N4-1 PoC** → [`poc/n4_index_constituent.md`](poc/n4_index_constituent.md)
+  - [x] **업종 지수 목록 확정** — KOSPI 22 · KOSDAQ 21, **중복 소속 0건**
+  - [x] **상위 개념 지수 발견** — 제조(496)⊃하위, 금융(100)⊃증권·보험.
+        제외하되 잔여 87종목은 **코드 차집합 그룹 2개**로 메운다
+  - [x] `date` 포맷 = **`YYYYMMDD`.** 틀리면 예외가 아니라 **조용히 빈 값**
+  - [x] 하한 **2014-05-01** 확인 (명시적 에러 메시지)
+  - [x] **커버리지 KOSPI 78.0% · KOSDAQ 66.2%** → 폴백 비율 리포트 필수
 - [ ] **N4-2 스키마 + 등록 6곳** — `date_month` 전략
 - [ ] **N4-3 어댑터 + 포트 + 서비스 + CLI** — `universe sync-index-constituents`
 - [ ] **N4-4 테스트** — 하한 밖 요청을 **아예 만들지 않는지**
 - [ ] **N4-5 결정 3개 고정 (결과 보기 전)**
-  - [ ] 업종 지수 코드 목록 — 상수로 박고 나중에 고치지 않는다
+  - [x] 업종 지수 코드 목록 — **PoC §3에 고정**
   - [ ] 업종 변경 판정 4개 조건 + 3% / 10% 임계값 — **운영 규칙임을 명시**
-  - [ ] 미편입 종목 폴백 정책 + `industry_source` 노출
+  - [x] 미편입 폴백 = N2 + `industry_source` 노출. **커버리지가 22~34% 비므로
+        폴백 비율 리포트를 필수로 둔다**
 - [ ] **N4-6 실행** — 2014-06 ~ 현재 월말
 - [ ] **N4-7 N2 대조 3종** — 커버리지 / 일치도 / **업종 변경 비율**
 - [ ] **N4-8 inactive 산업지수 4종 처리** — 활성화 / 재정의 / 삭제 중 택일
@@ -277,22 +280,23 @@ ledger ────────────→ N6 (16만 호출 재개)
 
 상세: [`06_w2_ownership_disclosure.md`](06_w2_ownership_disclosure.md) · **볼륨 PoC 전 미정**
 
-- [ ] **N5-1 PoC ★ 다른 무엇보다 먼저** → `poc/n5_ownership.md`
-  - [ ] **응답이 전체 이력인가 최근분인가** — 볼륨 100배 갈림길
-  - [ ] 최근분만이면 **연도 루프 우회가 불가능**하므로 **3차로 강등**하고 여기서 멈춘다
-  - [ ] 한 `rcept_no`에 몇 행이 오는가
-  - [ ] 같은 corp 2회 호출 시 행 순서 유지 → `row_ordinal` vs payload hash
-  - [ ] `sp_stock_lmp_irds_cnt` 부호 분포 (음수가 실제로 오는가)
-- [ ] **N5-2 스키마 2개 + 등록 6곳** — `raw_id_range`, 파티션 `["year(rcept_dt)"]`
-- [ ] **N5-3 어댑터 + 포트** — `adapters/opendart_ownership/`, exit 75 재개
-- [ ] **N5-4 서비스 + CLI** — `dart sync-ownership`, skip 키 `(corp_code)` + `--refresh-older-than`
-- [ ] **N5-5 테스트** — 한 접수에 보고자 3명·증권 2종이 섞인 픽스처
-- [ ] **N5-6 결정 4개 고정 (결과 보기 전)**
-  - [ ] 피쳐명 `ins_holding_increase` — **"매수"라고 부르지 않는다**
-  - [ ] 윈도 {60, 120} 두 개만 사전등록
-  - [ ] 정규화 분모 `listed_shares` (N1 선행)
-  - [ ] `majorstock`의 `report_resn` — **권고: 경영참여/단순투자 분리**
-- [ ] **N5-7 실행 + 검정력 판단** — 관측 수를 먼저 세고, 안 나오면 **피쳐 개발로 넘어가지 않는다**
+- [x] **N5-1 PoC ★** → [`poc/n5_ownership.md`](poc/n5_ownership.md)
+  - [x] **응답은 최근 2년 롤링 윈도.** 삼성전자(1975 상장)도 2024-08-26부터
+  - [x] 요청 인자가 `corp_code`뿐 → **연도 루프 우회 불가**
+  - [x] **강등이 아니라 경로 교체** — `dart_filing_receipt_raw`에 지분공시가
+        **2015-01 ~ 2026-08 전 구간, 139,697건 / 2,607 법인** 이미 있다
+  - [x] 커버리지 **98.1%**, 법인당 연 8건, 60거래일 윈도당 1.93건
+- [x] **N5-2~N5-5 취소** — 수집 자체를 하지 않는다. 스키마·어댑터·서비스 불필요
+- [x] **N5-6 결정** — **수량을 포기하고 빈도로 간다.**
+      elestock을 다 받아도 도달점은 `ins_holding_increase`(방향 혼재)이고
+      학습 구간이 1년이다. receipt 경로는 **10.5년**
+  - [x] 후보: `own_insider_filing_60d` · `own_insider_filing_burst` ·
+        `own_major_filing_60d` · `own_amendment_ratio_1y`. 윈도 {60,120}, 부호 미고정
+  - [x] 노출 시점 = `rcept_dt`의 **다음 거래일**
+- [ ] **N5-7 (신규) receipt 기반 지분공시 피쳐 구현** — 신규 수집 없음.
+      **`09` §3의 공시 활동 피쳐와 같은 원천이므로 한 묶음으로 사전등록**
+- [ ] **N5-8 (보류) `elestock` 정기 수집** — 지금 만들지 않는다.
+      **다만 지연 1개월 = 과거 1개월 영구 손실**(2년 윈도가 흘러간다)
       (`fin_sue` coverage 0.0000 사례를 반복하지 않는다)
 
 ---
@@ -307,15 +311,21 @@ ledger ────────────→ N6 (16만 호출 재개)
 
 상세: [`07_w3_periodic_report_extras.md`](07_w3_periodic_report_extras.md) · 약 16만 호출 · 3일 · 선행: N3, L-1
 
-- [ ] **N6-1 PoC** (50 호출 미만) → `poc/n6_periodic_extras.md`
-  - [ ] **10개 종목 5년치 변동 폭 사전 확인** — 변동이 없으면 이 패키지를 접거나 축소
-  - [ ] 같은 요청 2회의 행 순서 안정성 → `row_ordinal` vs payload hash
-  - [ ] `hyslrChgSttus`에 변동일자가 있는가 → 분기 수집 예외 판단
-  - [ ] 감사의견 코드 체계, 직원 수 필드 구분, 2015년 데이터 존재 여부
+- [x] **N6-1 PoC** → [`poc/n6_periodic_extras.md`](poc/n6_periodic_extras.md)
+  - [x] **변동 폭 확인 — 패키지 살아 있다.** 직원 수 YoY 표준편차 **13.7%**,
+        |변화|>5%가 **50%**. 범위 −37.7% ~ +61.3%
+  - [x] 행 순서 **안정** → `row_ordinal`. payload hash 불필요
+  - [x] **`hyslrChgSttus`에 `change_on`이 있다** → 분기 수집 예외 불필요(+97,200 절약).
+        게다가 **과거 변동을 누적으로 준다**(2023 요청에 2019~2023의 14건)
+  - [x] 감사의견은 **3개년씩** 온다 → 12년에 4회
+  - [x] 2015년 데이터 **정상**
+  - [x] **호출량 162,000 → 83,700** (`exctvSttus` 1차 제외 + 누적/3개년 응답 활용)
 - [ ] **N6-2 스키마 2개 + 등록 6곳** — `rcept_no`를 **NOT NULL + UNIQUE에 포함**(vintage 보존)
 - [ ] **N6-3 어댑터 + 포트** — `opendart_share_info` 구조 복제
 - [ ] **N6-4 서비스 + CLI** — `dart sync-periodic-extras`, 기본 `--reprt-codes 11011`
-- [ ] **N6-5 대상 집합 구성** — N3 PIT 유니버스 + `dart_filing_receipt_raw`로 **역사적 상장사**
+- [ ] **N6-5 대상 집합 구성** — ~~N3 + filing_receipt~~ → **S-1이 선행 조건**.
+      `dart_filing_receipt_raw`가 `active_only=True`로 수집돼 **그 자체가 편향돼 있다**
+      ([`poc/survivorship_gap.md`](poc/survivorship_gap.md))
       (현재 상장사로 잡으면 부실 신호에 생존편향이 그대로 들어온다)
 - [ ] **N6-6 테스트**
   - [ ] 정정본 시나리오 — 다른 `rcept_no`가 오면 덮어쓰지 않고 행이 는다
@@ -325,6 +335,8 @@ ledger ────────────→ N6 (16만 호출 재개)
   - [ ] `hc_revenue_per_employee` 분모 시점
   - [ ] 감사의견 인코딩 — **권고: 이진**
   - [ ] 부호 — 감사 비적정 `−` 고정, 최대주주 지분·직원 증가는 **미고정임을 사전에 적는다**
+  - [ ] **(신규) 합병·분할 보정** — 직원 수 점프가 구조 변경인지 갈라낸다
+        (LG화학 −37.7% = 물적분할). `listed_shares` 급변과 대조
 - [ ] **N6-8 백필** — 연도 분할, `dart-backfill-all-years.sh` **마지막 단계**
 - [ ] **N6-9 횡단면 변동 측정** + **final-vintage 한계를 피쳐 문서·evidence grade에 명시**
 - [ ] **N6-10 밸류업 공시 분류 가능성 확인** — 수집·분류만, 검정은 나중
@@ -335,9 +347,16 @@ ledger ────────────→ N6 (16만 호출 재개)
 
 **PR3~PR6은 N1을 끝낸 뒤면 거의 복사다.**
 
-- [ ] **N7-1 PoC** — 컬럼명, **`0` sentinel 실측**, 과거 구간, 시장별 호출 → `poc/n7_fundamental.md`
+- [x] **N7-1 PoC** → [`poc/n7_fundamental.md`](poc/n7_fundamental.md)
+  - [x] 컬럼 6개(BPS/PER/PBR/EPS/DIV/DPS), 과거 구간 정상, 휴장일은 전 종목 0
+  - [x] **`PER == 0` 314건(34.0%)이 전부 EPS ≤ 0** — 적자기업과 정확히 대응
+  - [x] **I1의 29.2%와 근접** → C3 검증 재료 확보
+  - [x] **`DIV`는 0 → NULL 하지 않는다** — 무배당은 진짜 0(DPS와 259=259로 짝)
+  - [x] **`BPS`를 NULL 대상에 추가** — PBR과 123=123으로 짝
+  - [x] 행 수가 시총보다 **29·20종목 적다** → 조인 시 결측 확인 필요
 - [ ] **N7-2 스키마 + 등록 6곳** — `date_month`. **N1과 합치지 않는다**
-- [ ] **N7-3 어댑터 + 포트 + 도메인** — `PER/PBR/DIV == 0` → NULL 정규화 (**EPS·DPS는 제외**)
+- [ ] **N7-3 어댑터 + 포트 + 도메인** — **`PER`·`PBR`·`BPS` 0 → NULL.
+      `DIV`·`DPS`·`EPS`는 0 유지** (PoC §2에서 계획 수정)
 - [ ] **N7-4 스토리지** — 슬라이스 `(trade_date, market)`, 원자적 upsert + 행 수 대조
 - [ ] **N7-5 서비스 + CLI** — `prices fundamental-backfill`
 - [ ] **N7-6 테스트**
@@ -351,7 +370,14 @@ ledger ────────────→ N6 (16만 호출 재개)
 
 상세: [`08_w3_valuation_and_macro.md`](08_w3_valuation_and_macro.md) 파트 B · **새 테이블 없음**
 
-- [ ] **N8-1** ECOS 통계표 코드 확인 + **vintage 조회 지원 여부** + 원계열/계절조정 선택
+- [x] **N8-1** → [`poc/n8_employment.md`](poc/n8_employment.md)
+  - [x] 통계표 **`901Y027`**(경제활동인구, 월간). 실업률 `I61BC`·고용률 `I61E`·
+        취업자 `I61BA`, **1999-06부터**
+  - [x] **vintage 조회 미지원** → final-vintage 명시
+  - [x] **원계열/계절조정이 `ITEM_CODE2`로 갈린다** (`I28A`/`I28B`) → **원계열 채택**
+  - [x] **(신규) KSIC 대분류별 취업자 존재** — `industry_groups.py` 체계와 매칭.
+        업종 단위 매크로 조건화 재료. 수집만, 검정은 나중
+  - [ ] ECOS 어댑터가 `ITEM_CODE2`를 지정할 수 있는가 — 안 되면 어댑터 확장 선행
 - [ ] **N8-2** **readiness 창 정렬 문제 먼저 정리** — 37개 중 4개만 ready인 상태에서
       시리즈를 늘리면 게이트가 더 어지러워진다
 - [ ] **N8-3** `definitions/common_features.py`에 시리즈 추가 + 유닛 테스트
@@ -359,6 +385,33 @@ ledger ────────────→ N6 (16만 호출 재개)
 - [ ] **N8-5 중복 측정 게이트** — **변환 후·availability 정렬 후** 상관.
       0.8 초과면 **추가하지 않는다** (raw level 상관은 게이트로 쓰지 않는다)
 - [ ] **N8-6** inactive pykrx 폴백 3종 처리
+
+---
+
+## S 묶음 — 생존편향 (신규 축, 2026-08-15 발견)
+
+N6 대상 집합을 확인하다 나왔다. 측정: [`poc/survivorship_gap.md`](poc/survivorship_gap.md)
+
+**신규 원천이 아니라 기존 수집의 대상 집합 결함 수정이다.**
+`dart_corp_master`의 ticker 매핑 법인 3,959개 중 **1,330개가 상폐 법인**인데,
+모든 raw 테이블에서 커버리지가 **2.0~2.3%**다. 원인은 모든 DART 서비스가
+`get_dart_corp_master(active_only=True)`를, `backfill_daily_prices`가
+`get_active_stocks()`를 쓰기 때문이다.
+
+**복구 경로가 둘 다 열려 있다** — corpCode.xml이 상폐 법인의 `stock_code`를 유지하고,
+pykrx가 상폐 종목 OHLCV를 상폐일까지 준다(5종목 중 4종목 확인).
+
+- [ ] **S-1 DART 대상 확장** — `active_only=False`를 CLI에 노출.
+      **저장소 메서드는 이미 인자를 받는다.** 대상 +1,302 법인
+  - [ ] DS002/DS004가 상폐 법인에도 응답하는지 확인
+  - [ ] `sync-filings` 우선 (~15,600 호출) → 지분공시 피쳐(N5-7)의 편향 제거
+  - [ ] `sync-financials` / `sync-share-info` / `sync-xbrl`
+  - [ ] **N6보다 먼저다.** 편향된 대상으로 8.4만 호출을 돌리면 의미가 없다
+- [ ] **S-2 상폐 종목 가격 백필** — `daily_ohlcv`도 `get_active_stocks()`로 대상을 잡으므로
+      같은 확장이 필요. **결정 4의 재수집 PR과 같은 작업**이라 한 번에 푼다
+- [ ] **S-3 상폐 시점 확정** — N3 월말 스냅샷 diff + `daily_ohlcv` 마지막 거래일
+- [ ] **S-4 편향 크기 측정** — 같은 피쳐를 편향 표본과 복구 표본으로 각각 돌린 IC 차이.
+      **이게 생존편향의 크기 그 자체다**
 
 ---
 
