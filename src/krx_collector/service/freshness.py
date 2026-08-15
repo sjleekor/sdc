@@ -1,23 +1,29 @@
-"""Read-only freshness status report for the ``ops freshness-report`` command.
+"""Freshness status for ``ops freshness-report``, and the staleness gate on it.
 
-Raw-collection status only. The freshness *gate* that used to live here
-(``assert_common_freshness``) moved to the compute node as
-``research.etl.marts.reports.freshness_violations`` (refactor §4, decision 6), and
-the derived tables it referenced (``stock_metric_fact`` /
-``common_feature_daily_fact``) are recomputed by the DuckDB marts, so they are no
-longer surfaced here.
+Raw-collection status only. The freshness gate over the *derived* tables moved to
+the compute node as ``research.etl.marts.reports.freshness_violations`` (refactor
+§4, decision 6); what is here covers the raw layer the collectors write.
+
+The report alone is a human-read artifact that always succeeds, which is why
+:func:`evaluate_staleness` exists. A collection run that never happened leaves no
+``ingestion_runs`` row and no error anywhere — sj2-server was down over the
+2026-08-14 evening window and the whole KRX chain plus the common sync simply did
+not run. Every raw table sat a day behind and nothing said so. Only the data
+itself carries that evidence, so the check has to be "is the newest row as new as
+the calendar says it should be", not "did any run fail".
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from krx_collector.domain.enums import Source
 from krx_collector.domain.models import IngestionRun
+from krx_collector.infra.calendar.trading_days import get_trading_days
 from krx_collector.ports.storage import Storage
 from krx_collector.service.sync_krx_flows import FLOW_METRIC_GROUPS
-from krx_collector.util.time import now_kst
+from krx_collector.util.time import now_kst, today_kst
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,3 +109,104 @@ def build_freshness_report(storage: Storage, *, running_limit: int = 20) -> Fres
         running_runs=storage.get_running_ingestion_runs(limit=running_limit),
         generated_at=now_kst(),
     )
+
+
+# Sources whose observations land on KRX trading days. Everything else (ECOS,
+# FRED) publishes on its own calendar with a release lag, so a trading-day
+# budget would flag it every single day and the gate would be ignored.
+TRADING_DAY_SOURCES = frozenset({Source.KRX, Source.FDR, Source.PYKRX})
+
+DEFAULT_MAX_LAG_TRADING_DAYS = 1
+DEFAULT_MAX_LAG_CALENDAR_DAYS = 14
+
+
+@dataclass(frozen=True, slots=True)
+class StaleFinding:
+    """One domain whose newest row is older than its budget allows."""
+
+    domain: str
+    latest: date | None
+    required_at_or_after: date
+    cadence: str  # "trading" | "calendar"
+
+    def describe(self) -> str:
+        latest = self.latest.isoformat() if self.latest else "(empty)"
+        return (
+            f"{self.domain}: latest={latest} "
+            f"but needs >= {self.required_at_or_after.isoformat()} ({self.cadence})"
+        )
+
+
+def _trading_day_threshold(
+    as_of: date,
+    max_lag_trading_days: int,
+    holidays: set[date] | None,
+) -> date | None:
+    """The oldest trading day a collector may still be sitting on.
+
+    ``max_lag_trading_days=1`` means the most recent session must be stored, so
+    this check belongs *after* the evening collection window, not before it.
+    """
+    lag = max(1, max_lag_trading_days)
+    # 60 calendar days covers the longest KRX holiday cluster with room to spare.
+    sessions = get_trading_days(as_of - timedelta(days=60), as_of, holidays=holidays)
+    if not sessions:
+        return None
+    return sessions[-lag] if len(sessions) >= lag else sessions[0]
+
+
+def evaluate_staleness(
+    report: FreshnessReport,
+    *,
+    as_of: date | None = None,
+    max_lag_trading_days: int = DEFAULT_MAX_LAG_TRADING_DAYS,
+    max_lag_calendar_days: int = DEFAULT_MAX_LAG_CALENDAR_DAYS,
+    holidays: set[date] | None = None,
+) -> list[StaleFinding]:
+    """Return the domains in *report* that are behind their freshness budget.
+
+    An empty list means every domain is current. A domain with no rows at all
+    counts as stale rather than as "nothing to check" — an empty table is the
+    loudest possible version of the problem, not an exemption from it.
+    """
+    as_of = as_of or today_kst()
+    findings: list[StaleFinding] = []
+
+    trading_threshold = _trading_day_threshold(as_of, max_lag_trading_days, holidays)
+    calendar_threshold = as_of - timedelta(days=max(1, max_lag_calendar_days))
+
+    def check(domain: str, latest: date | None, threshold: date | None, cadence: str) -> None:
+        if threshold is None:
+            return
+        if latest is None or latest < threshold:
+            findings.append(
+                StaleFinding(
+                    domain=domain,
+                    latest=latest,
+                    required_at_or_after=threshold,
+                    cadence=cadence,
+                )
+            )
+
+    check("daily_ohlcv", report.price_latest_date, trading_threshold, "trading")
+
+    for group, latest in sorted(report.flow_group_latest_dates.items()):
+        check(f"krx_security_flow_raw:{group}", latest, trading_threshold, "trading")
+
+    for row in sorted(report.common_series, key=lambda item: item.series_id):
+        if row.source in TRADING_DAY_SOURCES:
+            check(
+                f"common:{row.series_id}",
+                row.latest_observation_date,
+                trading_threshold,
+                "trading",
+            )
+        else:
+            check(
+                f"common:{row.series_id}",
+                row.latest_observation_date,
+                calendar_threshold,
+                "calendar",
+            )
+
+    return findings

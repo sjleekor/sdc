@@ -32,6 +32,10 @@ from krx_collector.adapters.opendart_common.client import OpenDartRequestExecuto
 from krx_collector.domain.enums import UniverseScope
 from krx_collector.infra.config.settings import get_settings
 from krx_collector.infra.logging.setup import setup_logging
+from krx_collector.service.freshness import (
+    DEFAULT_MAX_LAG_CALENDAR_DAYS,
+    DEFAULT_MAX_LAG_TRADING_DAYS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -325,6 +329,25 @@ def _handle_ops_freshness_report(args: argparse.Namespace) -> None:
     for run in report.running_runs:
         started_at = run.started_at.isoformat() if run.started_at else "-"
         print(f"     {run.run_id} {run.run_type.value} started_at={started_at}")
+
+    if not args.fail_if_stale:
+        return
+
+    from krx_collector.service.freshness import evaluate_staleness
+
+    findings = evaluate_staleness(
+        report,
+        max_lag_trading_days=args.max_lag_trading_days,
+        max_lag_calendar_days=args.max_lag_calendar_days,
+    )
+    if not findings:
+        print("   - staleness gate: OK")
+        return
+
+    print(f"❌ {len(findings)} domain(s) behind their freshness budget:", file=sys.stderr)
+    for finding in findings:
+        print(f"   - {finding.describe()}", file=sys.stderr)
+    sys.exit(1)
 
 
 def _dart_financial_actual_attempt_estimate(
@@ -2267,6 +2290,34 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=20,
         help="Maximum running ingestion runs to show (default: 20).",
+    )
+    ops_freshness.add_argument(
+        "--fail-if-stale",
+        action="store_true",
+        help=(
+            "Exit 1 when a raw domain is behind its freshness budget. "
+            "Without this the command only prints, so a scheduled run of it "
+            "stays green through an outage. Schedule it AFTER the evening "
+            "collection window."
+        ),
+    )
+    ops_freshness.add_argument(
+        "--max-lag-trading-days",
+        type=int,
+        default=DEFAULT_MAX_LAG_TRADING_DAYS,
+        help=(
+            "Trading-day budget for KRX-cadence domains "
+            f"(default: {DEFAULT_MAX_LAG_TRADING_DAYS}; 1 = the latest session must be stored)."
+        ),
+    )
+    ops_freshness.add_argument(
+        "--max-lag-calendar-days",
+        type=int,
+        default=DEFAULT_MAX_LAG_CALENDAR_DAYS,
+        help=(
+            "Calendar-day budget for release-lagged sources such as ECOS and FRED "
+            f"(default: {DEFAULT_MAX_LAG_CALENDAR_DAYS})."
+        ),
     )
     ops_freshness.set_defaults(handler=_handle_ops_freshness_report)
 
