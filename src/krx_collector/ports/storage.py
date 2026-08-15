@@ -532,6 +532,46 @@ class Storage(Protocol):
         """
         ...
 
+    def insert_stock_master_snapshot_only(
+        self,
+        snapshot: StockUniverseSnapshot,
+    ) -> UpsertResult:
+        """Persist a snapshot and its items **without touching stock_master**.
+
+        ``upsert_stock_master`` does three things in one call, and the third is
+        an upsert of ``stock_master``.  Calling it with a reconstructed
+        historical snapshot would let a 2016 ticker list overwrite the current
+        universe — statuses, names and ``last_seen_date`` alike.
+
+        This method exists so a backfill can add rows to the snapshot tables and
+        nothing else.  Who is listed *today* stays the job of ``universe sync``;
+        deciding who was listed on a past date is the reader's job (the mart).
+
+        Idempotent on ``(as_of_date, source)``: re-running a backfill over a
+        date that already has a snapshot from the same source is a no-op.
+
+        Args:
+            snapshot: Snapshot to persist.
+
+        Returns:
+            Counters for the snapshot items written.
+        """
+        ...
+
+    def get_existing_snapshot_dates(self, source: Source) -> set[date]:
+        """Return ``as_of_date`` values that already have a snapshot from *source*.
+
+        The skip-if-present key for the universe backfill.  Scoped by source so
+        backfilled snapshots and live ones are counted separately.
+
+        Args:
+            source: Snapshot source to filter on.
+
+        Returns:
+            Set of dates already captured.
+        """
+        ...
+
     # -- Daily OHLCV ----------------------------------------------------------
 
     def upsert_daily_bars(self, bars: list[DailyBar]) -> UpsertResult:

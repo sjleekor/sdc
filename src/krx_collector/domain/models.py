@@ -665,6 +665,25 @@ class MarketCapBackfillResult:
 
 
 @dataclass(slots=True)
+class UniverseSnapshotBackfillResult:
+    """Outcome of a historical universe-snapshot backfill run.
+
+    Attributes:
+        snapshots_attempted: Month-end dates considered.
+        snapshots_skipped: Dates that already had a backfilled snapshot.
+        snapshots_written: Snapshots newly persisted.
+        items_written: Snapshot item rows inserted.
+        errors: Per-date error messages, keyed ``"YYYY-MM-DD"``.
+    """
+
+    snapshots_attempted: int = 0
+    snapshots_skipped: int = 0
+    snapshots_written: int = 0
+    items_written: int = 0
+    errors: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class DartCorpCodeResult:
     """Result of fetching the OpenDART corporation-code master."""
 

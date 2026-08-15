@@ -188,6 +188,101 @@ class PostgresStorage:
 
         return result
 
+    def insert_stock_master_snapshot_only(
+        self,
+        snapshot: StockUniverseSnapshot,
+    ) -> UpsertResult:
+        """Persist a snapshot and its items without touching ``stock_master``.
+
+        Deliberately steps 1 and 2 of ``upsert_stock_master`` and NOT step 3 —
+        see the port docstring.  A historical snapshot must never rewrite the
+        current universe.
+        """
+        if not snapshot.records:
+            return UpsertResult()
+
+        result = UpsertResult()
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                # Idempotent on (as_of_date, source): a second run over the same
+                # date must not stack duplicate snapshots.
+                cur.execute(
+                    """
+                    SELECT 1 FROM stock_master_snapshot
+                    WHERE as_of_date = %s AND source = %s
+                    LIMIT 1
+                    """,
+                    (snapshot.as_of_date, snapshot.source.value),
+                )
+                if cur.fetchone() is not None:
+                    return result
+
+                cur.execute(
+                    """
+                    INSERT INTO stock_master_snapshot (
+                        snapshot_id,
+                        as_of_date,
+                        source,
+                        fetched_at,
+                        record_count
+                    )
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (
+                        snapshot.snapshot_id,
+                        snapshot.as_of_date,
+                        snapshot.source.value,
+                        snapshot.fetched_at,
+                        snapshot.record_count,
+                    ),
+                )
+
+                items = [
+                    (
+                        snapshot.snapshot_id,
+                        s.ticker,
+                        s.market.value,
+                        s.name,
+                        s.status.value,
+                        s.listing_date,
+                    )
+                    for s in snapshot.records
+                ]
+                page_size = 1000
+                for offset in range(0, len(items), page_size):
+                    page = items[offset : offset + page_size]
+                    psycopg2.extras.execute_values(
+                        cur,
+                        """
+                        INSERT INTO stock_master_snapshot_items (
+                            snapshot_id,
+                            ticker,
+                            market,
+                            name,
+                            status,
+                            listing_date
+                        )
+                        VALUES %s
+                        ON CONFLICT (snapshot_id, ticker, market) DO NOTHING
+                        """,
+                        page,
+                        page_size=len(page),
+                    )
+                    result.inserted += cur.rowcount
+
+        return result
+
+    def get_existing_snapshot_dates(self, source: Source) -> set[date]:
+        """Return ``as_of_date`` values already captured for *source*."""
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT as_of_date FROM stock_master_snapshot WHERE source = %s",
+                    (source.value,),
+                )
+                return {row[0] for row in cur.fetchall()}
+
     def get_active_stocks(self, market: Market | None = None) -> list[Stock]:
         """Return currently active stocks from stock_master."""
         stocks = []

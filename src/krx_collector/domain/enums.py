@@ -24,6 +24,11 @@ class Source(StrEnum):
 
     FDR = "FDR"
     PYKRX = "PYKRX"
+    # Historical universe snapshots reconstructed after the fact.  Kept
+    # distinct from PYKRX so that `sync_universe`'s snapshot diff (which infers
+    # delistings from consecutive snapshots) never mixes a backfilled snapshot
+    # in with the live series.
+    PYKRX_BACKFILL = "PYKRX_BACKFILL"
     OPENDART = "OPENDART"
     KRX = "KRX"
     ECOS = "ECOS"
@@ -49,6 +54,7 @@ class RunType(StrEnum):
     """Pipeline run type recorded in ingestion_runs."""
 
     UNIVERSE_SYNC = "universe_sync"
+    UNIVERSE_SNAPSHOT_BACKFILL = "universe_snapshot_backfill"
     DAILY_BACKFILL = "daily_backfill"
     MARKET_CAP_BACKFILL = "market_cap_backfill"
     VALIDATE = "validate"

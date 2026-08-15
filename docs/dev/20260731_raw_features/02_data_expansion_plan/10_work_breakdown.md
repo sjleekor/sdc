@@ -191,16 +191,31 @@ ledger ────────────→ N6 (16만 호출 재개)
   - [x] `market='ALL'`은 시장 구분을 주지 않는다 → 시장별 호출
   - [ ] 우선주·리츠·스팩 혼입 여부 → 필터 정책 (N3-3 구현 시)
   - [ ] 종목명 조회 비용 → 이름 채우기 방식 결정 (N3-3 구현 시)
-- [ ] **N3-2 enum + 스토리지 메서드**
-  - [ ] `Source.PYKRX_BACKFILL` — 현재 enum에 없다
-  - [ ] `RunType.UNIVERSE_SNAPSHOT_BACKFILL`
-  - [ ] `insert_stock_master_snapshot_only` — **기존 `upsert_stock_master`는 `stock_master`도
-        갱신한다. 그대로 쓰면 현재 유니버스가 오염된다**
-- [ ] **N3-3 서비스 + CLI** — `universe backfill-snapshots`, skip 키 `(as_of_date, source)`
-- [ ] **N3-4 테스트**
-  - [ ] `stock_master`를 갱신하지 않는다는 명시적 단언
-  - [ ] **기존 `sync_universe` diff 회귀 테스트** — 이 PR에서 가장 위험한 부분
-- [ ] **N3-5 실행** — 2014-06 ~ 현재 월말
+- [x] **N3-2 enum + 스토리지 메서드** (2026-08-15)
+  - [x] `Source.PYKRX_BACKFILL` · `RunType.UNIVERSE_SNAPSHOT_BACKFILL`
+  - [x] `insert_stock_master_snapshot_only` — `upsert_stock_master`의 1·2단계만 하고
+        **3단계(`stock_master` upsert)는 하지 않는다**
+  - [x] `get_existing_snapshot_dates(source)` — skip 키, source로 스코프
+- [x] **N3-2b 어댑터** — `PykrxHistoricalUniverseProvider` (2026-08-15)
+  - [x] **종목명 조회 비용 문제를 근본 해결.** `get_market_ticker_name`은 개당 0.354s
+        (실측) → 145개월 × 2시장 × 2,700종목 = **약 38시간**.
+        `get_market_price_change_by_ticker(d, d, market)`가 **전종목 종목명을 1회 호출**로 준다
+  - [x] 네 시점(2014·2016·2020·2024) 종목 집합 완전 일치, 빈 이름 0건 확인
+  - [x] 이름 조회 실패 시 ticker로 폴백 — 스냅샷을 잃지 않는다
+- [x] **N3-3 서비스 + CLI** (2026-08-15) — `universe backfill-snapshots`,
+      월말 **거래일** 산출(달력 말일이 휴장이면 그 달 마지막 세션)
+- [x] **N3-4 테스트** — 유닛 17 + 통합 3
+  - [x] `FakeStorage.upsert_stock_master`가 **호출되면 즉시 실패**하도록 단언
+  - [x] **통합 테스트로 SQL 레벨 검증** — `stock_master` 행을 심고 그와 모순되는 과거
+        스냅샷을 써도 master 행이 그대로인가. 이게 실제 위험 지점이다
+  - [x] `sync_universe`는 `stock_master`와만 diff한다는 것을 확인 —
+        `stock_master`를 안 건드리면 오염이 원천 차단된다
+  - [x] 빈 유니버스는 **에러로 처리** (시장 전체 상폐로 보이면 안 된다)
+- [x] **N3-5 로컬 검증** (2016-01~06, 2026-08-15)
+  - [x] 스냅샷 6개 / items 12,293행, 종목명 정상, 폴백 0건
+  - [x] **`stock_master` 행 수 0 유지** — 백필이 전혀 건드리지 않았다
+  - [x] idempotent — 재실행 6 skipped / 0 written
+- [ ] **N3-5b 전량 실행** — 2014-06 ~ 현재 월말 (약 145회). **prod 배포 후**
 - [ ] **N3-6 상폐 종목 데이터 실태 조사** — **이게 이 패키지의 진짜 결론**
   - [ ] 연도별 상폐 추정 건수 vs KRX 공표치
   - [ ] 상폐 종목 중 `daily_ohlcv` 보유 비율 — **낮으면 편향이 남는다**

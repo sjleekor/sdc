@@ -1484,6 +1484,56 @@ def _handle_universe_sync(args: argparse.Namespace) -> None:
         print(f"   - Delisted tickers: {len(result.delisted_tickers)}")
 
 
+def _handle_universe_backfill_snapshots(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector universe backfill-snapshots``."""
+    settings = get_settings()
+
+    from krx_collector.domain.enums import Market
+
+    markets = []
+    for m in args.markets.split(","):
+        m_upper = m.strip().upper()
+        if m_upper in ("KOSPI", "KOSDAQ"):
+            markets.append(Market(m_upper))
+        else:
+            print(f"❌ Unknown market: {m}", file=sys.stderr)
+            sys.exit(1)
+
+    print(
+        f"→ universe backfill-snapshots: markets={[m.value for m in markets]}, "
+        f"start={args.start}, end={args.end}, "
+        f"rate_limit={args.rate_limit_seconds}, force={args.force}"
+    )
+
+    from krx_collector.adapters.universe_pykrx.provider import (
+        PykrxHistoricalUniverseProvider,
+    )
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.backfill_universe_snapshots import (
+        backfill_universe_snapshots,
+    )
+
+    result = backfill_universe_snapshots(
+        provider=PykrxHistoricalUniverseProvider(),
+        storage=PostgresStorage(settings.db_dsn),
+        markets=markets,
+        start=args.start,
+        end=args.end,
+        rate_limit_seconds=args.rate_limit_seconds,
+        force=args.force,
+    )
+
+    if result.errors:
+        print(f"⚠ Snapshot backfill completed with {len(result.errors)} errors.", file=sys.stderr)
+    else:
+        print("✅ Snapshot backfill completed successfully.")
+
+    print(f"   - Snapshots attempted: {result.snapshots_attempted}")
+    print(f"   - Snapshots skipped:   {result.snapshots_skipped}")
+    print(f"   - Snapshots written:   {result.snapshots_written}")
+    print(f"   - Items written:       {result.items_written}")
+
+
 def _handle_prices_backfill(args: argparse.Namespace) -> None:
     """Handle ``krx-collector prices backfill``."""
     settings = get_settings()
@@ -2695,6 +2745,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Replace all stock_master rows instead of incremental diff.",
     )
     universe_sync.set_defaults(handler=_handle_universe_sync)
+
+    universe_backfill = universe_sub.add_parser(
+        "backfill-snapshots",
+        help="Backfill month-end historical universe snapshots (survivorship audit).",
+    )
+    universe_backfill.add_argument(
+        "--markets",
+        default="kospi,kosdaq",
+        help="Comma-separated market list (default: kospi,kosdaq).",
+    )
+    universe_backfill.add_argument("--start", type=_parse_date, default=None)
+    universe_backfill.add_argument("--end", type=_parse_date, default=None)
+    universe_backfill.add_argument("--rate-limit-seconds", type=float, default=0.5)
+    universe_backfill.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Re-fetch dates that already have a backfilled snapshot.",
+    )
+    universe_backfill.set_defaults(handler=_handle_universe_backfill_snapshots)
 
     # -- prices ---------------------------------------------------------------
     prices_parser = subparsers.add_parser("prices", help="Price data commands.")
