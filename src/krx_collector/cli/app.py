@@ -1571,6 +1571,7 @@ def _handle_universe_backfill_snapshots(args: argparse.Namespace) -> None:
         end=args.end,
         rate_limit_seconds=args.rate_limit_seconds,
         force=args.force,
+        max_consecutive_failures=args.max_consecutive_failures,
     )
 
     if result.errors:
@@ -1660,6 +1661,7 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
         allow_large_range=args.allow_large_range,
         refetch=args.refetch,
         scope=UniverseScope(args.universe_scope),
+        max_consecutive_failures=args.max_consecutive_failures,
     )
 
     if result.errors:
@@ -1733,6 +1735,7 @@ def _handle_prices_market_cap_backfill(args: argparse.Namespace) -> None:
         long_rest_interval=long_rest_interval,
         long_rest_seconds=long_rest_seconds,
         force=args.force,
+        max_consecutive_failures=args.max_consecutive_failures,
     )
 
     if result.errors:
@@ -2906,6 +2909,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Re-fetch dates that already have a backfilled snapshot.",
     )
+    universe_backfill.add_argument(
+        "--max-consecutive-failures",
+        type=int,
+        default=5,
+        help=(
+            "Stop the run after this many targets fail in a row (0 disables). "
+            "Guards against grinding through the whole target list while the "
+            "source is refusing, which turns a temporary throttle into a block."
+        ),
+    )
     universe_backfill.set_defaults(handler=_handle_universe_backfill_snapshots)
 
     # -- prices ---------------------------------------------------------------
@@ -3020,6 +3033,16 @@ def build_parser() -> argparse.ArgumentParser:
             "unreachable otherwise, even when named in --tickers."
         ),
     )
+    prices_backfill.add_argument(
+        "--max-consecutive-failures",
+        type=int,
+        default=5,
+        help=(
+            "Stop the run after this many targets fail in a row (0 disables). "
+            "Guards against grinding through the whole target list while the "
+            "source is refusing, which turns a temporary throttle into a block."
+        ),
+    )
     prices_backfill.set_defaults(handler=_handle_prices_backfill)
 
     prices_market_cap = prices_sub.add_parser(
@@ -3046,6 +3069,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Re-fetch slices that are already complete.",
+    )
+    prices_market_cap.add_argument(
+        "--max-consecutive-failures",
+        type=int,
+        default=5,
+        help=(
+            "Stop the run after this many targets fail in a row (0 disables). "
+            "Guards against grinding through the whole target list while the "
+            "source is refusing, which turns a temporary throttle into a block."
+        ),
     )
     prices_market_cap.set_defaults(handler=_handle_prices_market_cap_backfill)
 

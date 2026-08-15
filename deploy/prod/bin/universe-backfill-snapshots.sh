@@ -15,6 +15,8 @@ source "$script_dir/lib/sdc-wrapper.sh"
 args=(
   universe backfill-snapshots
   --markets "${UNIVERSE_SNAPSHOT_MARKETS:-kospi,kosdaq}"
+  --rate-limit-seconds "${UNIVERSE_SNAPSHOT_RATE_LIMIT_SECONDS:-0.5}"
+  --max-consecutive-failures "${UNIVERSE_SNAPSHOT_MAX_CONSECUTIVE_FAILURES:-5}"
 )
 
 if [[ -n "${UNIVERSE_SNAPSHOT_START:-}" ]]; then
@@ -23,10 +25,6 @@ fi
 
 if [[ -n "${UNIVERSE_SNAPSHOT_END:-}" ]]; then
   args+=(--end "$UNIVERSE_SNAPSHOT_END")
-fi
-
-if [[ -n "${UNIVERSE_SNAPSHOT_RATE_LIMIT_SECONDS:-}" ]]; then
-  args+=(--rate-limit-seconds "$UNIVERSE_SNAPSHOT_RATE_LIMIT_SECONDS")
 fi
 
 if [[ "${UNIVERSE_SNAPSHOT_FORCE:-0}" == "1" ]]; then

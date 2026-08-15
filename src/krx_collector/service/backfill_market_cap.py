@@ -34,7 +34,13 @@ from krx_collector.domain.models import (
 from krx_collector.infra.calendar.trading_days import get_trading_days
 from krx_collector.ports.market_cap import MarketCapProvider
 from krx_collector.ports.storage import Storage
-from krx_collector.util.pipeline import build_run_counts, complete_run, fail_run
+from krx_collector.util.pipeline import (
+    ConsecutiveFailureGuard,
+    SourceBlockedError,
+    build_run_counts,
+    complete_run,
+    fail_run,
+)
 from krx_collector.util.retry import retry
 from krx_collector.util.time import now_kst, today_kst
 
@@ -61,6 +67,7 @@ def backfill_market_cap(
     long_rest_interval: int = 200,
     long_rest_seconds: float = 15.0,
     force: bool = False,
+    max_consecutive_failures: int = 5,
 ) -> MarketCapBackfillResult:
     """Backfill ``daily_market_cap`` from *provider* into *storage*.
 
@@ -76,6 +83,9 @@ def backfill_market_cap(
         long_rest_interval: Take a long rest every N requests (0 disables).
         long_rest_seconds: Length of the long rest.
         force: Re-fetch slices that are already complete.
+        max_consecutive_failures: Stop the run after this many slices fail in a
+            row (0 disables).  Without it a blocked source is met with 6,000
+            slices x 4 retries; see ``ConsecutiveFailureGuard``.
 
     Returns:
         ``MarketCapBackfillResult`` with per-slice counters and errors.
@@ -96,12 +106,21 @@ def backfill_market_cap(
             "long_rest_interval": long_rest_interval,
             "long_rest_seconds": long_rest_seconds,
             "force": force,
+            "max_consecutive_failures": max_consecutive_failures,
         },
     )
     storage.record_run(run)
 
     result = MarketCapBackfillResult()
     requests_made = 0
+    guard = ConsecutiveFailureGuard(
+        max_consecutive_failures,
+        label="market-cap backfill",
+        # Scales with the configured pace; 0 when throttling is off, so
+        # "no throttle" does not silently become "back off 60s".
+        backoff_seconds=rate_limit_seconds * 10,
+        logger_instance=logger,
+    )
 
     @retry(max_attempts=4, base_delay=0.5, backoff_factor=2.0)
     def _fetch_with_retry(d: date, m: Market) -> DailyMarketCapResult:
@@ -144,9 +163,12 @@ def backfill_market_cap(
 
                 try:
                     fetch = _fetch_with_retry(trade_date, market)
+                except SourceBlockedError:
+                    raise
                 except Exception as exc:  # noqa: BLE001 - collected, not raised
                     result.errors[label] = str(exc)
                     logger.warning("Slice %s failed: %s", label, exc)
+                    guard.record_failure(f"{label}: {exc}")
                     continue
                 finally:
                     requests_made += 1
@@ -179,6 +201,7 @@ def backfill_market_cap(
 
                 result.rows_upserted += upsert.updated
                 result.slices_completed += 1
+                guard.record_success()
 
         complete_run(
             storage,
@@ -196,6 +219,13 @@ def backfill_market_cap(
         )
         return result
 
+    except SourceBlockedError as exc:
+        # Not a pipeline bug: the source stopped answering. Fail loudly so the
+        # scheduler does not treat a half-finished range as done.
+        logger.error("Market-cap backfill stopped: %s", exc)
+        fail_run(storage, run, exc)
+        result.errors["source_blocked"] = str(exc)
+        return result
     except Exception as exc:
         logger.exception("Market-cap backfill failed")
         fail_run(storage, run, exc)

@@ -34,7 +34,13 @@ from krx_collector.domain.models import IngestionRun, UniverseSnapshotBackfillRe
 from krx_collector.infra.calendar.trading_days import get_trading_days
 from krx_collector.ports.storage import Storage
 from krx_collector.ports.universe import UniverseProvider
-from krx_collector.util.pipeline import build_run_counts, complete_run, fail_run
+from krx_collector.util.pipeline import (
+    ConsecutiveFailureGuard,
+    SourceBlockedError,
+    build_run_counts,
+    complete_run,
+    fail_run,
+)
 from krx_collector.util.time import now_kst, today_kst
 
 logger = logging.getLogger(__name__)
@@ -77,6 +83,7 @@ def backfill_universe_snapshots(
     end: date | None = None,
     rate_limit_seconds: float = 0.5,
     force: bool = False,
+    max_consecutive_failures: int = 5,
 ) -> UniverseSnapshotBackfillResult:
     """Backfill month-end universe snapshots from *provider* into *storage*.
 
@@ -107,12 +114,21 @@ def backfill_universe_snapshots(
             "end": str(resolved_end),
             "rate_limit": rate_limit_seconds,
             "force": force,
+            "max_consecutive_failures": max_consecutive_failures,
             "source": Source.PYKRX_BACKFILL.value,
         },
     )
     storage.record_run(run)
 
     result = UniverseSnapshotBackfillResult()
+    guard = ConsecutiveFailureGuard(
+        max_consecutive_failures,
+        label="universe snapshot backfill",
+        # Scales with the configured pace; 0 when throttling is off, so
+        # "no throttle" does not silently become "back off 60s".
+        backoff_seconds=rate_limit_seconds * 10,
+        logger_instance=logger,
+    )
 
     try:
         if resolved_start > resolved_end:
@@ -145,12 +161,14 @@ def backfill_universe_snapshots(
                 message = fetch.error or "provider returned no snapshot"
                 result.errors[as_of.isoformat()] = message
                 logger.warning("Snapshot %s failed: %s", as_of, message)
+                guard.record_failure(f"{as_of}: {message}")
                 continue
 
             snapshot = fetch.snapshot
             if not snapshot.records:
                 result.errors[as_of.isoformat()] = "provider returned an empty universe"
                 logger.warning("Snapshot %s returned no records", as_of)
+                guard.record_failure(f"{as_of}: empty universe")
                 continue
 
             upsert = storage.insert_stock_master_snapshot_only(snapshot)
@@ -158,6 +176,7 @@ def backfill_universe_snapshots(
             result.snapshots_written += 1
             result.items_written += upsert.inserted
             logger.info("Snapshot %s stored: %d tickers", as_of, snapshot.record_count)
+            guard.record_success()
 
         complete_run(
             storage,
@@ -173,6 +192,11 @@ def backfill_universe_snapshots(
         )
         return result
 
+    except SourceBlockedError as exc:
+        logger.error("Universe snapshot backfill stopped: %s", exc)
+        fail_run(storage, run, exc)
+        result.errors["source_blocked"] = str(exc)
+        return result
     except Exception as exc:
         logger.exception("Universe snapshot backfill failed")
         fail_run(storage, run, exc)

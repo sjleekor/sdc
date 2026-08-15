@@ -31,6 +31,7 @@ from krx_collector.domain.models import BackfillResult, DailyPriceResult, Ingest
 from krx_collector.ports.prices import PriceProvider
 from krx_collector.ports.storage import Storage
 from krx_collector.service.collection_targets import resolve_price_targets
+from krx_collector.util.pipeline import ConsecutiveFailureGuard, SourceBlockedError
 from krx_collector.util.retry import retry
 from krx_collector.util.time import now_kst, today_kst
 
@@ -87,6 +88,7 @@ def backfill_daily_prices(
     allow_large_range: bool = False,
     refetch: bool = False,
     scope: UniverseScope = UniverseScope.CURRENT,
+    max_consecutive_failures: int = 5,
 ) -> BackfillResult:
     """Backfill daily OHLCV bars from *provider* into *storage*.
 
@@ -99,6 +101,9 @@ def backfill_daily_prices(
             history was backfilled before it
             (``poc/n1_adjusted_price_vintage.md``: 279 such jumps across 252
             tickers in four months).  Mutually exclusive with ``incremental``.
+        max_consecutive_failures: Stop the run after this many tickers fail in a
+            row (0 disables).  Without it a blocked source is met with the whole
+            target list; see ``ConsecutiveFailureGuard``.
         scope: Which universe to target.  ``HISTORICAL`` is required to reach
             the delisted names at all — under ``CURRENT`` even naming one in
             ``tickers`` returns nothing, because the allowlist filters an
@@ -134,11 +139,20 @@ def backfill_daily_prices(
             "allow_large_range": allow_large_range,
             "refetch": refetch,
             "universe_scope": scope.value,
+            "max_consecutive_failures": max_consecutive_failures,
         },
     )
     storage.record_run(run)
 
     result = BackfillResult()
+    guard = ConsecutiveFailureGuard(
+        max_consecutive_failures,
+        label="daily price backfill",
+        # Scales with the configured pace; 0 when throttling is off, so
+        # "no throttle" does not silently become "back off 60s".
+        backoff_seconds=rate_limit_seconds * 10,
+        logger_instance=logger,
+    )
     api_requests_count = 0
     no_work_tickers = 0
     baseline_missing_tickers = 0
@@ -332,6 +346,7 @@ def backfill_daily_prices(
 
                         if fetch_res.error:
                             result.errors[ticker] = fetch_res.error
+                            guard.record_failure(f"{ticker}: {fetch_res.error}")
                             break
 
                         if fetch_res.bars:
@@ -348,9 +363,15 @@ def backfill_daily_prices(
                     if ticker in result.errors:
                         break
 
+                if ticker not in result.errors:
+                    guard.record_success()
+
+            except SourceBlockedError:
+                raise
             except Exception as exc:
                 logger.exception("Error backfilling ticker %s", ticker)
                 result.errors[ticker] = str(exc)
+                guard.record_failure(f"{ticker}: {exc}")
 
         # 4. Record IngestionRun
         run.ended_at = now_kst()
@@ -371,6 +392,15 @@ def backfill_daily_prices(
         storage.record_run(run)
         return result
 
+    except SourceBlockedError as exc:
+        # Not a pipeline bug: the source stopped answering.
+        logger.error("Backfill stopped: %s", exc)
+        run.ended_at = now_kst()
+        run.status = RunStatus.FAILED
+        run.error_summary = str(exc)
+        result.errors["source_blocked"] = str(exc)
+        storage.record_run(run)
+        return result
     except Exception as exc:
         logger.exception("Backfill pipeline failed")
         run.ended_at = now_kst()

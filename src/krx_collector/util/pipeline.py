@@ -162,6 +162,83 @@ def is_opendart_daily_limit_exhausted(result: object) -> bool:
     return getattr(result, "exhaustion_reason", None) == "all_rate_limited"
 
 
+class SourceBlockedError(RuntimeError):
+    """Raised when a source has refused enough consecutive requests to stop."""
+
+
+class ConsecutiveFailureGuard:
+    """Stop a run once a source looks like it is refusing us.
+
+    Every collector here treats a failed request as a per-item error: record it,
+    move on. That is right for one bad ticker and wrong for a source that has
+    started blocking, because the loop then works through its entire target list
+    against a server already saying no. A market-cap backfill is 6,000 slices
+    and retries each four times, so a sustained block becomes 24,000 requests —
+    which is how a temporary throttle turns into a lasting one.
+
+    Failures are counted consecutively and reset by any success, so a scatter of
+    unrelated bad slices never trips it; only an uninterrupted run does.
+
+    ``backoff_seconds`` also grows the pause between consecutive failures. The
+    per-request retry backs off within one item (0.5s, 1s, 2s) and then resets,
+    so without this the pace between items is unchanged while everything fails.
+    """
+
+    def __init__(
+        self,
+        threshold: int,
+        *,
+        label: str,
+        backoff_seconds: float = 0.0,
+        max_backoff_seconds: float = 60.0,
+        sleep_fn: Callable[[float], None] = time.sleep,
+        logger_instance: logging.Logger | None = None,
+    ) -> None:
+        self._threshold = threshold
+        self._label = label
+        self._backoff_seconds = backoff_seconds
+        self._max_backoff_seconds = max_backoff_seconds
+        self._sleep_fn = sleep_fn
+        self._logger = logger_instance or logger
+        self.consecutive_failures = 0
+
+    @property
+    def enabled(self) -> bool:
+        return self._threshold > 0
+
+    def record_success(self) -> None:
+        self.consecutive_failures = 0
+
+    def record_failure(self, detail: str) -> None:
+        """Count a failure, back off, and raise once the threshold is reached.
+
+        Raises:
+            SourceBlockedError: when ``threshold`` consecutive failures occur.
+        """
+        self.consecutive_failures += 1
+
+        if self.enabled and self.consecutive_failures >= self._threshold:
+            raise SourceBlockedError(
+                f"{self._label}: {self.consecutive_failures} consecutive failures "
+                f"(last: {detail}). Stopping so the source is not hammered while "
+                f"it is refusing; re-run later to resume."
+            )
+
+        if self._backoff_seconds > 0:
+            delay = min(
+                self._backoff_seconds * (2 ** (self.consecutive_failures - 1)),
+                self._max_backoff_seconds,
+            )
+            self._logger.warning(
+                "%s: failure %d, backing off %.1fs (%s)",
+                self._label,
+                self.consecutive_failures,
+                delay,
+                detail,
+            )
+            self._sleep_fn(delay)
+
+
 def sleep_with_jitter(
     rate_limit_seconds: float,
     jitter_ratio: float = 0.2,

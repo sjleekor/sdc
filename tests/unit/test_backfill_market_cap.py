@@ -227,3 +227,54 @@ def test_start_after_end_fails_the_run() -> None:
 
     assert "pipeline" in result.errors
     assert storage.recorded_runs[-1].status is RunStatus.FAILED
+
+
+# ---------------------------------------------------------------------------
+# Source-blocked circuit breaker
+# ---------------------------------------------------------------------------
+
+
+def test_a_blocked_source_stops_the_run_instead_of_grinding_through_it(monkeypatch) -> None:
+    # 6,000 slices x 4 retries against a server already refusing is how a
+    # temporary throttle becomes a lasting block.
+    monkeypatch.setattr("krx_collector.util.retry.time.sleep", lambda _s: None)
+    storage = FakeStorage()
+    all_slices = {(d, m) for d in SESSIONS for m in (Market.KOSPI, Market.KOSDAQ)}
+    provider = FakeProvider(fail_on=all_slices)
+
+    result = _run(storage, provider, max_consecutive_failures=3)
+
+    # Three slices, not three requests: @retry still makes four attempts per
+    # slice, so the guard caps a blocked source at threshold x attempts (12
+    # here) instead of the full 8-slice run.
+    assert len({call for call in provider.calls}) == 3
+    assert result.slices_attempted == 3
+    assert len(provider.calls) == 12
+    assert "source_blocked" in result.errors
+    assert storage.recorded_runs[-1].status is RunStatus.FAILED
+
+
+def test_scattered_failures_do_not_trip_the_guard(monkeypatch) -> None:
+    # One bad slice between good ones is an item error, not a blocked source.
+    monkeypatch.setattr("krx_collector.util.retry.time.sleep", lambda _s: None)
+    storage = FakeStorage()
+    provider = FakeProvider(fail_on={(SESSIONS[0], Market.KOSDAQ), (SESSIONS[2], Market.KOSPI)})
+
+    result = _run(storage, provider, max_consecutive_failures=3)
+
+    assert len(result.errors) == 2
+    assert "source_blocked" not in result.errors
+    assert result.slices_completed == len(SESSIONS) * 2 - 2
+    assert storage.recorded_runs[-1].status is RunStatus.PARTIAL
+
+
+def test_guard_can_be_disabled(monkeypatch) -> None:
+    monkeypatch.setattr("krx_collector.util.retry.time.sleep", lambda _s: None)
+    storage = FakeStorage()
+    all_slices = {(d, m) for d in SESSIONS for m in (Market.KOSPI, Market.KOSDAQ)}
+    provider = FakeProvider(fail_on=all_slices)
+
+    result = _run(storage, provider, max_consecutive_failures=0)
+
+    assert result.slices_attempted == len(SESSIONS) * 2
+    assert "source_blocked" not in result.errors
