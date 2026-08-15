@@ -31,10 +31,37 @@ sdc_compose() {
   "${compose[@]}" "$@"
 }
 
+# The lock lives on the host process; the collection lives in a container the
+# host process spawns. Killing the wrapper releases the lock and leaves the
+# container running, so an aborted backfill kept hitting OpenDART for another
+# 20 minutes with nothing holding its slot (observed 2026-08-16 while stopping
+# the S-1 backfill ahead of the 04:00 chain). Naming the container after its
+# lock domain closes that: holding the lock means no sibling can be alive, so a
+# container with that name at lock time is provably an orphan and gets reaped.
+sdc_container_name_for_domain() {
+  printf 'sdc-collector-%s\n' "$1"
+}
+
+sdc_reap_orphan_container() {
+  local name="$1"
+  sdc_cd_app
+  if docker inspect "$name" >/dev/null 2>&1; then
+    sdc_log "reaping orphaned container: $name (lock is free, so nothing owns it)"
+    docker rm -f "$name" >/dev/null 2>&1 || true
+  fi
+}
+
 sdc_run_collector() {
   sdc_cd_app
-  sdc_log "run: $SDC_DOCKER_COMPOSE_CMD run --rm $SDC_COLLECTOR_SERVICE $*"
-  sdc_compose run --rm "$SDC_COLLECTOR_SERVICE" "$@"
+  local -a name_args=()
+  if [[ -n "${SDC_RUN_CONTAINER_NAME:-}" ]]; then
+    name_args=(--name "$SDC_RUN_CONTAINER_NAME")
+    # Covers a graceful abort (Cronicle sends TERM). A SIGKILL cannot be
+    # trapped, which is why the reap above exists as well.
+    trap 'sdc_log "signal received; stopping ${SDC_RUN_CONTAINER_NAME}"; docker rm -f "${SDC_RUN_CONTAINER_NAME}" >/dev/null 2>&1 || true' INT TERM
+  fi
+  sdc_log "run: $SDC_DOCKER_COMPOSE_CMD run --rm ${name_args[*]} $SDC_COLLECTOR_SERVICE $*"
+  sdc_compose run --rm "${name_args[@]}" "$SDC_COLLECTOR_SERVICE" "$@"
 }
 
 sdc_run_collector_with_lock() {
@@ -102,6 +129,10 @@ sdc_with_flock() {
   sdc_log "lock wait: domain=$domain backend=flock wait=${wait_seconds}s file=$lock_file"
   if flock -w "$wait_seconds" "$sdc_lock_fd"; then
     sdc_log "lock acquired: domain=$domain"
+    local SDC_RUN_CONTAINER_NAME
+    SDC_RUN_CONTAINER_NAME="$(sdc_container_name_for_domain "$domain")"
+    export SDC_RUN_CONTAINER_NAME
+    sdc_reap_orphan_container "$SDC_RUN_CONTAINER_NAME"
     sdc_throttle "$domain"
     local status
     if "$@"; then
@@ -137,6 +168,10 @@ sdc_with_mkdir_lock() {
   done
 
   sdc_log "lock acquired: domain=$domain"
+  local SDC_RUN_CONTAINER_NAME
+  SDC_RUN_CONTAINER_NAME="$(sdc_container_name_for_domain "$domain")"
+  export SDC_RUN_CONTAINER_NAME
+  sdc_reap_orphan_container "$SDC_RUN_CONTAINER_NAME"
   sdc_throttle "$domain"
   local status
   if "$@"; then
