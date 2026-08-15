@@ -43,13 +43,24 @@ sdc_run_collector_with_lock() {
   sdc_with_source_lock "$domain" sdc_run_collector "$@"
 }
 
+# The per-source lock defaults to ON. It used to default to OFF, and prod never
+# turned it on — not in .env, not in the host env, not in any Cronicle event —
+# so /tmp/sdc-locks never even got created and every wrapper that looked like it
+# held a lock held nothing. Two jobs hitting the same source concurrently is the
+# one thing that gets an IP blocked, so the safety mechanism has to be the
+# default and the bypass has to be the thing you type on purpose.
+#
+# Time separation in the schedule is not a substitute: a run that overruns its
+# window (flows has taken 775s against a 5-minute budget, a backfill takes hours)
+# silently puts two collectors on the same source with nothing to stop them.
 sdc_run_daily_collector() {
   local domain="$1"
   shift
-  if [[ "${SDC_DAILY_USE_SOURCE_LOCK:-0}" == "1" ]]; then
+  if [[ "${SDC_DAILY_USE_SOURCE_LOCK:-1}" == "1" ]]; then
     sdc_use_daily_lock_defaults
     sdc_run_collector_with_lock "$domain" "$@"
   else
+    sdc_log "source lock DISABLED by SDC_DAILY_USE_SOURCE_LOCK=${SDC_DAILY_USE_SOURCE_LOCK:-1}: domain=$domain"
     sdc_run_collector "$@"
   fi
 }
