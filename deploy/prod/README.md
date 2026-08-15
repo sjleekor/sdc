@@ -108,8 +108,15 @@ flowchart TD
 대부분의 daily wrapper는 `bin/lib/sdc-wrapper.sh`를 source하고 `docker compose run --rm collector ...`를 호출한다. wrapper의 주요 실행 함수는 아래와 같다.
 
 - `sdc_run_collector`: source lock 없이 collector command를 실행한다.
-- `sdc_run_daily_collector <domain> ...`: `SDC_DAILY_USE_SOURCE_LOCK=1`일 때만 host-side source lock을 잡고 실행한다.
+- `sdc_run_daily_collector <domain> ...`: host-side source lock을 잡고 실행한다. **기본이 ON**이며 `SDC_DAILY_USE_SOURCE_LOCK=0`으로만 끌 수 있다.
 - `sdc_run_collector_with_lock <domain> ...`: 항상 source lock을 잡고 실행한다. manual backfill wrapper에서 주로 쓴다.
+
+> **2026-08-15 변경.** `sdc_run_daily_collector`의 락은 원래 opt-in(`=1`일 때만)이었고,
+> **prod은 켠 적이 없었다** — `.env`에도, 호스트 env에도, Cronicle 이벤트 스크립트에도 없었고
+> `/tmp/sdc-locks` 자체가 존재하지 않았다. 락을 잡는 것처럼 읽히는 wrapper 7개가 실제로는
+> 아무것도 잡고 있지 않았다는 뜻이다. 기본값을 ON으로 뒤집었다. 스케줄 시간대 분리는
+> 대체재가 아니다 — 창을 넘기는 run(flows 실측 775s, 백필은 구조적으로 수 시간)이
+> 조용히 동시 실행을 되살린다.
 
 source lock은 `/tmp/sdc-locks/<domain>.lock`에 `flock`을 걸고, lock 획득 직후 `/tmp/sdc-throttle/<domain>.last`를 이용해 source별 최소 간격을 둔다. lock conflict 기본 mode는 `fail`이며 conflict 시 exit code 75를 반환한다.
 

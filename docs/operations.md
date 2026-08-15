@@ -34,9 +34,40 @@ KRX 정규장 시간: 09:00–15:30 KST. 당일의 온전한 데이터를 확보
 # 기업개황 refresh — 매월 1일 05:30 KST
 # 신규 상장분만 받습니다 (profile_fetched_at이 NULL인 것).
   30  5  1  *  *    cd /opt/krx-data-pipeline && uv run krx-collector dart sync-corp-profile --universe-scope historical
+
+# freshness 게이트 — 매일 23:00 KST
+# 저녁 수집 창이 끝난 뒤에 돌아야 합니다. --fail-if-stale이 없으면 출력만 하고
+# 항상 exit 0이라, 스케줄에 넣어도 알람이 되지 않습니다.
+  0  23  *  *  *    cd /opt/krx-data-pipeline && uv run krx-collector ops freshness-report --fail-if-stale
 ```
 
 > **Tip:** crontab 맨 위에 `TZ=Asia/Seoul`을 설정하거나, systemd timer의 `OnCalendar=`를 사용하여 UTC 혼동을 방지하는 것이 좋습니다.
+
+### 수집 안 됨을 탐지하는 방법 (freshness 게이트)
+
+**돌지 않은 run은 어디에도 흔적을 남기지 않는다.** `ingestion_runs`에 행이 생기지 않고,
+실패한 잡도 없다. 2026-08-14에 sj2-server가 저녁 내내 다운돼 KRX 체인과 common sync가
+통째로 빠졌을 때 모든 raw 테이블이 하루 뒤처졌지만 아무 신호도 없었다.
+
+증거는 데이터 자체에만 있다. 그래서 게이트가 보는 것은 "실패한 run이 있는가"가 아니라
+**"가장 최신 행이 달력이 요구하는 만큼 최신인가"**다.
+
+```bash
+# 사람이 읽는 리포트 (항상 exit 0)
+krx-collector ops freshness-report
+
+# 스케줄러가 읽는 게이트 (미달이면 exit 1)
+krx-collector ops freshness-report --fail-if-stale
+```
+
+| 옵션 | 기본값 | 대상 |
+|---|---|---|
+| `--max-lag-trading-days` | `1` | `daily_ohlcv`, flow 그룹, KRX/FDR/PYKRX 계열 common series. **1 = 최근 세션이 저장돼 있어야 한다** |
+| `--max-lag-calendar-days` | `14` | ECOS·FRED처럼 발표 지연이 있는 시리즈 |
+
+거래일 예산과 달력 예산을 나눈 이유는, 발표 지연이 있는 시리즈를 거래일 기준으로 재면
+매일 걸려서 **아무도 안 보는 게이트**가 되기 때문이다. 빈 테이블은 "검사 대상 없음"이
+아니라 stale로 센다.
 
 ## 런북 (Runbook)
 
