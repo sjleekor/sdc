@@ -27,6 +27,14 @@ Groups smaller than ``MIN_GROUP_SIZE`` fold up into the KSIC top-level section
 z-score meaningless.  The sample had 15 single-member groups out of 36, so this
 is not hypothetical.
 
+Amended 2026-08-15, after the full collection (N2-7b, 3,959 corps).  One fold-up
+level does not reach the criterion: 11 of 43 active groups were still under 20
+after folding into sections, because the sections themselves are thinly
+populated in a listed universe.  The fold-up now repeats into ``OTHER_GROUP``,
+so "every group has at least ``MIN_GROUP_SIZE`` members" holds by construction.
+The threshold itself is unchanged — what changed is the mechanism that was
+failing to deliver it.
+
 What was rejected, and why
 --------------------------
 The plan recommended "2-digit prefix + a financial/holding override".  The
@@ -59,6 +67,23 @@ MIN_GROUP_SIZE = 20
 
 UNKNOWN_GROUP = "XX"
 UNKNOWN_SECTION = "Z"
+
+# Terminal bucket for sections that are themselves below the minimum.
+#
+# One fold-up level does not reach the stated criterion. Measured on the full
+# N2 collection (2026-08-15, 3,959 corps / 2,629 active): folding 2-digit groups
+# into KSIC sections still left 11 of 43 active groups under 20, down to n=2.
+# The small sections are small because the listed universe barely populates them
+# -- section A holds 4 names in total -- so there is nothing left to fold into
+# at that level.
+#
+# The reason this matters is not tidiness. These groups exist to z-score within
+# an industry, and a z-score over two members is ±0.707 whatever the inputs are:
+# not a weak signal, a fabricated one. Leaving such a group in place and hoping
+# a downstream caller notices is the failure mode this repo keeps finding, so the
+# fold-up repeats until no group is under the minimum and the invariant holds by
+# construction.
+OTHER_GROUP = "OTHER"
 
 # KSIC top-level sections, as inclusive 2-digit ranges.  Used only as the
 # fold-up target for small groups.
@@ -136,30 +161,54 @@ def resolve_groups(
     Call this per date with that date's universe: membership counts move as
     listings change, so the fold-up decision is date-dependent.
 
+    Two fold-up levels, applied until the minimum holds: 2-digit group → KSIC
+    section → :data:`OTHER_GROUP`. One level is not enough on the real universe
+    (see :data:`OTHER_GROUP`), and a group below the minimum is worse than a
+    coarse one, so the loop is what makes the criterion an invariant instead of
+    an aspiration.
+
     Args:
         codes_by_key: ``{ticker or corp_code: induty_code}`` for one date.
-        min_group_size: Groups smaller than this fold into their KSIC section.
+        min_group_size: Smallest group allowed to stand on its own.
 
     Returns:
-        ``{key: group_label}`` where a label is either a 2-digit group, a
-        section letter, or ``UNKNOWN_GROUP``.
+        ``{key: group_label}`` where a label is a 2-digit group, a section
+        letter, :data:`OTHER_GROUP`, or :data:`UNKNOWN_GROUP`.
+
+        Every returned group holds at least ``min_group_size`` keys, except
+        ``UNKNOWN_GROUP`` and ``OTHER_GROUP`` — those two are terminal, so when
+        the input is small enough they can come back under it. A caller that
+        needs a hard floor checks those two by name.
     """
-    raw = {key: industry_group(code) for key, code in codes_by_key.items()}
 
-    counts: dict[str, int] = {}
-    for group in raw.values():
-        counts[group] = counts.get(group, 0) + 1
+    def _counts(assignment: Mapping[str, str]) -> dict[str, int]:
+        sizes: dict[str, int] = {}
+        for group in assignment.values():
+            sizes[group] = sizes.get(group, 0) + 1
+        return sizes
 
-    resolved: dict[str, str] = {}
-    for key, group in raw.items():
-        if group == UNKNOWN_GROUP:
-            # Unknowns stay their own bucket rather than being folded into a
-            # real section — a missing code is not evidence of any industry.
-            resolved[key] = UNKNOWN_GROUP
-        elif counts[group] < min_group_size:
-            resolved[key] = industry_section(group)
-        else:
-            resolved[key] = group
+    resolved = {key: industry_group(code) for key, code in codes_by_key.items()}
+
+    # Unknowns are held out of every fold-up: a missing code is not evidence of
+    # any industry, so folding it into a real section would invent one.
+    unknown_keys = {key for key, group in resolved.items() if group == UNKNOWN_GROUP}
+
+    counts = _counts(resolved)
+    resolved = {
+        key: (
+            group
+            if key in unknown_keys or counts[group] >= min_group_size
+            else industry_section(group)
+        )
+        for key, group in resolved.items()
+    }
+
+    counts = _counts(resolved)
+    resolved = {
+        key: (group if key in unknown_keys or counts[group] >= min_group_size else OTHER_GROUP)
+        for key, group in resolved.items()
+    }
+
     return resolved
 
 
