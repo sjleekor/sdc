@@ -1,23 +1,40 @@
 """Shared helpers for pykrx import-time KRX authentication.
 
-Session lifetime
-----------------
-pykrx logs into KRX once at module import and reuses that session. It re-logs in
-only when its own clock says the session expired (one hour, minus a five-minute
-buffer). It has no notion of the server having dropped the session first.
+pykrx authenticates once, at import, in ``pykrx.website.comm.webio``. That single
+fact produces two distinct failure modes, and the N3 snapshot backfill hit both
+on the night of 2026-08-15.
 
-KRX does drop it first. Measured 2026-08-15/16 on the N3 snapshot backfill: a
-process would work for two to four minutes and then every response would come
-back as an error page — ``JSONDecodeError`` on a JSON endpoint, or an empty
-ticker list — while pykrx kept sending the dead cookies because its clock still
-said the session was good. Two runs died this way, and the slower-paced one got
-*fewer* rows before dying, so the pace was not what was being punished. A fresh
-process succeeded every time, because a fresh process logs in again.
+Failure 1 — the session dies mid-run
+------------------------------------
+pykrx re-logs in only when its own clock says the session expired (one hour,
+minus a five-minute buffer). It has no notion of the server having dropped the
+session first, and KRX does drop it first: a process would work for two to four
+minutes and then every response came back as an error page, while pykrx kept
+sending dead cookies because its clock still said the session was good. Round 1
+wrote 23 snapshots in 127s at 0.5s pacing; round 2 wrote 14 in 253s at 1.5s. The
+*slower* run got *fewer* rows before dying, so the pace was not what was being
+punished — process lifetime was.
 
-So the retry has to key on the response, not on the clock. Both ``Get`` and
-``Post`` in ``pykrx.website.comm.webio`` resolve their session through the
+:func:`call_with_session_retry` handles this by keying on the response instead of
+the clock. Both ``Get`` and ``Post`` resolve their session through the
 module-global the auth module owns, and ``KRXSession.refresh`` mutates that
 object in place, so re-logging in there fixes every pykrx call at once.
+
+Failure 2 — the login endpoint itself goes down
+-----------------------------------------------
+Because the login runs at import, a login that returns HTML makes ``import
+pykrx`` raise, and no amount of call-level retry can reach that: there is no
+call, the library never loads. From roughly 23:54 KST the whole library was
+unimportable, one probe slipped through at 00:11, and after 00:19 nothing worked
+at all. The KRX MDC collectors, which authenticate separately, kept working
+throughout — so this is upstream, not credentials.
+
+:class:`KrxLoginUnavailableError` exists to say that in one line. Left raw it
+surfaced as forty lines of traceback per target date, ending in "Expecting
+value: line 13 column 1", naming nothing.
+
+The operational consequence is scheduling, not code: run pykrx backfills well
+clear of midnight, and let the circuit breaker stop the run when they are not.
 """
 
 from __future__ import annotations
