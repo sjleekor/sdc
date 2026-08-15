@@ -24,8 +24,4 @@ if [[ "${SDC_COMMON_ENABLE_PYKRX:-0}" == "1" ]]; then
   "$script_dir/common-sync-pykrx.sh"
 fi
 
-"$script_dir/common-build-daily.sh"
-"$script_dir/common-coverage-report.sh"
-"$script_dir/common-readiness-check.sh"
-
-sdc_log "common feature refresh complete"
+sdc_log "common feature raw refresh complete; run bin/parquet-compute-all.sh on the compute node for derived marts/readiness"

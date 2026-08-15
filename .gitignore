@@ -40,6 +40,7 @@ logs/
 
 # Database
 *.sqlite3
+backups/
 
 # Profiling run outputs (raw artifacts; only reviewed summaries are published to docs/)
 reports/
@@ -49,10 +50,24 @@ target/
 
 # Local Parquet/data lake outputs
 data_lake/
+# DuckDB spill files (marts spill here when memory_limit is tight; tens of GB)
+.tmp/
 # Per-model ETL datasets (L2b artifacts; etl_01 §7)
 data/datasets/
 # Model prediction outputs (top-k buy lists)
 data/predictions/
 
-# Research / analysis code & artifacts (local-only, not part of the deployed pipeline)
+# Research analysis artifacts stay local, but the Parquet/DuckDB ETL code is
+# part of the reproducible compute path and is intentionally tracked.
 research/
+!research/
+research/*
+!research/__init__.py
+!research/etl/
+!research/etl/**/*.py
+!research/analysis/
+!research/analysis/*.py
+!research/analysis/*.yaml
+!research/models/
+!research/models/**/*.py
+research/output/

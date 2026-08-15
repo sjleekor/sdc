@@ -21,6 +21,7 @@ from datetime import date
 from typing import Any
 
 import FinanceDataReader as fdr
+import pandas as pd
 
 from krx_collector.adapters.universe_pykrx.provider import PykrxUniverseProvider
 from krx_collector.domain.enums import ListingStatus, Market, Source
@@ -87,6 +88,27 @@ class FdrUniverseProvider:
             return fallback_result
 
     @staticmethod
+    def _parse_listing_date(row: Any) -> date | None:
+        """Best-effort parse of the FDR listing date; never raises.
+
+        The column name varies across FDR versions / endpoints, and values
+        may be strings, ``Timestamp``s, ``date``s, empty, or ``NaT``. Any
+        unparseable value yields ``None`` so poor FDR data cannot break
+        universe sync.
+        """
+        for key in ("ListingDate", "Listing Date", "ListedDate"):
+            if key not in row:
+                continue
+            val = row.get(key)
+            if val is None:
+                continue
+            ts = pd.to_datetime(val, errors="coerce")  # NaT-safe: str/Timestamp/date
+            if pd.isna(ts):
+                continue
+            return ts.date()
+        return None
+
+    @staticmethod
     def _stocks_from_rows(
         rows: Any,
         market: Market,
@@ -107,6 +129,7 @@ class FdrUniverseProvider:
                     status=ListingStatus.ACTIVE,
                     last_seen_date=reference_date,
                     source=Source.FDR,
+                    listing_date=FdrUniverseProvider._parse_listing_date(row),
                 )
             )
         return records

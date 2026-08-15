@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS stock_master (
     status          TEXT        NOT NULL,   -- ACTIVE | DELISTED | UNKNOWN
     last_seen_date  DATE        NOT NULL,
     source          TEXT        NOT NULL,   -- FDR | PYKRX
+    listing_date    DATE,                   -- source-reported listing date (FDR only)
+    first_seen_date DATE,                   -- first as_of_date observed ACTIVE (storage-managed)
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (ticker, market)
 );
@@ -43,8 +45,32 @@ CREATE TABLE IF NOT EXISTS stock_master_snapshot_items (
     market          TEXT        NOT NULL,
     name            TEXT        NOT NULL,
     status          TEXT        NOT NULL,
+    listing_date    DATE,       -- source-reported listing date (FDR only); NULL for old snapshots
     UNIQUE (snapshot_id, ticker, market)
 );
+
+-- New-ticker start-date support (2026-07): listing / first-seen dates.
+-- ADD COLUMN IF NOT EXISTS keeps a rerun of this file idempotent for
+-- databases created before these columns existed.
+ALTER TABLE stock_master
+    ADD COLUMN IF NOT EXISTS listing_date    DATE,
+    ADD COLUMN IF NOT EXISTS first_seen_date DATE;
+
+ALTER TABLE stock_master_snapshot_items
+    ADD COLUMN IF NOT EXISTS listing_date DATE;
+
+-- One-time, idempotent backfill of first_seen_date for pre-existing rows.
+-- Prefers the earliest snapshot the ticker appears in; falls back to
+-- last_seen_date. Only touches NULLs, so re-running db init is a no-op.
+UPDATE stock_master sm
+SET first_seen_date = COALESCE(
+        (SELECT MIN(s.as_of_date)
+           FROM stock_master_snapshot_items i
+           JOIN stock_master_snapshot s ON s.snapshot_id = i.snapshot_id
+          WHERE i.ticker = sm.ticker
+            AND i.market = sm.market),
+        sm.last_seen_date)
+WHERE sm.first_seen_date IS NULL;
 
 -- 4) daily_ohlcv ─ daily price bars
 CREATE TABLE IF NOT EXISTS daily_ohlcv (
@@ -74,6 +100,38 @@ CREATE INDEX IF NOT EXISTS ix_stock_master_snapshot_sync_cursor
 
 CREATE INDEX IF NOT EXISTS ix_daily_ohlcv_sync_cursor
     ON daily_ohlcv (fetched_at, trade_date, ticker, market);
+
+-- 4b) daily_market_cap ─ daily KRX market cap / trading value / listed shares
+--
+-- Separate from daily_ohlcv on purpose: different pykrx endpoint and a
+-- different price basis.  daily_ohlcv comes from the naver ADJUSTED path
+-- (pykrx get_market_ohlcv_by_date defaults to adjusted=True, which routes to
+-- naver); this table comes from KRX get_market_cap_by_ticker and carries the
+-- UNADJUSTED session close.  The column is named source_close, not close, so
+-- the difference is visible at the call site.
+--
+-- market is filled from the CALL ARGUMENT (one request per market), never by
+-- joining stock_master — that join would stamp a stock's present-day market
+-- onto its pre-transfer rows (look-ahead).
+CREATE TABLE IF NOT EXISTS daily_market_cap (
+    trade_date      DATE        NOT NULL,
+    ticker          TEXT        NOT NULL,
+    market          TEXT        NOT NULL,
+    source_close    BIGINT,                 -- KRX unadjusted session close
+    market_cap      BIGINT,                 -- KRW
+    trading_value   BIGINT,                 -- KRW
+    listed_shares   BIGINT,
+    volume          BIGINT,                 -- KRX basis; cross-check vs daily_ohlcv (naver)
+    source          TEXT        NOT NULL,
+    fetched_at      TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (trade_date, ticker, market)
+);
+
+CREATE INDEX IF NOT EXISTS ix_daily_market_cap_ticker_date
+    ON daily_market_cap (ticker, market, trade_date DESC);
+
+CREATE INDEX IF NOT EXISTS ix_daily_market_cap_sync_cursor
+    ON daily_market_cap (fetched_at, trade_date, ticker, market);
 
 -- 5) ingestion_runs ─ audit log for every pipeline execution
 CREATE TABLE IF NOT EXISTS ingestion_runs (
@@ -117,6 +175,31 @@ CREATE INDEX IF NOT EXISTS ix_dart_corp_master_ticker
 
 CREATE INDEX IF NOT EXISTS ix_dart_corp_master_sync_cursor
     ON dart_corp_master (updated_at, corp_code);
+
+-- 7b) dart_corp_master profile columns (N2) — from company.json (DS001).
+--
+-- corpCode.xml, which fills the columns above, carries only
+-- corp_code/corp_name/stock_code/modify_date.  Industry, incorporation date and
+-- fiscal-year-end come from a separate per-corp_code endpoint, so they are
+-- added here rather than to a new table (same key, same nature) with their own
+-- fetch timestamp.
+--
+-- induty_code is KSIC and its LENGTH VARIES: 2, 3, 4 and 5 digits all occur
+-- (measured 3/52/21/74 over a 150-corp sample).  Any grouping rule must take a
+-- 2-digit prefix, which yields the KSIC middle category regardless of the
+-- source length; a rule that assumes a fixed width is wrong.
+--
+-- profile_fetched_at is the skip-if-present key: NULL means never fetched.
+ALTER TABLE dart_corp_master
+    ADD COLUMN IF NOT EXISTS induty_code        TEXT,
+    ADD COLUMN IF NOT EXISTS corp_cls           TEXT,
+    ADD COLUMN IF NOT EXISTS est_dt             DATE,
+    ADD COLUMN IF NOT EXISTS acc_mt             TEXT,
+    ADD COLUMN IF NOT EXISTS profile_raw        JSONB,
+    ADD COLUMN IF NOT EXISTS profile_fetched_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS ix_dart_corp_master_induty
+    ON dart_corp_master (induty_code);
 
 -- 8) dart_financial_statement_raw ─ raw rows from fnlttSinglAcntAll / XBRL facts
 CREATE TABLE IF NOT EXISTS dart_financial_statement_raw (
@@ -498,77 +581,63 @@ ALTER TABLE dart_xbrl_fact_raw
 ALTER TABLE dart_xbrl_fact_raw
     ADD COLUMN IF NOT EXISTS raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb;
 
--- 13) metric_catalog ─ canonical metric dictionary
-CREATE TABLE IF NOT EXISTS metric_catalog (
-    metric_code      TEXT        PRIMARY KEY,
-    metric_name      TEXT        NOT NULL,
-    category         TEXT        NOT NULL,
-    unit             TEXT        NOT NULL DEFAULT '',
-    description      TEXT        NOT NULL DEFAULT '',
-    is_active        BOOLEAN     NOT NULL DEFAULT TRUE,
-    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+-- 13) dart_filing_receipt_raw ─ disclosure receipt history from list.json (공시검색)
+CREATE TABLE IF NOT EXISTS dart_filing_receipt_raw (
+    raw_id               BIGSERIAL   PRIMARY KEY,
+    corp_code            TEXT        NOT NULL,
+    ticker               TEXT,
+    corp_name            TEXT        NOT NULL DEFAULT '',
+    stock_code           TEXT        NOT NULL DEFAULT '',
+    corp_cls             TEXT        NOT NULL DEFAULT '',
+    report_nm            TEXT        NOT NULL DEFAULT '',
+    rcept_no             TEXT        NOT NULL,
+    flr_nm               TEXT        NOT NULL DEFAULT '',
+    rcept_dt             DATE,
+    rm                   TEXT        NOT NULL DEFAULT '',
+    source               TEXT        NOT NULL,
+    fetched_at           TIMESTAMPTZ NOT NULL,
+    raw_payload          JSONB       NOT NULL,
+    CONSTRAINT uq_dart_filing_receipt_raw
+        UNIQUE (corp_code, rcept_no)
 );
 
-CREATE INDEX IF NOT EXISTS ix_metric_catalog_sync_cursor
-    ON metric_catalog (updated_at, metric_code);
+CREATE INDEX IF NOT EXISTS ix_dart_filing_receipt_raw_lookup
+    ON dart_filing_receipt_raw (ticker, rcept_dt);
 
--- 14) metric_mapping_rule ─ active raw-to-canonical mapping rules
-CREATE TABLE IF NOT EXISTS metric_mapping_rule (
-    rule_code        TEXT        PRIMARY KEY,
-    metric_code      TEXT        NOT NULL REFERENCES metric_catalog(metric_code),
-    source_table     TEXT        NOT NULL,
-    value_selector   TEXT        NOT NULL,
-    priority         INT         NOT NULL,
-    statement_type   TEXT        NOT NULL DEFAULT '',
-    fs_div           TEXT        NOT NULL DEFAULT '',
-    sj_div           TEXT        NOT NULL DEFAULT '',
-    account_id       TEXT        NOT NULL DEFAULT '',
-    account_nm       TEXT        NOT NULL DEFAULT '',
-    row_name         TEXT        NOT NULL DEFAULT '',
-    stock_knd        TEXT        NOT NULL DEFAULT '',
-    dim1             TEXT        NOT NULL DEFAULT '',
-    dim2             TEXT        NOT NULL DEFAULT '',
-    dim3             TEXT        NOT NULL DEFAULT '',
-    metric_code_match TEXT       NOT NULL DEFAULT '',
-    is_active        BOOLEAN     NOT NULL DEFAULT TRUE,
-    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE INDEX IF NOT EXISTS ix_dart_filing_receipt_raw_sync_cursor
+    ON dart_filing_receipt_raw (fetched_at, raw_id);
+
+-- 14) dart_capital_change_raw ─ issuance/decrease disclosures from irdsSttus (증자(감자)현황)
+CREATE TABLE IF NOT EXISTS dart_capital_change_raw (
+    raw_id                        BIGSERIAL   PRIMARY KEY,
+    corp_code                     TEXT        NOT NULL,
+    ticker                        TEXT,
+    bsns_year                     INT         NOT NULL,
+    reprt_code                    TEXT        NOT NULL,
+    rcept_no                      TEXT        NOT NULL DEFAULT '',
+    corp_cls                      TEXT        NOT NULL DEFAULT '',
+    isu_dcrs_de                   DATE,
+    isu_dcrs_stle                 TEXT        NOT NULL DEFAULT '',
+    isu_dcrs_stock_knd            TEXT        NOT NULL DEFAULT '',
+    isu_dcrs_qy                   BIGINT,
+    isu_dcrs_mstvdv_fval_amount   NUMERIC(30, 4),
+    isu_dcrs_mstvdv_fval_amount2  NUMERIC(30, 4),
+    stlm_dt                       DATE,
+    source                        TEXT        NOT NULL,
+    fetched_at                    TIMESTAMPTZ NOT NULL,
+    raw_payload                   JSONB       NOT NULL,
+    CONSTRAINT uq_dart_capital_change_raw
+        UNIQUE (
+            corp_code, bsns_year, reprt_code, rcept_no,
+            isu_dcrs_de, isu_dcrs_stle, isu_dcrs_stock_knd
+        )
 );
 
-CREATE INDEX IF NOT EXISTS ix_metric_mapping_rule_metric
-    ON metric_mapping_rule (metric_code, source_table, priority);
+CREATE INDEX IF NOT EXISTS ix_dart_capital_change_raw_lookup
+    ON dart_capital_change_raw (ticker, bsns_year, reprt_code);
 
-CREATE INDEX IF NOT EXISTS ix_metric_mapping_rule_sync_cursor
-    ON metric_mapping_rule (updated_at, rule_code);
-
--- 15) stock_metric_fact ─ normalized canonical metric facts
-CREATE TABLE IF NOT EXISTS stock_metric_fact (
-    fact_id            BIGSERIAL   PRIMARY KEY,
-    ticker             TEXT        NOT NULL,
-    market             TEXT        NOT NULL,
-    corp_code          TEXT        NOT NULL,
-    metric_code        TEXT        NOT NULL REFERENCES metric_catalog(metric_code),
-    period_type        TEXT        NOT NULL,
-    period_end         DATE,
-    bsns_year          INT         NOT NULL,
-    reprt_code         TEXT        NOT NULL,
-    fs_div             TEXT        NOT NULL DEFAULT '',
-    value_numeric      NUMERIC(30, 4),
-    value_text         TEXT        NOT NULL DEFAULT '',
-    unit               TEXT        NOT NULL DEFAULT '',
-    source_table       TEXT        NOT NULL,
-    source_key         TEXT        NOT NULL DEFAULT '',
-    mapping_rule_code  TEXT        NOT NULL REFERENCES metric_mapping_rule(rule_code),
-    fetched_at         TIMESTAMPTZ NOT NULL,
-    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT uq_stock_metric_fact
-        UNIQUE (ticker, metric_code, bsns_year, reprt_code)
-);
-
-CREATE INDEX IF NOT EXISTS ix_stock_metric_fact_lookup
-    ON stock_metric_fact (ticker, metric_code, bsns_year DESC, reprt_code);
-
-CREATE INDEX IF NOT EXISTS ix_stock_metric_fact_sync_cursor
-    ON stock_metric_fact (updated_at, fact_id);
+CREATE INDEX IF NOT EXISTS ix_dart_capital_change_raw_sync_cursor
+    ON dart_capital_change_raw (fetched_at, raw_id);
 
 -- 16) krx_security_flow_raw ─ daily investor/short-selling/borrow flow metrics
 CREATE TABLE IF NOT EXISTS krx_security_flow_raw (
@@ -591,57 +660,6 @@ CREATE INDEX IF NOT EXISTS ix_krx_security_flow_raw_lookup
 
 CREATE INDEX IF NOT EXISTS ix_krx_security_flow_raw_sync_cursor
     ON krx_security_flow_raw (fetched_at, raw_id);
-
--- 17) operating_source_document ─ provenance for sector-specific KPI extraction
-CREATE TABLE IF NOT EXISTS operating_source_document (
-    document_key        TEXT        PRIMARY KEY,
-    ticker              TEXT        NOT NULL,
-    market              TEXT        NOT NULL,
-    sector_key          TEXT        NOT NULL,
-    document_type       TEXT        NOT NULL,
-    title               TEXT        NOT NULL,
-    document_date       DATE,
-    period_end          DATE,
-    source_system       TEXT        NOT NULL DEFAULT '',
-    source_url          TEXT        NOT NULL DEFAULT '',
-    language            TEXT        NOT NULL DEFAULT 'ko',
-    content_text        TEXT        NOT NULL,
-    fetched_at          TIMESTAMPTZ NOT NULL,
-    raw_payload         JSONB       NOT NULL,
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS ix_operating_source_document_lookup
-    ON operating_source_document (ticker, sector_key, period_end DESC);
-
--- 18) operating_metric_fact ─ extracted sector-specific KPI facts
-CREATE TABLE IF NOT EXISTS operating_metric_fact (
-    fact_id             BIGSERIAL   PRIMARY KEY,
-    ticker              TEXT        NOT NULL,
-    market              TEXT        NOT NULL,
-    sector_key          TEXT        NOT NULL,
-    metric_code         TEXT        NOT NULL,
-    metric_name         TEXT        NOT NULL,
-    period_end          DATE,
-    value_numeric       NUMERIC(30, 4),
-    value_text          TEXT        NOT NULL DEFAULT '',
-    unit                TEXT        NOT NULL DEFAULT '',
-    document_key        TEXT        NOT NULL REFERENCES operating_source_document(document_key),
-    extractor_code      TEXT        NOT NULL,
-    raw_snippet         TEXT        NOT NULL DEFAULT '',
-    fetched_at          TIMESTAMPTZ NOT NULL,
-    raw_payload         JSONB       NOT NULL,
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT uq_operating_metric_fact
-        UNIQUE (ticker, metric_code, period_end, document_key, extractor_code)
-);
-
-CREATE INDEX IF NOT EXISTS ix_operating_metric_fact_lookup
-    ON operating_metric_fact (ticker, sector_key, metric_code, period_end DESC);
-
--- =============================================================================
--- Common market / macro feature layer
--- =============================================================================
 
 -- 19) common_feature_series ─ source series catalog and collection policy
 CREATE TABLE IF NOT EXISTS common_feature_series (
@@ -713,56 +731,6 @@ CREATE INDEX IF NOT EXISTS ix_common_feature_observation_date
 
 CREATE INDEX IF NOT EXISTS ix_common_feature_observation_sync_cursor
     ON common_feature_observation_raw (fetched_at, raw_id);
-
--- 21) common_feature_catalog ─ model-facing feature catalog
-CREATE TABLE IF NOT EXISTS common_feature_catalog (
-    feature_code          TEXT        PRIMARY KEY,
-    feature_name_kr       TEXT        NOT NULL,
-    category              TEXT        NOT NULL,
-    frequency             TEXT        NOT NULL DEFAULT 'D',
-    unit                  TEXT        NOT NULL DEFAULT '',
-    transform_code        TEXT        NOT NULL DEFAULT '',
-    description           TEXT        NOT NULL DEFAULT '',
-    active                BOOLEAN     NOT NULL DEFAULT TRUE,
-    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS ix_common_feature_catalog_sync_cursor
-    ON common_feature_catalog (updated_at, feature_code);
-
--- 22) common_feature_catalog_input ─ feature to raw-series link table
-CREATE TABLE IF NOT EXISTS common_feature_catalog_input (
-    feature_code          TEXT        NOT NULL
-        REFERENCES common_feature_catalog(feature_code) ON DELETE CASCADE,
-    series_id             TEXT        NOT NULL REFERENCES common_feature_series(series_id),
-    role                  TEXT        NOT NULL DEFAULT 'primary',
-    PRIMARY KEY (feature_code, series_id, role)
-);
-
-CREATE INDEX IF NOT EXISTS ix_common_feature_catalog_input_series
-    ON common_feature_catalog_input (series_id);
-
--- 23) common_feature_daily_fact ─ KRX-session-aligned long feature facts
-CREATE TABLE IF NOT EXISTS common_feature_daily_fact (
-    feature_date           DATE        NOT NULL,
-    feature_code           TEXT        NOT NULL REFERENCES common_feature_catalog(feature_code),
-    value_numeric          NUMERIC(30, 8),
-    value_text             TEXT        NOT NULL DEFAULT '',
-    unit                   TEXT        NOT NULL DEFAULT '',
-    source_series_ids      JSONB       NOT NULL DEFAULT '[]'::jsonb,
-    source_observation_ids JSONB       NOT NULL DEFAULT '[]'::jsonb,
-    asof_available_date    DATE        NOT NULL,
-    selected_vintage       TEXT        NOT NULL DEFAULT '',
-    generated_at           TIMESTAMPTZ NOT NULL,
-    generation_run_id      UUID,
-    PRIMARY KEY (feature_date, feature_code)
-);
-
-CREATE INDEX IF NOT EXISTS ix_common_feature_daily_fact_lookup
-    ON common_feature_daily_fact (feature_code, feature_date DESC);
-
-CREATE INDEX IF NOT EXISTS ix_common_feature_daily_fact_sync_cursor
-    ON common_feature_daily_fact (generated_at, feature_date, feature_code);
 
 -- =============================================================================
 -- Future extension: intraday_ohlcv (OUT OF SCOPE)

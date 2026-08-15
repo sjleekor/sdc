@@ -6,11 +6,10 @@
 2. pykrx를 사용하여 상장일로부터 **종목별 일봉(OHLCV) 이력 데이터를 수집**합니다.
 3. [OpenDART](https://opendart.fss.or.kr)를 사용하여 **재무제표 / 주식수 / 배당 / 자사주 raw 값과 XBRL fact**를 수집합니다.
 4. KRX MDC 소스를 직접 호출하여 **일자별 수급 raw**(투자자별 순매수, 공매도 등)를 수집합니다.
-5. FDR / pykrx / KRX / ECOS / FRED 기반 **공통 시장·거시 feature raw와 일자별 fact**를 수집·생성합니다.
-6. 공시 원문 기반 **섹터별 사업 KPI extractor 프레임워크**를 제공합니다 (파일럿: 조선/방산 수주).
-7. raw 테이블과 별도로 `metric_catalog` / `metric_mapping_rule` / `stock_metric_fact` 기반 **canonical metric 정규화 계층**을 운영합니다.
-8. 깔끔한 포트/어댑터(Ports & Adapters) 아키텍처를 적용하여 **PostgreSQL에 모든 데이터를 저장**합니다. 핵심 로직의 리팩토링 없이 향후 파일 기반 저장소(CSV / Parquet)로 확장할 수 있도록 설계되었습니다.
-9. Rust 기반 **raw PostgreSQL → Parquet exporter**로 대형 raw/reference 테이블을 `data_lake/raw_postgres` 레이아웃에 manifest/checkpoint와 함께 내보낼 수 있습니다.
+5. FDR / pykrx / KRX / ECOS / FRED 기반 **공통 시장·거시 feature raw**를 수집합니다.
+6. PostgreSQL은 **raw 수집/감사 저장소**로 두고, 재무 metric 정규화와 common daily fact 같은 파생 compute는 **Parquet → DuckDB 마트**에서 재계산합니다.
+7. 깔끔한 포트/어댑터(Ports & Adapters) 아키텍처를 적용하여 수집 로직과 저장소 구현을 분리합니다.
+8. Rust 기반 **raw PostgreSQL → Parquet exporter**로 대형 raw/reference 테이블을 `data_lake/raw_postgres` 레이아웃에 manifest/checkpoint와 함께 내보낼 수 있습니다.
 
 ## 목표 제외 범위 (현재 스코프)
 
@@ -36,7 +35,6 @@ uv sync
 cp .env.example .env
 # .env 파일을 열어 데이터베이스 계정 정보 및 설정을 수정하세요
 # `dart` 계열 명령은 OPENDART_API_KEY 또는 OPENDART_API_KEYS가 반드시 설정되어야 동작합니다
-# `metrics` 계열 명령은 별도 API 호출 없이 이미 적재된 raw 데이터를 정규화합니다
 # `common sync --sources ecos/fred`는 ECOS_API_KEY / FRED_API_KEY가 필요합니다
 
 # 3. 데이터베이스 스키마 초기화
@@ -76,7 +74,7 @@ uv run krx-collector dart sync-share-info --tickers 005930 --bsns-years 2025 --r
 uv run krx-collector dart sync-xbrl --tickers 005930 --bsns-years 2025 --reprt-codes 11011
 ```
 
-전체 사업연도 백필은 서버 checkout에서 host-side 스크립트로 실행합니다. 기본 범위는 2015년부터 전년도까지이며, 최신 연도부터 `sync-financials → sync-share-info → sync-xbrl → metrics normalize` 순서로 처리합니다. 모든 OpenDART key가 일일 한도에 도달하면 해당 CLI가 exit code `75`로 종료되고, 다음 실행 때 이미 저장된 raw는 건너뛰며 이어받습니다.
+전체 사업연도 백필은 서버 checkout에서 host-side 스크립트로 실행합니다. 기본 범위는 2015년부터 전년도까지이며, 최신 연도부터 `sync-financials → sync-share-info → sync-xbrl` 순서로 raw만 적재합니다. 파생 metric 마트는 백필 후 `bin/parquet-compute-all.sh`로 재계산합니다. 모든 OpenDART key가 일일 한도에 도달하면 해당 CLI가 exit code `75`로 종료되고, 다음 실행 때 이미 저장된 raw는 건너뛰며 이어받습니다.
 
 ```bash
 bin/dart-backfill-all-years.sh
@@ -86,20 +84,22 @@ SDC_DART_BACKFILL_END_YEAR=2025 \
 bin/dart-backfill-all-years.sh
 ```
 
-### Canonical metric 정규화
+### Parquet / DuckDB compute
 
 ```bash
-# 11. raw 테이블 → stock_metric_fact 정규화
-uv run krx-collector metrics normalize --tickers 005930 --bsns-years 2025 --reprt-codes 11011
+# 11. sj2 raw 미러 → raw Parquet export → DuckDB 파생 마트/게이트 실행
+bin/parquet-compute-all.sh
 
-# 12. raw 대비 정규화 커버리지 리포트
-uv run krx-collector metrics coverage-report --tickers 005930 --bsns-years 2025 --reprt-codes 11011
+# feat_*/labels 마트까지 함께 빌드
+bin/parquet-compute-all.sh --features
 ```
+
+이 단계는 `stock_metric_fact`와 `common_feature_daily_fact`를 PostgreSQL에 쓰지 않고 raw Parquet 위에서 재계산합니다. 필요한 의존성은 `uv sync --extra research`로 설치합니다.
 
 ### 수급 raw (KRX)
 
 ```bash
-# 13. 종목/일자 기준 수급 raw 적재
+# 12. 종목/일자 기준 수급 raw 적재
 uv run krx-collector flows sync --tickers 005930 --start 2026-04-17 --end 2026-04-17
 
 # 일일 catch-up: 저장된 수급 최신일과 가격 최신일 기준으로 최근 window만 갱신
@@ -110,43 +110,20 @@ uv run krx-collector flows sync --incremental --lookback-days 14
 
 ### 공통 시장 / 거시 feature
 
-공통 feature 계층은 source별 raw 관측치(`common_feature_observation_raw`)를 적재한 뒤 KRX 거래일 기준 long fact(`common_feature_daily_fact`)를 생성합니다. 첫 실행은 명시적 기간으로 backfill하고, 이후 일일 작업은 `--incremental` / `--lookback-days`로 최근 구간만 갱신합니다.
+공통 feature 계층은 source별 raw 관측치(`common_feature_observation_raw`)와 수집 driver 설정(`common_feature_series`)을 적재합니다. KRX 거래일 기준 long fact(`common_feature_daily_fact`)는 PostgreSQL에 쓰지 않고 Parquet compute 단계에서 DuckDB 마트로 재계산합니다.
 
 ```bash
-# 14. 공통 feature catalog/series seed
+# 13. 공통 feature series seed
 uv run krx-collector common seed-catalog --init-schema
 
-# 15. 일간 시장 feature raw 적재 (FDR/KRX)
+# 14. 일간 시장 feature raw 적재 (FDR/KRX)
 uv run krx-collector common sync --sources fdr,krx --start 2026-01-01 --end 2026-06-13
 
-# 16. 거시 feature raw 적재 (ECOS/FRED, API key 필요)
+# 15. 거시 feature raw 적재 (ECOS/FRED, API key 필요)
 uv run krx-collector common sync --sources ecos,fred --start 2024-01-01 --end 2026-06-13 --force
-
-# 17. KRX 거래일 기준 daily fact 생성
-uv run krx-collector common build-daily --start 2026-01-01 --end 2026-06-13
-
-# 18. 커버리지 및 readiness 리포트
-uv run krx-collector common coverage-report --start 2026-01-01 --end 2026-06-13
-uv run krx-collector common readiness-report --start 2026-01-01 --end 2026-06-13 --fail-on-not-ready
 ```
 
-운영 wrapper는 `deploy/prod/bin/common-features-refresh.sh`에 있으며, 기본 흐름과 환경 변수는 [docs/operations.md](docs/operations.md)의 "공통 시장/거시 feature 갱신" 섹션을 참고하세요.
-
-### 사업 KPI 파일럿 (섹터별 extractor)
-
-```bash
-# 19. 문서 등록 + 섹터별 extractor로 operating_metric_fact 적재
-uv run krx-collector operating process-document \
-  --ticker 009540 \
-  --market KOSPI \
-  --sector-key shipbuilding_defense \
-  --document-type manual_text \
-  --title "조선 방산 수주 샘플" \
-  --document-date 2026-04-19 \
-  --period-end 2025-12-31 \
-  --source-system LOCAL \
-  --text-file tests/fixtures/operating/shipbuilding_defense_sample.txt
-```
+운영 wrapper는 raw source sync만 담당합니다. 파생 daily fact, coverage, readiness는 [docs/operations.md](docs/operations.md)의 "Parquet compute 파이프라인" 절차로 실행합니다.
 
 현재 `flows sync` 1차 구현은 다음 metric을 대상으로 합니다.
 
@@ -160,11 +137,6 @@ uv run krx-collector operating process-document \
 
 `borrow_balance_quantity`는 KRX MDC provider에 아직 안정 경로를 붙이지 않아 pending 상태입니다.
 
-현재 `operating process-document` 파일럿은 `shipbuilding_defense` 섹터에 대해 다음 metric을 추출합니다.
-
-- `order_intake_amount`
-- `order_backlog_amount`
-
 신규 파이프라인들은 외부 API 장애 시 자동 재시도/rate-limit/jitter를 수행하며, 최종적으로 일부 요청이 실패해도 파이프라인은 정상 종료됩니다. 이 경우 `ingestion_runs.status`가 `partial`로 기록되고 `counts.error_count` / `partial_failure_count` / `completed_request_count` 값이 함께 저장됩니다. OpenDART 실행은 추가로 `opendart_key_count`, `key_rotation_count`, `rate_limit_count`, `key_disable_count`, `all_rate_limited_count`, `all_disabled_count`, `request_invalid_count`, `retryable_error_count`, `terminal_error_count`, `status_<code>_count` 같은 키/상태코드 메트릭을 기록합니다. 해석/복구 절차는 [docs/operations.md](docs/operations.md)를 참고하세요.
 
 > **중복 실행 방지**
@@ -172,11 +144,9 @@ uv run krx-collector operating process-document \
 > - `dart sync-financials`: `(corp_code, bsns_year, reprt_code, fs_div)` raw 행이 있으면 해당 재무제표 요청을 건너뜁니다.
 > - `dart sync-share-info`: 주식수, 배당, 자사주 각각에 대해 해당 raw 행이 있으면 해당 요청만 건너뜁니다.
 > - `dart sync-xbrl`: `(corp_code, bsns_year, reprt_code, rcept_no)` XBRL 문서가 있으면 ZIP 다운로드/파싱을 건너뜁니다.
-> - `metrics normalize`: 이미 같은 `(ticker, metric_code, bsns_year, reprt_code)` canonical fact가 있으면 다시 쓰지 않습니다.
-> - `metrics coverage-report`: read-only 리포트라 외부 다운로드와 DB 쓰기를 하지 않습니다.
 > - `common sync`: 명시 기간 실행은 기존 raw coverage가 있으면 건너뛰며, `--force`를 주면 재조회합니다. `--incremental`은 기존 raw baseline 이후만 갱신합니다.
-> - `common build-daily`: `common_feature_daily_fact`를 `(feature_date, feature_code)` 기준으로 upsert합니다.
-> - `common coverage-report` / `common readiness-report` / `ops freshness-report`: read-only 리포트입니다.
+> - `ops freshness-report`: read-only 리포트입니다.
+> - `bin/parquet-compute-all.sh`: Parquet/DuckDB derived mart를 재생성하며 PostgreSQL에는 쓰지 않습니다.
 
 > **백필 모드 요약**
 > - **기본 모드** (gap detection): 거래일 캘린더 기준으로 누락된 모든 영업일을 찾아 채웁니다. 최초 백필이나 히스토리 보강에 적합합니다. 각 티커마다 `MIN(trade_date)`로 자동 클램핑되어 상장 이전(또는 pykrx가 제공하지 못하는 과거) 구간을 매번 재요청하지 않습니다.
@@ -208,23 +178,23 @@ uv run krx-collector db sync-remote --ssh-host whi@sj2-server
 
 ### 동기화 모드
 
-`db sync-remote`는 학습 데이터 ETL에 필요한 19개 source-data mirror 테이블을 관리 대상으로 삼습니다. 모든 모드는 SSH 터널 옵션(`--ssh-host`, `--ssh-local-port`)과 자유롭게 조합할 수 있습니다.
+`db sync-remote`는 학습 데이터 ETL에 필요한 raw/reference mirror 테이블 13개를 관리 대상으로 삼습니다. 모든 모드는 SSH 터널 옵션(`--ssh-host`, `--ssh-local-port`)과 자유롭게 조합할 수 있습니다.
 
 #### 1. 증분 동기화 (기본)
 
-기본 실행은 관리 대상 19개 테이블 전체를 로컬 DB 상태 기준으로 증분 upsert 합니다.
+기본 실행은 관리 대상 13개 테이블 전체를 로컬 DB 상태 기준으로 증분 upsert 합니다.
 
 ```bash
 uv run krx-collector db sync-remote --ssh-host whi@sj2-server
 ```
 
-`updated_at`, `fetched_at`, `generated_at`과 surrogate key를 조합한 복합 cursor를 사용하므로 동일 시각 행이 배치 경계에서 누락되지 않습니다. raw/fact 테이블은 natural-key conflict가 발생해도 원격의 `raw_id`, `document_id`, `fact_id` 같은 surrogate id를 로컬에 보존합니다. `daily_ohlcv`는 `sync_checkpoints`에 재개 cursor를 저장해 중단 지점에서 이어받습니다.
+`updated_at`, `fetched_at`과 surrogate key를 조합한 복합 cursor를 사용하므로 동일 시각 행이 배치 경계에서 누락되지 않습니다. raw 테이블은 natural-key conflict가 발생해도 원격의 `raw_id`, `document_id` 같은 surrogate id를 로컬에 보존합니다. `daily_ohlcv`는 `sync_checkpoints`에 재개 cursor를 저장해 중단 지점에서 이어받습니다.
 
 catalog/link/snapshot 성격의 작은 mirror 테이블은 remote 전체를 scan한 뒤 원격에 없는 로컬 row를 prune합니다. prune은 FK child-first 순서로 수행되며, unsafe한 부분 table 조합은 실행 전에 거부됩니다.
 
 #### 2. `--full-refresh`
 
-관리 대상 19개 테이블을 `TRUNCATE` 후 원격 데이터를 처음부터 다시 적재합니다. 로컬 복제본이 손상됐거나 첫 동기화일 때 사용합니다. `sync_checkpoints`와 로컬 `ingestion_runs`는 remote mirror 대상이 아니므로 유지됩니다. 이 경로는 선택된 managed table을 transaction 안에서 truncate한 뒤 PostgreSQL binary `COPY`로 적재합니다.
+관리 대상 13개 테이블을 `TRUNCATE` 후 원격 데이터를 처음부터 다시 적재합니다. 로컬 복제본이 손상됐거나 첫 동기화일 때 사용합니다. `sync_checkpoints`와 로컬 `ingestion_runs`는 remote mirror 대상이 아니므로 유지됩니다. 이 경로는 선택된 managed table을 transaction 안에서 truncate한 뒤 PostgreSQL binary `COPY`로 적재합니다.
 
 ```bash
 uv run krx-collector db sync-remote --ssh-host whi@sj2-server --full-refresh
@@ -237,7 +207,7 @@ uv run krx-collector db sync-remote --ssh-host whi@sj2-server --full-refresh
 ```bash
 uv run krx-collector db sync-remote \
   --ssh-host whi@sj2-server \
-  --tables common_feature_daily_fact,stock_metric_fact
+  --tables dart_financial_statement_raw,dart_xbrl_fact_raw
 ```
 
 부분 `--full-refresh` 또는 prune에서 선택한 parent를 참조하는 child table이 빠져 있으면 mirror 일관성을 위해 실행을 거부합니다.
@@ -250,7 +220,7 @@ uv run krx-collector db sync-remote \
 uv run krx-collector db sync-remote --ssh-host whi@sj2-server --full-refresh --all-tables
 ```
 
-`--all-tables`와 일반 기본 sync의 관리 대상은 동일한 19개 테이블입니다.
+`--all-tables`와 일반 기본 sync의 관리 대상은 동일한 13개 테이블입니다.
 
 동기화 대상:
 
@@ -265,14 +235,8 @@ uv run krx-collector db sync-remote --ssh-host whi@sj2-server --full-refresh --a
 - `dart_shareholder_return_raw`
 - `dart_xbrl_document`
 - `dart_xbrl_fact_raw`
-- `metric_catalog`
-- `metric_mapping_rule`
-- `stock_metric_fact`
 - `common_feature_series`
 - `common_feature_observation_raw`
-- `common_feature_catalog`
-- `common_feature_catalog_input`
-- `common_feature_daily_fact`
 
 remote mirror에서 제외되는 로컬 운영 테이블:
 
@@ -302,7 +266,7 @@ remote mirror에서 제외되는 로컬 운영 테이블:
 
 ## Feature / table profiling
 
-수집된 raw/reference/canonical feature 테이블의 통계 프로파일은 `profile` CLI로 생성합니다.
+수집된 raw/reference 테이블의 통계 프로파일은 `profile` CLI로 생성합니다.
 프로파일링은 행수, 시간 범위, 결측률, 자연키 중복, 카테고리 분포, 수치 분위수, FK/PIT 정합성, freshness, 테이블별 domain check를 실행하고 실행별 manifest를 남깁니다.
 
 기본 DB 대상:
@@ -327,7 +291,7 @@ uv run krx-collector profile all --target local --weight full,light
 uv run krx-collector profile table krx_security_flow_raw --target local --drilldown
 
 # 빠른 리뷰용 Markdown + JSON만 생성
-uv run krx-collector profile table common_feature_daily_fact \
+uv run krx-collector profile table common_feature_observation_raw \
   --target local \
   --formats md,json \
   --no-execute
@@ -373,9 +337,8 @@ DB 접속 정보는 루트 `.env`의 `DB_DSN` 또는 `DB_*` 환경 변수를 사
 
 - `raw_id_range`: `dart_xbrl_fact_raw`, `dart_financial_statement_raw`, `dart_shareholder_return_raw`, `dart_share_count_raw`
 - `date_month`: `krx_security_flow_raw`, `daily_ohlcv`
-- `full_table`: `dart_xbrl_document`, `dart_corp_master`, `stock_master`, `stock_master_snapshot`, `common_feature_observation_raw`
+- `full_table`: `dart_xbrl_document`, `dart_corp_master`, `stock_master`, `stock_master_snapshot`, `common_feature_series`, `common_feature_observation_raw`
 - `snapshot_items`: `stock_master_snapshot_items`
-- `empty_table`: `operating_source_document`
 
 전체 테이블 export는 [`bin/raw-parquet-export-all.sh`](bin/raw-parquet-export-all.sh)를 사용합니다.
 아래 명령은 release binary를 빌드한 뒤 configured table 전체를 순차 export하고, 각 table manifest를 검증합니다.
@@ -507,17 +470,17 @@ docker compose run --rm collector validate --market all
 ### 개발 환경 (Development)
 
 ```bash
-# 개발용 의존성 패키지 포함하여 설치
-uv sync --extra dev
+# 개발/테스트 + Parquet/DuckDB research 의존성 포함하여 설치
+uv sync --extra dev --extra research
 
 # 테스트 실행
 uv run pytest
 
 # 코드 린트(Lint) 검사
-uv run ruff check src/ tests/
+uv run ruff check src/ tests/ research/etl/
 
 # 코드 포맷팅
-uv run black src/ tests/
+uv run black src/ tests/ research/etl/
 ```
 
 ## 프로젝트 구조
@@ -541,13 +504,12 @@ krx-data-pipeline/
 ├── src/krx_collector/
 │   ├── __main__.py                   # `python -m krx_collector` 진입점
 │   ├── main.py                       # main() 어댑터 shim
-│   ├── cli/app.py                    # argparse 기반 CLI (db/ops/universe/prices/dart/metrics/common/flows/operating/validate)
+│   ├── cli/app.py                    # argparse 기반 CLI (db/ops/universe/prices/dart/common/flows/validate/profile)
 │   ├── domain/                       # 순수 도메인 모델 및 Enum (Source, RunType, RunStatus 등)
 │   ├── ports/                        # 프로토콜 인터페이스
 │   │                                 #   universe, prices, storage, corp_codes,
 │   │                                 #   financials, share_info, xbrl, flows,
-│   │                                 #   common_features,
-│   │                                 #   operating_extractors
+│   │                                 #   common_features
 │   ├── adapters/                     # Provider 구현체
 │   │                                 #   universe_fdr / universe_pykrx / prices_pykrx
 │   │                                 #   opendart_common / opendart_corp / opendart_financials /
@@ -555,17 +517,13 @@ krx-data-pipeline/
 │   │                                 #   common_features_fdr / common_features_krx /
 │   │                                 #   common_features_ecos / common_features_fred /
 │   │                                 #   common_features_pykrx
-│   │                                 #   flows_krx / operating_extractors
+│   │                                 #   flows_krx
 │   ├── service/                      # 유스케이스 오케스트레이션
 │   │                                 #   sync_universe, backfill_daily, validate,
 │   │                                 #   sync_dart_corp / sync_dart_financials /
 │   │                                 #   sync_dart_share_info / sync_dart_xbrl,
-│   │                                 #   normalize_metrics, report_metric_coverage,
-│   │                                 #   sync_common_features, build_common_feature_daily_facts,
-│   │                                 #   report_common_feature_coverage,
-│   │                                 #   report_common_feature_readiness, freshness,
-│   │                                 #   sync_krx_flows, process_operating_document,
-│   │                                 #   operating_registry, sync_local_db
+│   │                                 #   sync_common_features, freshness,
+│   │                                 #   sync_krx_flows, sync_local_db
 │   ├── infra/
 │   │   ├── calendar/                 # KRX 거래일 계산 유틸리티
 │   │   ├── config/                   # pydantic-settings 기반 환경 설정
@@ -573,6 +531,7 @@ krx-data-pipeline/
 │   │   └── logging/                  # 구조화 로깅 설정
 │   └── util/                         # pipeline.py(재시도/jitter/partial-run finalizer),
 │                                     #   시간대(Asia/Seoul) 유틸리티
+├── research/                         # Parquet/DuckDB ETL, derived marts, model dataset builders
 └── tests/
     ├── unit/                         # 파서 / 매핑 / 재시도 / pipeline util 단위 테스트
     ├── integration/                  # DB 연결, OHLCV end-to-end, 운영 KPI round-trip
@@ -583,7 +542,7 @@ krx-data-pipeline/
 ## 아키텍처 및 추가 문서
 
 - [docs/architecture.md](docs/architecture.md) — 포트/어댑터 설계, 전체 데이터 흐름.
-- [docs/database.md](docs/database.md) — raw 테이블, canonical 테이블, 인덱스/제약 설명.
+- [docs/database.md](docs/database.md) — PostgreSQL raw/reference 테이블, 인덱스/제약 설명.
 - [docs/operations.md](docs/operations.md) — cron 스케줄, `ingestion_runs.status` 해석(`running` / `success` / `partial` / `failed`), 실패 복구 절차.
 - [tools/raw-parquet-exporter/README.md](tools/raw-parquet-exporter/README.md) — Rust raw Parquet exporter 사용법.
 - [docs/dev/20260619_rust_exporter/raw_parquet_exporter_benchmark_20260619.md](docs/dev/20260619_rust_exporter/raw_parquet_exporter_benchmark_20260619.md) — exporter benchmark 기록.

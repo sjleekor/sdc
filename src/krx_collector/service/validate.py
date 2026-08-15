@@ -1,6 +1,10 @@
 """Use-case: Data validation.
 
-Planned validations (design only — no execution logic yet):
+**Missing-bar checks resolve the universe AS OF the validated date.** Comparing
+a past date against today's active set is structurally blind: the tickers that
+are missing are exactly the ones that have since delisted, so they are absent
+from both sides. That is how 13.9% of the 2016 cross-section stayed
+uncollected without any check reporting it (``poc/survivorship_gap.md``).
 
 1. **OHLC sanity rules**
    - low <= open <= high
@@ -13,10 +17,12 @@ Planned validations (design only — no execution logic yet):
    - Flag tickers with gaps (excluding holidays and weekends).
    - Use ``infra.calendar.trading_days`` for the calendar strategy.
 
-3. **Universe count drift checks**
-   - Compare today's snapshot record_count against previous snapshots.
-   - Alert if the count changes by more than a configurable threshold
-     (e.g., ±5%), which may indicate data-source issues.
+3. **Universe count drift checks** (implemented)
+   - Compare consecutive snapshot ``record_count`` values within a source.
+   - Alert when the change exceeds ``universe_drift_pct`` (default ±5%).
+   - Sources are compared separately: a backfilled snapshot and a live one
+     come from different collection paths, so a step between them says
+     nothing about the market.
 
 4. **Cross-source consistency** (future)
    - Compare FDR vs pykrx universe snapshots for the same date.
@@ -28,19 +34,59 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-from krx_collector.domain.enums import Market, RunStatus, RunType
+from krx_collector.domain.enums import Market, RunStatus, RunType, Source, UniverseScope
 from krx_collector.domain.models import IngestionRun
 from krx_collector.infra.calendar.trading_days import get_trading_days, load_holidays
 from krx_collector.ports.storage import Storage
+from krx_collector.service.collection_targets import resolve_price_targets
 from krx_collector.util.time import now_kst, today_kst
 
 logger = logging.getLogger(__name__)
+
+# How many recent snapshots the drift check looks back over. Two years of
+# month-end snapshots, so a slow universe trend does not trip it while a
+# collection failure between consecutive runs still does.
+SNAPSHOT_DRIFT_WINDOW = 24
+
+
+def _universe_count_drift(storage: Storage, threshold_pct: float) -> list[str]:
+    """Return alerts for consecutive snapshots whose size moved too much.
+
+    Compared within a source: a backfilled snapshot and a live one have
+    different collection paths, so a step between them says nothing about the
+    market.
+    """
+    if threshold_pct <= 0:
+        return []
+
+    snapshots = storage.get_snapshot_record_counts(limit=SNAPSHOT_DRIFT_WINDOW)
+    by_source: dict[Source, list[tuple[date, int]]] = {}
+    for as_of, source, count in snapshots:
+        by_source.setdefault(source, []).append((as_of, count))
+
+    alerts: list[str] = []
+    for source, series in by_source.items():
+        # newest-first from storage; walk oldest-first so "previous" is earlier
+        ordered = sorted(series)
+        for (prev_date, prev_count), (curr_date, curr_count) in zip(
+            ordered, ordered[1:], strict=False
+        ):
+            if not prev_count:
+                continue
+            change_pct = (curr_count - prev_count) / prev_count * 100.0
+            if abs(change_pct) > threshold_pct:
+                alerts.append(
+                    f"{source.value} {prev_date}->{curr_date}: "
+                    f"{prev_count} -> {curr_count} ({change_pct:+.1f}%)"
+                )
+    return alerts
 
 
 def validate(
     storage: Storage,
     market: Market | None = None,
     target_date: date | None = None,
+    universe_drift_pct: float = 5.0,
 ) -> None:
     """Run data-quality validations."""
     resolved_date = target_date or today_kst()
@@ -90,24 +136,48 @@ def validate(
             if len(violations) > 10:
                 logger.warning("  - ... and %d more", len(violations) - 10)
 
-        # 4. Check for missing trading days per ticker
-        missing_tickers = []
+        # 4. Check for missing bars against the universe listed ON THAT DATE
+        #
+        # Comparing a past date against today's active set cannot find a gap:
+        # the tickers that are missing are exactly the ones that have since
+        # delisted, so they are absent from both sides and cancel out. That is
+        # how 13.9% of the 2016 cross-section stayed uncollected without any
+        # check reporting it (poc/survivorship_gap.md). Resolve the universe
+        # as-of instead; today's active set is just the as-of universe for
+        # today, and stays the fallback when no snapshot covers the date.
+        missing_tickers: list[str] = []
+        universe_source = "none"
+        universe_size = 0
         if is_trading_day:
-            active_stocks = storage.get_active_stocks(market)
-            fetched_tickers = {b.ticker for b in bars}
+            expected: set[str] = set()
+            snapshot = storage.get_universe_as_of(resolved_date, market)
+            if snapshot is not None:
+                snapshot_date, expected = snapshot
+                universe_source = f"snapshot:{snapshot_date.isoformat()}"
+            else:
+                expected = {
+                    s.ticker for s in resolve_price_targets(storage, UniverseScope.CURRENT, market)
+                }
+                universe_source = "active"
 
-            for stock in active_stocks:
-                if stock.ticker not in fetched_tickers:
-                    missing_tickers.append(stock.ticker)
+            universe_size = len(expected)
+            fetched_tickers = {b.ticker for b in bars}
+            missing_tickers = sorted(expected - fetched_tickers)
+
             if missing_tickers:
                 logger.warning(
-                    "Missing daily bars for %d active tickers on %s.",
+                    "Missing daily bars for %d of %d tickers on %s (universe=%s).",
                     len(missing_tickers),
+                    universe_size,
                     resolved_date,
+                    universe_source,
                 )
 
-        # 5. Check universe count drift (skipped in this iteration)
-        # TODO: Implement universe count drift check
+        # 5. Universe count drift — a sudden change in snapshot size is a
+        #    collection failure long before it is a market event.
+        drift_alerts = _universe_count_drift(storage, universe_drift_pct)
+        for alert in drift_alerts:
+            logger.warning("Universe drift: %s", alert)
 
         # 6. Complete the run
         run.ended_at = now_kst()
@@ -116,10 +186,18 @@ def validate(
             "bars_checked": len(bars),
             "ohlc_violations": len(violations),
             "missing_tickers": len(missing_tickers),
+            # Without this the missing count is uninterpretable: 0 against an
+            # empty universe reads the same as 0 against a complete one.
+            "universe_size": universe_size,
+            "universe_drift_alerts": len(drift_alerts),
         }
+        run.params["universe_source"] = universe_source
 
-        if violations or missing_tickers:
-            run.error_summary = f"Violations: {len(violations)}, Missing: {len(missing_tickers)}"
+        if violations or missing_tickers or drift_alerts:
+            run.error_summary = (
+                f"Violations: {len(violations)}, Missing: {len(missing_tickers)}, "
+                f"Drift: {len(drift_alerts)}"
+            )
 
         storage.record_run(run)
         logger.info("Validation completed.")

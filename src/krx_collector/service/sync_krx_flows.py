@@ -8,7 +8,14 @@ import time
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from krx_collector.domain.enums import ListingStatus, Market, RunStatus, RunType, Source
+from krx_collector.domain.enums import (
+    ListingStatus,
+    Market,
+    RunStatus,
+    RunType,
+    Source,
+    UniverseScope,
+)
 from krx_collector.domain.models import (
     IngestionRun,
     KrxFlowPhaseCounts,
@@ -18,6 +25,10 @@ from krx_collector.domain.models import (
 from krx_collector.infra.calendar.trading_days import get_trading_days
 from krx_collector.ports.flows import FlowProvider
 from krx_collector.ports.storage import Storage
+from krx_collector.service.collection_targets import (
+    resolve_dart_targets,
+    resolve_price_targets,
+)
 from krx_collector.util.pipeline import (
     build_run_counts,
     call_with_retry,
@@ -199,12 +210,16 @@ def _filter_targets(stocks: list[Stock], tickers: list[str] | None) -> list[Stoc
     return [stock for stock in stocks if stock.ticker in ticker_filter]
 
 
-def _load_targets(storage: Storage, tickers: list[str] | None) -> list[Stock]:
-    stocks = _filter_targets(storage.get_active_stocks(), tickers)
+def _load_targets(
+    storage: Storage,
+    tickers: list[str] | None,
+    scope: UniverseScope = UniverseScope.CURRENT,
+) -> list[Stock]:
+    stocks = _filter_targets(resolve_price_targets(storage, scope), tickers)
     if stocks:
         return stocks
 
-    dart_rows = storage.get_dart_corp_master(active_only=True, tickers=tickers)
+    dart_rows = resolve_dart_targets(storage, scope, tickers)
     return [
         Stock(
             ticker=row.ticker or "",
@@ -369,6 +384,7 @@ def sync_krx_security_flows(
     randomize_request_order: bool = True,
     run_params_extra: dict[str, object] | None = None,
     enabled_flow_groups: list[str] | None = None,
+    scope: UniverseScope = UniverseScope.CURRENT,
 ) -> KrxFlowSyncResult:
     """Synchronise daily investor/shorting/ownership raw metrics."""
     provider_source = provider.source()
@@ -390,6 +406,7 @@ def sync_krx_security_flows(
         "randomize_request_order": randomize_request_order,
         "provider_source": provider_source.value,
         "enabled_flow_groups": enabled_groups,
+        "universe_scope": scope.value,
     }
     if run_params_extra:
         run_params.update(run_params_extra)
@@ -406,7 +423,7 @@ def sync_krx_security_flows(
         result.phase_counts[phase] = KrxFlowPhaseCounts()
 
     try:
-        targets = _load_targets(storage, tickers)
+        targets = _load_targets(storage, tickers, scope)
         if not targets:
             raise RuntimeError("No active stocks found for the requested flow sync.")
 

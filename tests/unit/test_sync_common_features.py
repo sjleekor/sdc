@@ -27,6 +27,7 @@ def _series(
     source: Source = Source.PYKRX,
     policy: str = "next_krx_session",
     source_timezone: str = "Asia/Seoul",
+    endpoint_params: dict[str, object] | None = None,
 ) -> CommonFeatureSeries:
     return CommonFeatureSeries(
         series_id=series_id,
@@ -38,6 +39,7 @@ def _series(
         unit="point",
         availability_policy=policy,
         source_timezone=source_timezone,
+        endpoint_params=endpoint_params or {},
     )
 
 
@@ -78,7 +80,8 @@ class MockCommonFeatureProvider:
         end: date,
     ) -> CommonFeatureFetchResult:
         self.calls.append((series.series_id, start, end))
-        return self.results[series.series_id]
+        dated_key = f"{series.series_id}:{start.isoformat()}"
+        return self.results.get(dated_key, self.results[series.series_id])
 
 
 class MockCommonFeatureStorage:
@@ -92,6 +95,7 @@ class MockCommonFeatureStorage:
         self.observation_counts = observation_counts or {}
         self.observation_rows = observation_rows or {}
         self.observations: list[CommonFeatureObservation] = []
+        self.upsert_batches: list[list[CommonFeatureObservation]] = []
         self.runs: list[IngestionRun] = []
         self.series_query: tuple[list[Source] | None, list[str] | None, bool] | None = None
         self.count_queries: list[
@@ -100,6 +104,7 @@ class MockCommonFeatureStorage:
         self.observation_queries: list[
             tuple[list[str] | None, date | None, date | None, Source | None, date | None]
         ] = []
+        self.observation_date_queries: list[tuple[Source, str, date, date]] = []
 
     def record_run(self, run: IngestionRun) -> None:
         self.runs.append(run)
@@ -117,6 +122,7 @@ class MockCommonFeatureStorage:
         self,
         records: list[CommonFeatureObservation],
     ) -> UpsertResult:
+        self.upsert_batches.append(list(records))
         self.observations.extend(records)
         return UpsertResult(updated=len(records))
 
@@ -174,6 +180,21 @@ class MockCommonFeatureStorage:
             series_id: max(row.observation_date for row in self.observation_rows.get(series_id, []))
             for series_id in selected_series_ids
             if self.observation_rows.get(series_id)
+        }
+
+    def get_common_feature_observation_dates(
+        self,
+        *,
+        source: Source,
+        series_id: str,
+        start: date,
+        end: date,
+    ) -> set[date]:
+        self.observation_date_queries.append((source, series_id, start, end))
+        return {
+            row.observation_date
+            for row in self.observation_rows.get(series_id, [])
+            if row.source == source and start <= row.observation_date <= end
         }
 
 
@@ -468,6 +489,192 @@ def test_sync_common_features_incremental_lookback_bypasses_existing_coverage() 
     assert result.requests_attempted == 1
     assert result.requests_skipped == 0
     assert provider.calls == [("market_kospi", date(2026, 6, 7), date(2026, 6, 10))]
+
+
+def test_sync_common_features_krx_market_breadth_upserts_each_missing_day() -> None:
+    series = _series(
+        "market_kosdaq_advancers_krx",
+        source=Source.KRX,
+        endpoint_params={"kind": "market_breadth", "mktId": "KSQ", "metric": "advancers"},
+    )
+    storage = MockCommonFeatureStorage(
+        [series],
+        observation_rows={
+            "market_kosdaq_advancers_krx": [
+                _observation(
+                    "market_kosdaq_advancers_krx",
+                    source=Source.KRX,
+                    observation_date=date(2026, 6, 8),
+                )
+            ]
+        },
+    )
+    provider = MockCommonFeatureProvider(
+        Source.KRX,
+        {
+            "market_kosdaq_advancers_krx": CommonFeatureFetchResult(
+                records=[
+                    _observation(
+                        "market_kosdaq_advancers_krx",
+                        source=Source.KRX,
+                        observation_date=date(2026, 6, 9),
+                    )
+                ]
+            ),
+            "market_kosdaq_advancers_krx:2026-06-10": CommonFeatureFetchResult(
+                records=[
+                    _observation(
+                        "market_kosdaq_advancers_krx",
+                        source=Source.KRX,
+                        observation_date=date(2026, 6, 10),
+                    )
+                ]
+            ),
+        },
+    )
+
+    result = sync_common_features(
+        providers=[provider],
+        storage=storage,  # type: ignore[arg-type]
+        start=date(2026, 6, 8),
+        end=date(2026, 6, 10),
+        sources=[Source.KRX],
+        series_ids=["market_kosdaq_advancers_krx"],
+        rate_limit_seconds=0.0,
+        krx_trading_days=_krx_days,
+    )
+
+    assert result.errors == {}
+    assert result.requests_skipped == 1
+    assert result.requests_attempted == 2
+    assert result.rows_upserted == 2
+    assert provider.calls == [
+        ("market_kosdaq_advancers_krx", date(2026, 6, 9), date(2026, 6, 9)),
+        ("market_kosdaq_advancers_krx", date(2026, 6, 10), date(2026, 6, 10)),
+    ]
+    assert len(storage.upsert_batches) == 2
+    assert [batch[0].observation_date for batch in storage.upsert_batches] == [
+        date(2026, 6, 9),
+        date(2026, 6, 10),
+    ]
+    assert storage.observation_date_queries == [
+        (
+            Source.KRX,
+            "market_kosdaq_advancers_krx",
+            date(2026, 6, 8),
+            date(2026, 6, 10),
+        )
+    ]
+    assert storage.runs[-1].status == RunStatus.SUCCESS
+
+
+def test_sync_common_features_krx_market_breadth_continues_after_daily_error() -> None:
+    series = _series(
+        "market_kosdaq_advancers_krx",
+        source=Source.KRX,
+        endpoint_params={"kind": "market_breadth", "mktId": "KSQ", "metric": "advancers"},
+    )
+    storage = MockCommonFeatureStorage([series])
+    provider = MockCommonFeatureProvider(
+        Source.KRX,
+        {
+            "market_kosdaq_advancers_krx": CommonFeatureFetchResult(
+                records=[
+                    _observation(
+                        "market_kosdaq_advancers_krx",
+                        source=Source.KRX,
+                        observation_date=date(2026, 6, 8),
+                    )
+                ]
+            ),
+            "market_kosdaq_advancers_krx:2026-06-09": CommonFeatureFetchResult(
+                error="KRX blocked"
+            ),
+            "market_kosdaq_advancers_krx:2026-06-10": CommonFeatureFetchResult(
+                records=[
+                    _observation(
+                        "market_kosdaq_advancers_krx",
+                        source=Source.KRX,
+                        observation_date=date(2026, 6, 10),
+                    )
+                ]
+            ),
+        },
+    )
+
+    result = sync_common_features(
+        providers=[provider],
+        storage=storage,  # type: ignore[arg-type]
+        start=date(2026, 6, 8),
+        end=date(2026, 6, 10),
+        sources=[Source.KRX],
+        series_ids=["market_kosdaq_advancers_krx"],
+        rate_limit_seconds=0.0,
+        krx_trading_days=_krx_days,
+    )
+
+    assert result.requests_attempted == 3
+    assert result.rows_upserted == 2
+    assert result.errors == {"KRX:market_kosdaq_advancers_krx:2026-06-09": "KRX blocked"}
+    assert provider.calls == [
+        ("market_kosdaq_advancers_krx", date(2026, 6, 8), date(2026, 6, 8)),
+        ("market_kosdaq_advancers_krx", date(2026, 6, 9), date(2026, 6, 9)),
+        ("market_kosdaq_advancers_krx", date(2026, 6, 10), date(2026, 6, 10)),
+    ]
+    assert storage.runs[-1].status == RunStatus.PARTIAL
+
+
+def test_sync_common_features_krx_market_breadth_force_refetches_existing_days() -> None:
+    series = _series(
+        "market_kosdaq_advancers_krx",
+        source=Source.KRX,
+        endpoint_params={"kind": "market_breadth", "mktId": "KSQ", "metric": "advancers"},
+    )
+    storage = MockCommonFeatureStorage(
+        [series],
+        observation_rows={
+            "market_kosdaq_advancers_krx": [
+                _observation(
+                    "market_kosdaq_advancers_krx",
+                    source=Source.KRX,
+                    observation_date=date(2026, 6, 8),
+                )
+            ]
+        },
+    )
+    provider = MockCommonFeatureProvider(
+        Source.KRX,
+        {
+            "market_kosdaq_advancers_krx": CommonFeatureFetchResult(
+                records=[
+                    _observation(
+                        "market_kosdaq_advancers_krx",
+                        source=Source.KRX,
+                        observation_date=date(2026, 6, 8),
+                    )
+                ]
+            )
+        },
+    )
+
+    result = sync_common_features(
+        providers=[provider],
+        storage=storage,  # type: ignore[arg-type]
+        start=date(2026, 6, 8),
+        end=date(2026, 6, 8),
+        sources=[Source.KRX],
+        series_ids=["market_kosdaq_advancers_krx"],
+        force=True,
+        rate_limit_seconds=0.0,
+        krx_trading_days=_krx_days,
+    )
+
+    assert result.requests_skipped == 0
+    assert result.requests_attempted == 1
+    assert provider.calls == [
+        ("market_kosdaq_advancers_krx", date(2026, 6, 8), date(2026, 6, 8))
+    ]
+    assert storage.observation_date_queries == []
 
 
 def test_sync_common_features_records_missing_provider_as_partial() -> None:

@@ -12,14 +12,18 @@ from collections.abc import Iterator
 from datetime import date
 from typing import Protocol, runtime_checkable
 
-from krx_collector.domain.enums import Market, RunType, Source
+from krx_collector.domain.enums import ListingStatus, Market, RunType, Source
 from krx_collector.domain.models import (
     CommonFeatureCatalogEntry,
     CommonFeatureDailyFact,
     CommonFeatureObservation,
     CommonFeatureSeries,
+    CompanyProfile,
     DailyBar,
+    DailyMarketCapRow,
+    DartCapitalChangeLine,
     DartCorp,
+    DartFilingReceiptLine,
     DartFinancialStatementLine,
     DartShareCountLine,
     DartShareholderReturnLine,
@@ -92,6 +96,7 @@ class Storage(Protocol):
         self,
         active_only: bool = True,
         tickers: list[str] | None = None,
+        include_delisted: bool = False,
     ) -> list[DartCorp]:
         """Return OpenDART corp-code rows mapped to local tickers.
 
@@ -99,9 +104,43 @@ class Storage(Protocol):
             active_only: If ``True``, restrict to rows matched to active
                 ``stock_master`` records.
             tickers: Optional ticker allowlist.
+            include_delisted: If ``True``, return the HISTORICAL listed set —
+                every corp that ever carried a stock_code, listed today or not
+                (3,959 vs 2,657).  ``active_only`` is ignored.
+
+                This is not the same as ``active_only=False``, which would also
+                return the ~112k corps that never had a ticker.  corpCode.xml
+                keeps ``stock_code`` after delisting, so the mapping for the
+                1,330 delisted names is already stored — the default filter is
+                the only reason every DART raw table covers ~2% of them
+                (`poc/survivorship_gap.md`).
 
         Returns:
             List of OpenDART corp-code rows.
+        """
+        ...
+
+    def upsert_company_profiles(self, profiles: list[CompanyProfile]) -> UpsertResult:
+        """Write ``company.json`` fields onto existing ``dart_corp_master`` rows.
+
+        An UPDATE, not an upsert: a profile for a corp_code that is not already
+        in the master is a bug upstream, not a row to create.
+
+        Args:
+            profiles: Profiles to persist.
+
+        Returns:
+            Counters for the rows updated.
+        """
+        ...
+
+    def get_profiled_corp_codes(self) -> set[str]:
+        """Return corp_codes whose profile has already been fetched.
+
+        The skip-if-present key: ``profile_fetched_at IS NOT NULL``.
+
+        Returns:
+            Set of corp_codes to skip.
         """
         ...
 
@@ -165,6 +204,41 @@ class Storage(Protocol):
         records: list[DartShareholderReturnLine],
     ) -> UpsertResult:
         """Upsert OpenDART dividend / treasury-stock raw rows."""
+        ...
+
+    def get_existing_dart_capital_change_keys(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int, str]]:
+        """Return (corp_code, bsns_year, reprt_code) tuples already present."""
+        ...
+
+    def upsert_dart_capital_change_raw(
+        self,
+        records: list[DartCapitalChangeLine],
+    ) -> UpsertResult:
+        """Upsert OpenDART capital-change (irdsSttus) raw rows."""
+        ...
+
+    def get_existing_dart_filing_receipt_years(
+        self,
+        years: list[int],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int]]:
+        """Return (corp_code, year) pairs with at least one receipt already stored.
+
+        ``year`` is the calendar year of ``rcept_dt``, used as a coarse
+        completion proxy for one fetch window (see ``sync_dart_filings``).
+        """
+        ...
+
+    def upsert_dart_filing_receipt_raw(
+        self,
+        records: list[DartFilingReceiptLine],
+    ) -> UpsertResult:
+        """Upsert OpenDART disclosure-receipt raw rows."""
         ...
 
     def upsert_dart_xbrl_documents(
@@ -411,6 +485,17 @@ class Storage(Protocol):
         """Return latest raw observation date grouped by ``series_id``."""
         ...
 
+    def get_common_feature_observation_dates(
+        self,
+        *,
+        source: Source,
+        series_id: str,
+        start: date,
+        end: date,
+    ) -> set[date]:
+        """Return stored raw observation dates for one source series and range."""
+        ...
+
     def upsert_common_feature_catalog(
         self,
         records: list[CommonFeatureCatalogEntry],
@@ -483,6 +568,115 @@ class Storage(Protocol):
         """
         ...
 
+    def get_stocks(
+        self,
+        market: Market | None = None,
+        statuses: list[ListingStatus] | None = None,
+        tickers: list[str] | None = None,
+    ) -> list[Stock]:
+        """Return stock-master rows without assuming they are still listed.
+
+        ``get_active_stocks`` answers "who is listed now", which is the right
+        question for universe sync and the wrong one for a historical backfill:
+        a delisted ticker can never be targeted through it, so its price and
+        filing history stay permanently absent
+        (`poc/survivorship_gap.md`: 2.0-2.3% coverage of 1,330 delisted names).
+
+        Args:
+            market: Optional market filter.
+            statuses: Listing statuses to include.  ``None`` means every status.
+            tickers: Optional ticker allowlist, applied in SQL rather than by
+                filtering an active-only result.
+
+        Returns:
+            Matching stock-master rows.
+        """
+        ...
+
+    def insert_stock_master_snapshot_only(
+        self,
+        snapshot: StockUniverseSnapshot,
+    ) -> UpsertResult:
+        """Persist a snapshot and its items **without touching stock_master**.
+
+        ``upsert_stock_master`` does three things in one call, and the third is
+        an upsert of ``stock_master``.  Calling it with a reconstructed
+        historical snapshot would let a 2016 ticker list overwrite the current
+        universe — statuses, names and ``last_seen_date`` alike.
+
+        This method exists so a backfill can add rows to the snapshot tables and
+        nothing else.  Who is listed *today* stays the job of ``universe sync``;
+        deciding who was listed on a past date is the reader's job (the mart).
+
+        Idempotent on ``(as_of_date, source)``: re-running a backfill over a
+        date that already has a snapshot from the same source is a no-op.
+
+        Args:
+            snapshot: Snapshot to persist.
+
+        Returns:
+            Counters for the snapshot items written.
+        """
+        ...
+
+    def get_universe_as_of(
+        self,
+        as_of: date,
+        market: Market | None = None,
+    ) -> tuple[date, set[str]] | None:
+        """Return the universe that was listed on or before ``as_of``.
+
+        The point-in-time counterpart to :meth:`get_active_stocks`.  Validating
+        a past date against today's active set cannot see a gap, because the
+        tickers that are missing are exactly the ones that have since delisted
+        and therefore left the active set too — the same blind spot that leaves
+        13.9% of the 2016 cross-section uncollected
+        (`poc/survivorship_gap.md`).
+
+        Args:
+            as_of: Reference date.
+            market: Optional market filter.
+
+        Returns:
+            ``(snapshot_as_of_date, tickers)`` for the newest snapshot at or
+            before ``as_of``, or ``None`` when no snapshot covers that date.
+            The snapshot's own date is returned so the caller can report how
+            stale the comparison basis is.
+        """
+        ...
+
+    def get_snapshot_record_counts(
+        self,
+        limit: int = 24,
+    ) -> list[tuple[date, Source, int]]:
+        """Return recent snapshot sizes, newest first.
+
+        Feeds the universe-drift check: a sudden change in how many tickers a
+        snapshot holds is a collection failure long before it is a market
+        event.
+
+        Args:
+            limit: Maximum snapshots to return.
+
+        Returns:
+            ``(as_of_date, source, record_count)`` newest first.
+        """
+        ...
+
+    def get_existing_snapshot_dates(self, source: Source) -> set[date]:
+        """Return ``as_of_date`` values that already have a snapshot from *source*.
+
+        The skip-if-present key for the universe backfill.  Scoped by source so
+        backfilled snapshots and live ones are counted separately.
+
+        Args:
+            source: Snapshot source to filter on.
+
+        Returns:
+            Set of dates already captured.
+        """
+        ...
+
     # -- Daily OHLCV ----------------------------------------------------------
 
     def upsert_daily_bars(self, bars: list[DailyBar]) -> UpsertResult:
@@ -497,6 +691,46 @@ class Storage(Protocol):
 
         Returns:
             Counters of inserted / updated / errored rows.
+        """
+        ...
+
+    # -- Daily market cap -----------------------------------------------------
+
+    def upsert_daily_market_cap(self, rows: list[DailyMarketCapRow]) -> UpsertResult:
+        """Upsert one ``(trade_date, market)`` slice of market-cap rows.
+
+        **One call must be one slice.**  The caller relies on this being a
+        single transaction: if a slice is split across calls and the process
+        dies in between, the slice is left permanently incomplete and any
+        "rows exist, therefore done" skip rule will never fill the hole.
+
+        Args:
+            rows: All rows of a single slice.
+
+        Returns:
+            Counters of inserted / updated / errored rows.
+        """
+        ...
+
+    def get_market_cap_slice_row_counts(
+        self,
+        start: date,
+        end: date,
+        market: Market | None = None,
+    ) -> dict[tuple[date, Market], int]:
+        """Return stored row counts per ``(trade_date, market)`` slice.
+
+        Row counts, not a boolean — completeness is decided by comparing
+        against what the provider returned, never by mere row existence.
+
+        Args:
+            start: First trade date (inclusive).
+            end: Last trade date (inclusive).
+            market: Optional market filter.
+
+        Returns:
+            Mapping of slice key to stored row count.  Absent slices are
+            simply missing from the mapping.
         """
         ...
 

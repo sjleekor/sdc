@@ -7,6 +7,7 @@ Subcommands::
                                   [--tables ...] [--all-tables]
     krx-collector universe sync  [--source fdr|pykrx] [--markets ...]
     krx-collector prices backfill [--market ...] [--tickers ...] [--start ...]
+    krx-collector prices market-cap-backfill [--market ...] [--start ...] [--end ...]
     krx-collector validate       [--date ...] [--market ...]
 
 Each subcommand parses arguments and delegates to the corresponding
@@ -18,12 +19,17 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import signal
+import subprocess
 import sys
+import threading
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from krx_collector.adapters.opendart_common.client import OpenDartRequestExecutor
+from krx_collector.domain.enums import UniverseScope
 from krx_collector.infra.config.settings import get_settings
 from krx_collector.infra.logging.setup import setup_logging
 
@@ -187,6 +193,99 @@ def _handle_db_sync_remote(args: argparse.Namespace) -> None:
         print(f"   - {table_name}: {row_count}")
 
 
+_SIGNAL_FORWARD_GRACE_SECONDS = 10.0
+
+
+def _run_child_with_env_var(command: list[str], env_name: str, env_value: str) -> int:
+    """Run ``command`` with one extra env var injected into the child only.
+
+    SIGINT/SIGTERM received by this process are forwarded to the child's own
+    process group (it runs in a new session so a terminal Ctrl-C targeting our
+    group does not already reach it), escalating to SIGKILL after a grace
+    period if the child ignores the signal. The child's exit status is
+    preserved as-is, or as ``128 + signum`` if it died from a signal — the
+    standard shell convention — so meaningful codes like OpenDART's exit 75
+    are not swallowed.
+    """
+    child_env = os.environ.copy()
+    child_env[env_name] = env_value
+
+    proc = subprocess.Popen(command, env=child_env, start_new_session=True)
+    grace_timer: threading.Timer | None = None
+
+    def _kill_child(sig: int) -> None:
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            pass
+
+    def _forward(signum: int, _frame: object) -> None:
+        nonlocal grace_timer
+        _kill_child(signum)
+        grace_timer = threading.Timer(
+            _SIGNAL_FORWARD_GRACE_SECONDS, _kill_child, args=(signal.SIGKILL,)
+        )
+        grace_timer.daemon = True
+        grace_timer.start()
+
+    previous_sigint = signal.signal(signal.SIGINT, _forward)
+    previous_sigterm = signal.signal(signal.SIGTERM, _forward)
+    try:
+        proc.wait()
+    finally:
+        if grace_timer is not None:
+            grace_timer.cancel()
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)
+
+    if proc.returncode < 0:
+        return 128 - proc.returncode
+    return proc.returncode
+
+
+def _handle_db_with_remote_dsn(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector db with-remote-dsn -- <command...>``.
+
+    Resolves the remote sj2-server DSN the same way ``db sync-remote`` does
+    (including the SSH-tunnel case, which needs the tunnel alive for the
+    whole child run — this is why the DSN is injected around a wrapped
+    subprocess rather than just printed). ``SDC_REMOTE_DSN`` is set only in
+    the child's environment; this process's own env and stdout/stderr never
+    carry the secret.
+    """
+    settings = get_settings()
+
+    db_info_path = args.db_info_path or str(settings.remote_db_info_path)
+    remote_host_override = args.remote_host or settings.remote_db_host_override
+    ssh_host = args.ssh_host or settings.remote_db_ssh_host
+    ssh_local_port = args.ssh_local_port or settings.remote_db_ssh_local_port
+    ssh_compression = (
+        args.ssh_compression
+        if args.ssh_compression is not None
+        else settings.remote_db_ssh_compression
+    )
+
+    command = list(args.remote_command)
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        print("db with-remote-dsn: missing command after `--`", file=sys.stderr)
+        sys.exit(2)
+
+    from krx_collector.infra.db_postgres.remote_sync import resolve_remote_dsn
+
+    with resolve_remote_dsn(
+        db_info_path=db_info_path,
+        host_override=remote_host_override,
+        ssh_host=ssh_host,
+        ssh_local_port=ssh_local_port,
+        ssh_compression=ssh_compression,
+    ) as (_info, dsn):
+        exit_code = _run_child_with_env_var(command, "SDC_REMOTE_DSN", dsn)
+
+    sys.exit(exit_code)
+
+
 def _handle_ops_freshness_report(args: argparse.Namespace) -> None:
     """Handle ``krx-collector ops freshness-report``."""
     settings = get_settings()
@@ -215,13 +314,7 @@ def _handle_ops_freshness_report(args: argparse.Namespace) -> None:
         suffix = "" if len(rows) <= 8 else f", ... (+{len(rows) - 8})"
         print(f"     {source}: {preview}{suffix}")
 
-    if report.common_fact_latest_dates:
-        latest_fact = max(report.common_fact_latest_dates.values())
-        print(f"   - common daily fact latest: {latest_fact}")
-    else:
-        print("   - common daily fact latest: -")
-
-    print("   - DART/metric year ranges:")
+    print("   - DART raw year ranges:")
     for row in report.dart_year_ranges:
         year_range = f"{row.min_year}..{row.max_year}" if row.min_year is not None else "-"
         print(f"     {row.table_name}: years={year_range} rows={row.rows}")
@@ -232,53 +325,6 @@ def _handle_ops_freshness_report(args: argparse.Namespace) -> None:
     for run in report.running_runs:
         started_at = run.started_at.isoformat() if run.started_at else "-"
         print(f"     {run.run_id} {run.run_type.value} started_at={started_at}")
-
-
-def _handle_ops_assert_common_freshness(args: argparse.Namespace) -> None:
-    """Handle ``krx-collector ops assert-common-freshness``."""
-    settings = get_settings()
-
-    from krx_collector.infra.db_postgres.repositories import PostgresStorage
-    from krx_collector.service.freshness import assert_common_freshness
-    from krx_collector.util.time import today_kst
-
-    end = args.end or today_kst()
-    series_ids = _split_csv(args.series)
-    storage = PostgresStorage(settings.db_dsn)
-    result = assert_common_freshness(
-        storage=storage,
-        sources=args.sources,
-        end=end,
-        max_run_age_hours=args.max_run_age_hours,
-        daily_max_lag_days=args.daily_max_lag_days,
-        macro_max_lag_days=args.macro_max_lag_days,
-        series_ids=series_ids,
-    )
-
-    source_text = ",".join(source.value.lower() for source in result.sources)
-    if result.ok:
-        print(
-            "✅ Common freshness assertion passed. "
-            f"sources={source_text} checked_series={result.checked_series} end={end}"
-        )
-        for row in result.run_freshness:
-            age = "-" if row.age_hours is None else f"{row.age_hours:.1f}h"
-            ended_at = row.ended_at.isoformat() if row.ended_at else "-"
-            print(f"   - {row.source.value}: run={row.run_id or '-'} ended_at={ended_at} age={age}")
-        return
-
-    print(
-        "❌ Common freshness assertion failed. "
-        f"sources={source_text} checked_series={result.checked_series} end={end}",
-        file=sys.stderr,
-    )
-    for violation in result.violations:
-        series = f" series={violation.series_id}" if violation.series_id else ""
-        print(
-            f"   - {violation.source.value} {violation.check}{series}: " f"{violation.message}",
-            file=sys.stderr,
-        )
-    sys.exit(2)
 
 
 def _dart_financial_actual_attempt_estimate(
@@ -326,6 +372,7 @@ def _dart_share_info_actual_attempt_estimate(
     if force:
         existing_share_count_keys: set[tuple[str, int, str]] = set()
         existing_return_keys: set[tuple[str, int, str, str]] = set()
+        existing_capital_change_keys: set[tuple[str, int, str]] = set()
         effective_skip_keys: set[str] = set()
     else:
         bsns_years = sorted({year for year, _ in allowed_pairs})
@@ -337,6 +384,11 @@ def _dart_share_info_actual_attempt_estimate(
             corp_codes=corp_codes,
         )
         existing_return_keys = storage.get_existing_dart_shareholder_return_keys(
+            bsns_years=bsns_years,
+            reprt_codes=reprt_codes,
+            corp_codes=corp_codes,
+        )
+        existing_capital_change_keys = storage.get_existing_dart_capital_change_keys(
             bsns_years=bsns_years,
             reprt_codes=reprt_codes,
             corp_codes=corp_codes,
@@ -361,6 +413,11 @@ def _dart_share_info_actual_attempt_estimate(
                 (corp.corp_code, bsns_year, reprt_code, "treasury_stock")
                 not in existing_return_keys
                 and f"{request_prefix}:treasury_stock" not in effective_skip_keys
+            ):
+                attempts += 1
+            if (
+                (corp.corp_code, bsns_year, reprt_code) not in existing_capital_change_keys
+                and f"{request_prefix}:capital_change" not in effective_skip_keys
             ):
                 attempts += 1
     return attempts
@@ -442,6 +499,51 @@ def _handle_dart_sync_corp(args: argparse.Namespace) -> None:
     if result.unmatched_active_tickers:
         preview = ", ".join(result.unmatched_active_tickers[:10])
         print(f"   - Sample unmatched active tickers: {preview}")
+
+
+def _handle_dart_sync_corp_profile(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector dart sync-corp-profile``."""
+    settings = get_settings()
+    tickers = _split_csv(args.tickers)
+
+    print(
+        f"→ dart sync-corp-profile: tickers={tickers}, "
+        f"rate_limit={args.rate_limit_seconds}, force={args.force}"
+    )
+
+    from krx_collector.adapters.opendart_corp.provider import OpenDartCorpCodeProvider
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.sync_dart_corp_profile import sync_dart_corp_profile
+
+    try:
+        request_executor = _build_opendart_request_executor()
+    except Exception as exc:
+        print(f"❌ OpenDART corp profile sync failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    result = sync_dart_corp_profile(
+        profile_provider=OpenDartCorpCodeProvider(request_executor=request_executor),
+        storage=PostgresStorage(settings.db_dsn),
+        tickers=tickers,
+        rate_limit_seconds=args.rate_limit_seconds,
+        force=args.force,
+        scope=UniverseScope(args.universe_scope),
+    )
+
+    _exit_if_opendart_key_exhausted(result, "OpenDART corp profile sync")
+
+    if result.errors:
+        print(
+            f"⚠ OpenDART corp profile sync completed with {len(result.errors)} errors.",
+            file=sys.stderr,
+        )
+    else:
+        print("✅ OpenDART corp profile sync completed.")
+
+    print(f"   - Requests attempted: {result.requests_attempted}")
+    print(f"   - Requests skipped:   {result.requests_skipped}")
+    print(f"   - Rows upserted:      {result.rows_upserted}")
+    print(f"   - No data:            {result.no_data}")
 
 
 def _handle_dart_sync_financials(args: argparse.Namespace) -> None:
@@ -572,6 +674,7 @@ def _handle_dart_sync_financials(args: argparse.Namespace) -> None:
         allowed_year_report_pairs=allowed_year_report_pairs,
         skip_request_keys=skip_request_keys,
         run_params_extra=run_params_extra,
+        scope=UniverseScope(args.universe_scope),
     )
 
     if result.errors:
@@ -630,7 +733,7 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
             storage,
             run_type=RunType.DART_SHARE_INFO_SYNC,
             active_corp_count=active_count,
-            requests_per_corp_target=3,
+            requests_per_corp_target=4,
             lookback_years=args.lookback_years,
             reprt_codes=reprt_codes,
             negative_cache_ttl_days=args.negative_cache_ttl_days,
@@ -705,6 +808,7 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
     result = sync_dart_share_info(
         share_count_provider=provider,
         shareholder_return_provider=provider,
+        capital_change_provider=provider,
         storage=storage,
         bsns_years=bsns_years,
         reprt_codes=reprt_codes,
@@ -714,6 +818,7 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
         allowed_year_report_pairs=allowed_year_report_pairs,
         skip_request_keys=skip_request_keys,
         run_params_extra=run_params_extra,
+        scope=UniverseScope(args.universe_scope),
     )
 
     if result.errors:
@@ -726,6 +831,7 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
     print(f"   - Requests skipped: {result.requests_skipped}")
     print(f"   - Share count rows upserted: {result.share_count_rows_upserted}")
     print(f"   - Shareholder return rows upserted: {result.shareholder_return_rows_upserted}")
+    print(f"   - Capital change rows upserted: {result.capital_change_rows_upserted}")
     print(f"   - No-data requests: {result.no_data_requests}")
     if result.errors:
         for request_key, error in list(result.errors.items())[:10]:
@@ -855,6 +961,7 @@ def _handle_dart_sync_xbrl(args: argparse.Namespace) -> None:
         allowed_year_report_pairs=allowed_year_report_pairs,
         skip_request_keys=skip_request_keys,
         run_params_extra=run_params_extra,
+        scope=UniverseScope(args.universe_scope),
     )
 
     if result.errors:
@@ -874,81 +981,135 @@ def _handle_dart_sync_xbrl(args: argparse.Namespace) -> None:
     _exit_if_opendart_key_exhausted(result, "OpenDART XBRL sync")
 
 
-def _handle_metrics_normalize(args: argparse.Namespace) -> None:
-    """Handle ``krx-collector metrics normalize``."""
-    bsns_years = [int(value.strip()) for value in args.bsns_years.split(",") if value.strip()]
-    reprt_codes = [value.strip() for value in args.reprt_codes.split(",") if value.strip()]
+def _handle_dart_sync_filings(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector dart sync-filings``."""
+    settings = get_settings()
+    years = [int(value.strip()) for value in args.years.split(",") if value.strip()]
     tickers = [value.strip() for value in args.tickers.split(",")] if args.tickers else None
-    if args.incremental:
-        current_year = date.today().year
-        bsns_years = [current_year - offset for offset in range(args.lookback_years + 1)]
 
     print(
-        f"→ metrics normalize: years={bsns_years}, reprt_codes={reprt_codes}, "
-        f"tickers={tickers}, batch_size={args.batch_size}, "
-        f"incremental={args.incremental}, lookback_years={args.lookback_years}"
+        f"→ dart sync-filings: years={years}, tickers={tickers}, "
+        f"rate_limit={args.rate_limit_seconds}"
     )
 
-    from krx_collector.infra.config.settings import get_settings as _get_settings
+    from krx_collector.adapters.opendart_filings.provider import OpenDartFilingReceiptProvider
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
-    from krx_collector.service.normalize_metrics import normalize_stock_metrics
+    from krx_collector.service.sync_dart_filings import sync_dart_filings
 
-    settings = _get_settings()
+    try:
+        request_executor = _build_opendart_request_executor()
+    except Exception as exc:
+        print(f"❌ OpenDART filing receipt sync failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    provider = OpenDartFilingReceiptProvider(
+        request_executor=request_executor,
+        page_delay_seconds=args.rate_limit_seconds,
+    )
     storage = PostgresStorage(settings.db_dsn)
-    result = normalize_stock_metrics(
+    result = sync_dart_filings(
+        filing_receipt_provider=provider,
         storage=storage,
-        bsns_years=bsns_years,
-        reprt_codes=reprt_codes,
+        years=years,
         tickers=tickers,
-        batch_size=args.batch_size,
-        incremental=args.incremental,
+        rate_limit_seconds=args.rate_limit_seconds,
+        force=args.force,
+        scope=UniverseScope(args.universe_scope),
     )
 
     if result.errors:
         print(
-            f"⚠ Metric normalization completed with {len(result.errors)} errors.", file=sys.stderr
+            f"⚠ Filing receipt sync completed with {len(result.errors)} errors.",
+            file=sys.stderr,
         )
-        for error_key, error_value in list(result.errors.items())[:10]:
-            print(f"   - Error {error_key}: {error_value}")
     else:
-        print("✅ Metric normalization completed.")
+        print("✅ OpenDART filing receipt sync completed.")
 
     print(f"   - Targets processed: {result.targets_processed}")
-    print(f"   - Metric catalog upserted: {result.catalog_upsert.updated}")
-    print(f"   - Mapping rules upserted: {result.rule_upsert.updated}")
-    print(f"   - Facts written: {result.facts_written}")
+    print(f"   - Requests attempted: {result.requests_attempted}")
+    print(f"   - Requests skipped: {result.requests_skipped}")
+    print(f"   - Rows upserted: {result.rows_upserted}")
+    print(f"   - No-data requests: {result.no_data_requests}")
+    if result.errors:
+        for request_key, error in list(result.errors.items())[:10]:
+            print(f"   - Error {request_key}: {error}")
+    _exit_if_opendart_key_exhausted(result, "OpenDART filing receipt sync")
 
 
-def _handle_metrics_coverage_report(args: argparse.Namespace) -> None:
-    """Handle ``krx-collector metrics coverage-report``."""
-    bsns_years = [int(value.strip()) for value in args.bsns_years.split(",") if value.strip()]
-    reprt_codes = [value.strip() for value in args.reprt_codes.split(",") if value.strip()]
-    tickers = [value.strip() for value in args.tickers.split(",")] if args.tickers else None
+def _handle_dart_backfill_xbrl_receipts(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector dart backfill-xbrl-receipts``.
 
-    print(
-        f"→ metrics coverage-report: years={bsns_years}, reprt_codes={reprt_codes}, "
-        f"tickers={tickers}"
-    )
+    Reads explicit targets from a JSON-lines file — each line an object with
+    ``ticker``, ``corp_code``, ``bsns_year``, ``reprt_code``, ``rcept_no`` —
+    and fetches XBRL for exactly those receipts. Deciding *which* receipts
+    need backfilling (e.g. an original filing not yet captured) is a
+    downstream analysis over ``dart_filing_receipt_raw`` and is not done
+    here; this command only performs the fetch once targets are known.
+    """
+    import json
 
-    from krx_collector.infra.config.settings import get_settings as _get_settings
+    settings = get_settings()
+    targets_path = Path(args.targets_file)
+    targets: list[object] = []
+
+    from krx_collector.domain.models import XbrlBackfillTarget
+
+    with targets_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            targets.append(
+                XbrlBackfillTarget(
+                    ticker=str(row["ticker"]),
+                    corp_code=str(row["corp_code"]),
+                    bsns_year=int(row["bsns_year"]),
+                    reprt_code=str(row["reprt_code"]),
+                    rcept_no=str(row["rcept_no"]),
+                )
+            )
+
+    print(f"→ dart backfill-xbrl-receipts: targets={len(targets)} file={targets_path}")
+
+    from krx_collector.adapters.opendart_xbrl.provider import OpenDartXbrlProvider
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
-    from krx_collector.service.report_metric_coverage import build_metric_coverage_report
+    from krx_collector.service.sync_dart_xbrl import sync_dart_xbrl_receipt_targeted
 
-    settings = _get_settings()
+    try:
+        request_executor = _build_opendart_request_executor()
+    except Exception as exc:
+        print(f"❌ OpenDART XBRL receipt backfill failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    provider = OpenDartXbrlProvider(request_executor=request_executor)
     storage = PostgresStorage(settings.db_dsn)
-    report = build_metric_coverage_report(
+    result = sync_dart_xbrl_receipt_targeted(
+        provider=provider,
         storage=storage,
-        bsns_years=bsns_years,
-        reprt_codes=reprt_codes,
-        tickers=tickers,
+        targets=targets,
+        rate_limit_seconds=args.rate_limit_seconds,
+        force=args.force,
     )
 
-    print(f"✅ Metric coverage report generated. Targets: {report.target_count}")
-    for row in report.rows[:20]:
+    if result.errors:
         print(
-            f"   - {row.metric_code}: {row.covered_count}/{row.target_count} "
-            f"({row.coverage_ratio})"
+            f"⚠ XBRL receipt backfill completed with {len(result.errors)} errors.",
+            file=sys.stderr,
         )
+    else:
+        print("✅ OpenDART XBRL receipt backfill completed.")
+
+    print(f"   - Targets processed: {result.targets_processed}")
+    print(f"   - Requests attempted: {result.requests_attempted}")
+    print(f"   - Requests skipped: {result.requests_skipped}")
+    print(f"   - Documents upserted: {result.documents_upserted}")
+    print(f"   - Facts upserted: {result.facts_upserted}")
+    print(f"   - No-data requests: {result.no_data_requests}")
+    if result.errors:
+        for request_key, error in list(result.errors.items())[:10]:
+            print(f"   - Error {request_key}: {error}")
+    _exit_if_opendart_key_exhausted(result, "OpenDART XBRL receipt backfill")
 
 
 def _handle_common_seed_catalog(args: argparse.Namespace) -> None:
@@ -1029,157 +1190,6 @@ def _handle_common_sync(args: argparse.Namespace) -> None:
             print(f"   - Error {request_key}: {error}")
         if args.incremental:
             sys.exit(1)
-
-
-def _handle_common_build_daily(args: argparse.Namespace) -> None:
-    """Handle ``krx-collector common build-daily``."""
-    settings = get_settings()
-    feature_codes = _split_csv(args.feature_codes)
-    include_inactive = bool(args.include_inactive)
-    if include_inactive and not feature_codes:
-        raise SystemExit("--include-inactive requires an explicit --feature-codes allowlist.")
-
-    print(
-        f"→ common build-daily: feature_codes={feature_codes}, "
-        f"start={args.start}, end={args.end}, include_inactive={include_inactive}, "
-        f"init_schema={args.init_schema}, incremental={args.incremental}, "
-        f"lookback_days={args.lookback_days}, "
-        f"max_auto_range_days={args.max_auto_range_days}, "
-        f"allow_large_range={args.allow_large_range}"
-    )
-
-    from krx_collector.infra.db_postgres.repositories import PostgresStorage
-    from krx_collector.service.build_common_feature_daily_facts import (
-        build_common_feature_daily_facts,
-    )
-
-    storage = PostgresStorage(settings.db_dsn)
-    if args.init_schema:
-        storage.init_schema()
-
-    result = build_common_feature_daily_facts(
-        storage=storage,
-        start=args.start,
-        end=args.end,
-        feature_codes=feature_codes,
-        active_only=not include_inactive,
-        incremental=args.incremental,
-        lookback_days=args.lookback_days,
-        max_auto_range_days=args.max_auto_range_days,
-        allow_large_range=args.allow_large_range,
-    )
-
-    if result.errors:
-        print(
-            f"⚠ Common feature daily build completed with {len(result.errors)} errors.",
-            file=sys.stderr,
-        )
-    else:
-        print("✅ Common feature daily build completed.")
-
-    print(f"   - Features processed: {result.features_processed}")
-    print(f"   - Feature dates processed: {result.feature_dates_processed}")
-    print(f"   - Facts built: {result.facts_built}")
-    print(f"   - Null facts: {result.null_facts}")
-    print(f"   - Facts upserted: {result.facts_upserted}")
-    if result.errors:
-        for feature_code, error in list(result.errors.items())[:10]:
-            print(f"   - Error {feature_code}: {error}")
-        if args.incremental:
-            sys.exit(1)
-
-
-def _handle_common_coverage_report(args: argparse.Namespace) -> None:
-    """Handle ``krx-collector common coverage-report``."""
-    settings = get_settings()
-    feature_codes = _split_csv(args.feature_codes)
-    include_inactive = bool(args.include_inactive)
-    if include_inactive and not feature_codes:
-        raise SystemExit("--include-inactive requires an explicit --feature-codes allowlist.")
-
-    print(
-        f"→ common coverage-report: feature_codes={feature_codes}, "
-        f"start={args.start}, end={args.end}, include_inactive={include_inactive}"
-    )
-
-    from krx_collector.infra.db_postgres.repositories import PostgresStorage
-    from krx_collector.service.report_common_feature_coverage import (
-        build_common_feature_coverage_report,
-    )
-
-    storage = PostgresStorage(settings.db_dsn)
-    report = build_common_feature_coverage_report(
-        storage=storage,
-        start=args.start,
-        end=args.end,
-        feature_codes=feature_codes,
-        active_only=not include_inactive,
-    )
-
-    print(f"✅ Common feature coverage report generated. Target dates: {report.target_count}")
-    print("   feature_code | facts | non_null | nulls | missing | coverage | pit_violations")
-    for row in report.rows[:50]:
-        print(
-            f"   {row.feature_code}: "
-            f"{row.fact_count}/{row.non_null_count}/{row.null_count}/"
-            f"{row.missing_count} coverage={row.coverage_ratio} "
-            f"pit_violations={row.pit_violation_count}"
-        )
-
-
-def _handle_common_readiness_report(args: argparse.Namespace) -> None:
-    """Handle ``krx-collector common readiness-report``."""
-    settings = get_settings()
-    feature_codes = _split_csv(args.feature_codes)
-    include_inactive = bool(args.include_inactive)
-    if include_inactive and not feature_codes:
-        raise SystemExit("--include-inactive requires an explicit --feature-codes allowlist.")
-
-    print(
-        f"→ common readiness-report: feature_codes={feature_codes}, "
-        f"start={args.start}, end={args.end}, include_inactive={include_inactive}, "
-        f"required_coverage_ratio={args.required_coverage_ratio}"
-    )
-
-    from krx_collector.infra.db_postgres.repositories import PostgresStorage
-    from krx_collector.service.report_common_feature_readiness import (
-        build_common_feature_readiness_report,
-    )
-
-    storage = PostgresStorage(settings.db_dsn)
-    report = build_common_feature_readiness_report(
-        storage=storage,
-        start=args.start,
-        end=args.end,
-        feature_codes=feature_codes,
-        active_only=not include_inactive,
-        required_coverage_ratio=args.required_coverage_ratio,
-    )
-
-    print(f"✅ Common feature readiness report generated. Target dates: {report.target_count}")
-    print("   feature_code | ready | coverage | nulls | missing | pit_violations | blockers")
-    for row in report.rows[:50]:
-        blockers = ", ".join(row.blockers) if row.blockers else "-"
-        print(
-            f"   {row.feature_code}: ready={row.ready} "
-            f"coverage={row.coverage_ratio}/{row.required_coverage_ratio} "
-            f"nulls={row.null_count} missing={row.missing_count} "
-            f"pit_violations={row.pit_violation_count} blockers={blockers}"
-        )
-
-    not_ready = [row for row in report.rows if not row.ready]
-    if args.fail_on_not_ready and (report.errors or not_ready):
-        if report.errors:
-            print(
-                f"❌ Common feature readiness report has {len(report.errors)} errors.",
-                file=sys.stderr,
-            )
-        if not_ready:
-            print(
-                f"❌ Common feature readiness failed for {len(not_ready)} features.",
-                file=sys.stderr,
-            )
-        raise SystemExit(2)
 
 
 def _handle_flows_sync(args: argparse.Namespace) -> None:
@@ -1457,74 +1467,6 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
             print(f"   - Error {request_key}: {error}")
 
 
-def _handle_operating_process_document(args: argparse.Namespace) -> None:
-    """Handle ``krx-collector operating process-document``."""
-    from krx_collector.domain.enums import Market
-    from krx_collector.domain.models import OperatingSourceDocument
-    from krx_collector.infra.db_postgres.repositories import PostgresStorage
-    from krx_collector.service.default_operating_registry import build_default_operating_registry
-    from krx_collector.service.process_operating_document import (
-        build_operating_document_key,
-        process_operating_document,
-    )
-    from krx_collector.util.time import now_kst
-
-    settings = get_settings()
-    text_path = Path(args.text_file)
-    content_text = text_path.read_text(encoding="utf-8")
-    market = Market(args.market.upper())
-    document_key = build_operating_document_key(
-        ticker=args.ticker,
-        sector_key=args.sector_key,
-        document_type=args.document_type,
-        title=args.title,
-        period_end=args.period_end.isoformat(),
-        content_text=content_text,
-    )
-    document = OperatingSourceDocument(
-        document_key=document_key,
-        ticker=args.ticker,
-        market=market,
-        sector_key=args.sector_key,
-        document_type=args.document_type,
-        title=args.title,
-        document_date=args.document_date,
-        period_end=args.period_end,
-        source_system=args.source_system,
-        source_url=args.source_url or "",
-        language=args.language,
-        content_text=content_text,
-        fetched_at=now_kst(),
-        raw_payload={
-            "text_file": str(text_path),
-        },
-    )
-
-    print(
-        f"→ operating process-document: ticker={args.ticker}, market={market.value}, "
-        f"sector_key={args.sector_key}, period_end={args.period_end}, text_file={text_path}"
-    )
-
-    storage = PostgresStorage(settings.db_dsn)
-    registry = build_default_operating_registry()
-    result = process_operating_document(storage=storage, registry=registry, document=document)
-
-    if result.errors:
-        print(
-            f"⚠ Operating KPI processing completed with {len(result.errors)} errors.",
-            file=sys.stderr,
-        )
-        for request_key, error in list(result.errors.items())[:10]:
-            print(f"   - Error {request_key}: {error}")
-    else:
-        print("✅ Operating KPI processing completed.")
-
-    print(f"   - Documents processed: {result.documents_processed}")
-    print(f"   - Facts upserted: {result.facts_upserted}")
-    if result.extracted_metric_codes:
-        print(f"   - Extracted metrics: {', '.join(result.extracted_metric_codes)}")
-
-
 def _handle_universe_sync(args: argparse.Namespace) -> None:
     """Handle ``krx-collector universe sync``."""
     settings = get_settings()
@@ -1592,6 +1534,56 @@ def _handle_universe_sync(args: argparse.Namespace) -> None:
         print(f"   - Delisted tickers: {len(result.delisted_tickers)}")
 
 
+def _handle_universe_backfill_snapshots(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector universe backfill-snapshots``."""
+    settings = get_settings()
+
+    from krx_collector.domain.enums import Market
+
+    markets = []
+    for m in args.markets.split(","):
+        m_upper = m.strip().upper()
+        if m_upper in ("KOSPI", "KOSDAQ"):
+            markets.append(Market(m_upper))
+        else:
+            print(f"❌ Unknown market: {m}", file=sys.stderr)
+            sys.exit(1)
+
+    print(
+        f"→ universe backfill-snapshots: markets={[m.value for m in markets]}, "
+        f"start={args.start}, end={args.end}, "
+        f"rate_limit={args.rate_limit_seconds}, force={args.force}"
+    )
+
+    from krx_collector.adapters.universe_pykrx.provider import (
+        PykrxHistoricalUniverseProvider,
+    )
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.backfill_universe_snapshots import (
+        backfill_universe_snapshots,
+    )
+
+    result = backfill_universe_snapshots(
+        provider=PykrxHistoricalUniverseProvider(),
+        storage=PostgresStorage(settings.db_dsn),
+        markets=markets,
+        start=args.start,
+        end=args.end,
+        rate_limit_seconds=args.rate_limit_seconds,
+        force=args.force,
+    )
+
+    if result.errors:
+        print(f"⚠ Snapshot backfill completed with {len(result.errors)} errors.", file=sys.stderr)
+    else:
+        print("✅ Snapshot backfill completed successfully.")
+
+    print(f"   - Snapshots attempted: {result.snapshots_attempted}")
+    print(f"   - Snapshots skipped:   {result.snapshots_skipped}")
+    print(f"   - Snapshots written:   {result.snapshots_written}")
+    print(f"   - Items written:       {result.items_written}")
+
+
 def _handle_prices_backfill(args: argparse.Namespace) -> None:
     """Handle ``krx-collector prices backfill``."""
     settings = get_settings()
@@ -1619,7 +1611,8 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
         f"max_auto_range_days={args.max_auto_range_days}, "
         f"new_ticker_start={args.new_ticker_start}, "
         f"allow_new_ticker_backfill={args.allow_new_ticker_backfill}, "
-        f"allow_large_range={args.allow_large_range}"
+        f"allow_large_range={args.allow_large_range}, "
+        f"refetch={args.refetch}, include_delisted={args.include_delisted}"
     )
 
     from krx_collector.domain.enums import Market
@@ -1665,6 +1658,8 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
         new_ticker_start=args.new_ticker_start,
         allow_new_ticker_backfill=args.allow_new_ticker_backfill,
         allow_large_range=args.allow_large_range,
+        refetch=args.refetch,
+        scope=UniverseScope(args.universe_scope),
     )
 
     if result.errors:
@@ -1674,14 +1669,92 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
 
     print(f"   - Tickers processed: {result.tickers_processed}")
     print(f"   - Bars upserted: {result.bars_upserted}")
+    if result.auto_new_ticker_start_tickers:
+        print(f"   - Auto new-ticker starts: {result.auto_new_ticker_start_tickers}")
+    if result.baseline_clamped_tickers:
+        print(
+            f"   - Clamped new-ticker starts: {result.baseline_clamped_tickers} "
+            "(run full-history repair separately)"
+        )
+    if "pipeline" in result.errors:
+        # A validation/pipeline failure fetched nothing; never exit 0 on it.
+        sys.exit(1)
     if args.incremental and result.errors:
         sys.exit(1)
+
+
+def _handle_prices_market_cap_backfill(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector prices market-cap-backfill``."""
+    settings = get_settings()
+
+    rate_limit = args.rate_limit_seconds
+    if rate_limit is None:
+        rate_limit = settings.rate_limit_seconds
+
+    long_rest_interval = args.long_rest_interval
+    if long_rest_interval is None:
+        long_rest_interval = settings.long_rest_interval
+
+    long_rest_seconds = args.long_rest_seconds
+    if long_rest_seconds is None:
+        long_rest_seconds = settings.long_rest_seconds
+
+    from krx_collector.domain.enums import Market
+
+    market_arg = (args.market or "ALL").upper()
+    if market_arg == "ALL":
+        markets = [Market.KOSPI, Market.KOSDAQ]
+    elif market_arg in ("KOSPI", "KOSDAQ"):
+        markets = [Market(market_arg)]
+    else:
+        print(f"❌ Unknown market: {args.market}", file=sys.stderr)
+        sys.exit(1)
+
+    print(
+        f"→ prices market-cap-backfill: markets={[m.value for m in markets]}, "
+        f"start={args.start}, end={args.end}, "
+        f"rate_limit={rate_limit}, "
+        f"long_rest_interval={long_rest_interval}, "
+        f"long_rest_seconds={long_rest_seconds}, "
+        f"force={args.force}, scope={args.universe_scope}"
+    )
+
+    from krx_collector.adapters.market_cap_pykrx.provider import PykrxMarketCapProvider
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.backfill_market_cap import backfill_market_cap
+
+    result = backfill_market_cap(
+        provider=PykrxMarketCapProvider(),
+        storage=PostgresStorage(settings.db_dsn),
+        markets=markets,
+        start=args.start,
+        end=args.end,
+        rate_limit_seconds=rate_limit,
+        long_rest_interval=long_rest_interval,
+        long_rest_seconds=long_rest_seconds,
+        force=args.force,
+    )
+
+    if result.errors:
+        print(f"⚠ Market-cap backfill completed with {len(result.errors)} errors.", file=sys.stderr)
+    else:
+        print("✅ Market-cap backfill completed successfully.")
+
+    print(f"   - Slices attempted: {result.slices_attempted}")
+    print(f"   - Slices skipped:   {result.slices_skipped}")
+    print(f"   - Slices completed: {result.slices_completed}")
+    print(f"   - Rows upserted:    {result.rows_upserted}")
+    if result.rows_dropped:
+        print(f"   - Rows dropped (zero close): {result.rows_dropped}")
 
 
 def _handle_validate(args: argparse.Namespace) -> None:
     """Handle ``krx-collector validate``."""
     settings = get_settings()
-    print(f"→ validate: date={args.date}, market={args.market}")
+    print(
+        f"→ validate: date={args.date}, market={args.market}, "
+        f"universe_drift_pct={args.universe_drift_pct}"
+    )
 
     from krx_collector.domain.enums import Market
 
@@ -1703,7 +1776,12 @@ def _handle_validate(args: argparse.Namespace) -> None:
     from krx_collector.service.validate import validate
 
     try:
-        validate(storage=storage, market=market_filter, target_date=args.date)
+        validate(
+            storage=storage,
+            market=market_filter,
+            target_date=args.date,
+            universe_drift_pct=args.universe_drift_pct,
+        )
         print("✅ Validation completed. Check logs for details.")
     except Exception as exc:
         print(f"❌ Validation failed: {exc}", file=sys.stderr)
@@ -2128,6 +2206,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     db_sync_remote.set_defaults(handler=_handle_db_sync_remote)
 
+    db_with_remote_dsn = db_sub.add_parser(
+        "with-remote-dsn",
+        help=(
+            "Resolve the remote sj2-server DSN (opening an SSH tunnel if configured) and run "
+            "a child command with SDC_REMOTE_DSN injected into its environment only."
+        ),
+    )
+    db_with_remote_dsn.add_argument(
+        "--db-info-path",
+        default=None,
+        help="Path to the remote DB metadata file (default: from config).",
+    )
+    db_with_remote_dsn.add_argument(
+        "--remote-host",
+        default=None,
+        help="Override the remote DB hostname from db_info (default: from config/file).",
+    )
+    db_with_remote_dsn.add_argument(
+        "--ssh-host",
+        default=None,
+        help="Optional SSH host for port forwarding to the remote PostgreSQL server.",
+    )
+    db_with_remote_dsn.add_argument(
+        "--ssh-local-port",
+        type=int,
+        default=None,
+        help="Optional fixed local port for the SSH tunnel (default: random free port).",
+    )
+    db_with_remote_dsn.add_argument(
+        "--ssh-compression",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable SSH compression for the optional DB tunnel (default: from config).",
+    )
+    db_with_remote_dsn.add_argument(
+        "remote_command",
+        nargs=argparse.REMAINDER,
+        help=(
+            "Command to run with SDC_REMOTE_DSN set, e.g. "
+            "-- bin/raw-parquet-export-all.sh --route remote"
+        ),
+    )
+    db_with_remote_dsn.set_defaults(handler=_handle_db_with_remote_dsn)
+
     # -- ops ------------------------------------------------------------------
     ops_parser = subparsers.add_parser("ops", help="Read-only operational reports.")
     ops_sub = ops_parser.add_subparsers(dest="ops_command", required=True)
@@ -2143,47 +2265,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ops_freshness.set_defaults(handler=_handle_ops_freshness_report)
 
-    ops_common_freshness = ops_sub.add_parser(
-        "assert-common-freshness",
-        help="Fail unless required common feature sources are fresh enough for build.",
-    )
-    ops_common_freshness.add_argument(
-        "--sources",
-        type=_parse_common_sources,
-        default=_parse_common_sources("fdr,fred,ecos,krx"),
-        help="Comma-separated required common sources (default: fdr,fred,ecos,krx).",
-    )
-    ops_common_freshness.add_argument(
-        "--end",
-        type=_parse_date,
-        default=None,
-        help="Freshness reference date (YYYY-MM-DD). Default: today in KST.",
-    )
-    ops_common_freshness.add_argument(
-        "--max-run-age-hours",
-        type=int,
-        default=30,
-        help="Maximum age in hours for the latest successful source sync run.",
-    )
-    ops_common_freshness.add_argument(
-        "--daily-max-lag-days",
-        type=int,
-        default=2,
-        help="Maximum latest-observation lag for FDR/KRX/PYKRX daily sources.",
-    )
-    ops_common_freshness.add_argument(
-        "--macro-max-lag-days",
-        type=int,
-        default=45,
-        help="Maximum latest-observation lag for FRED/ECOS macro sources.",
-    )
-    ops_common_freshness.add_argument(
-        "--series",
-        default=None,
-        help="Optional comma-separated source series allowlist.",
-    )
-    ops_common_freshness.set_defaults(handler=_handle_ops_assert_common_freshness)
-
     # -- dart -----------------------------------------------------------------
     dart_parser = subparsers.add_parser("dart", help="OpenDART ingestion commands.")
     dart_sub = dart_parser.add_subparsers(dest="dart_command", required=True)
@@ -2198,6 +2279,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Re-download even if a previous successful corp sync is recorded.",
     )
     dart_sync_corp.set_defaults(handler=_handle_dart_sync_corp)
+
+    dart_sync_corp_profile = dart_sub.add_parser(
+        "sync-corp-profile",
+        help="Fetch company.json (industry code, incorporation date, fiscal-year end).",
+    )
+    dart_sync_corp_profile.add_argument(
+        "--tickers",
+        default=None,
+        help="Comma-separated ticker allowlist (default: all ticker-mapped corps).",
+    )
+    dart_sync_corp_profile.add_argument("--rate-limit-seconds", type=float, default=0.2)
+    dart_sync_corp_profile.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Re-fetch corporations that already have a profile.",
+    )
+    dart_sync_corp_profile.add_argument(
+        "--universe-scope",
+        choices=["current", "historical"],
+        default="current",
+        help=(
+            "Which universe to target. 'current' = currently-listed corps "
+            "(2,657). 'historical' = every corp that ever had a ticker (3,959); "
+            "delisted names are unreachable otherwise."
+        ),
+    )
+    dart_sync_corp_profile.set_defaults(handler=_handle_dart_sync_corp_profile)
 
     dart_sync_financials = dart_sub.add_parser(
         "sync-financials",
@@ -2258,6 +2367,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=3,
         help="Days to skip request keys that recently returned no-data.",
     )
+    dart_sync_financials.add_argument(
+        "--universe-scope",
+        choices=["current", "historical"],
+        default="current",
+        help=(
+            "Which universe to target. 'current' = currently-listed corps "
+            "(2,657). 'historical' = every corp that ever had a ticker (3,959); "
+            "delisted names are unreachable otherwise."
+        ),
+    )
     dart_sync_financials.set_defaults(handler=_handle_dart_sync_financials)
 
     dart_sync_share_info = dart_sub.add_parser(
@@ -2313,6 +2432,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=3,
         help="Days to skip request keys that recently returned no-data.",
+    )
+    dart_sync_share_info.add_argument(
+        "--universe-scope",
+        choices=["current", "historical"],
+        default="current",
+        help=(
+            "Which universe to target. 'current' = currently-listed corps "
+            "(2,657). 'historical' = every corp that ever had a ticker (3,959); "
+            "delisted names are unreachable otherwise."
+        ),
     )
     dart_sync_share_info.set_defaults(handler=_handle_dart_sync_share_info)
 
@@ -2370,71 +2499,79 @@ def build_parser() -> argparse.ArgumentParser:
         default=3,
         help="Days to skip request keys that recently returned no-data.",
     )
+    dart_sync_xbrl.add_argument(
+        "--universe-scope",
+        choices=["current", "historical"],
+        default="current",
+        help=(
+            "Which universe to target. 'current' = currently-listed corps "
+            "(2,657). 'historical' = every corp that ever had a ticker (3,959); "
+            "delisted names are unreachable otherwise."
+        ),
+    )
     dart_sync_xbrl.set_defaults(handler=_handle_dart_sync_xbrl)
 
-    # -- metrics --------------------------------------------------------------
-    metrics_parser = subparsers.add_parser("metrics", help="Canonical metric commands.")
-    metrics_sub = metrics_parser.add_subparsers(dest="metrics_command", required=True)
-
-    metrics_normalize = metrics_sub.add_parser(
-        "normalize",
-        help="Seed metric mapping rules and normalize canonical metric facts.",
+    dart_sync_filings = dart_sub.add_parser(
+        "sync-filings",
+        help="Download OpenDART disclosure-receipt history (공시검색).",
     )
-    metrics_normalize.add_argument(
-        "--bsns-years",
-        default=str(date.today().year - 1),
-        help="Comma-separated business years (default: previous year).",
+    dart_sync_filings.add_argument(
+        "--years",
+        default=str(date.today().year),
+        help="Comma-separated calendar years (default: current year).",
     )
-    metrics_normalize.add_argument(
-        "--reprt-codes",
-        default="11011",
-        help="Comma-separated report codes (default: 11011 for annual report).",
-    )
-    metrics_normalize.add_argument(
+    dart_sync_filings.add_argument(
         "--tickers",
         default=None,
         help="Optional comma-separated ticker allowlist.",
     )
-    metrics_normalize.add_argument(
-        "--batch-size",
-        type=int,
-        default=None,
-        help=("Ticker batch size (env: SDC_METRICS_NORMALIZE_BATCH_SIZE, " "default 100)."),
+    dart_sync_filings.add_argument(
+        "--rate-limit-seconds",
+        type=float,
+        default=0.2,
+        help="Seconds between OpenDART requests (default: 0.2).",
     )
-    metrics_normalize.add_argument(
-        "--incremental",
+    dart_sync_filings.add_argument(
+        "--force",
         action="store_true",
-        default=False,
-        help="Normalize only recent business years instead of an explicit full range.",
+        help="Re-download even when receipts already exist for a (corp, year) window.",
     )
-    metrics_normalize.add_argument(
-        "--lookback-years",
-        type=int,
-        default=2,
-        help="Number of prior business years to include in --incremental mode.",
+    dart_sync_filings.add_argument(
+        "--universe-scope",
+        choices=["current", "historical"],
+        default="current",
+        help=(
+            "Which universe to target. 'current' = currently-listed corps "
+            "(2,657). 'historical' = every corp that ever had a ticker (3,959); "
+            "delisted names are unreachable otherwise."
+        ),
     )
-    metrics_normalize.set_defaults(handler=_handle_metrics_normalize)
+    dart_sync_filings.set_defaults(handler=_handle_dart_sync_filings)
 
-    metrics_coverage = metrics_sub.add_parser(
-        "coverage-report",
-        help="Report canonical metric coverage for the selected periods.",
+    dart_backfill_xbrl_receipts = dart_sub.add_parser(
+        "backfill-xbrl-receipts",
+        help="Fetch XBRL for an explicit list of (corp, filing, receipt) targets.",
     )
-    metrics_coverage.add_argument(
-        "--bsns-years",
-        default=str(date.today().year - 1),
-        help="Comma-separated business years (default: previous year).",
+    dart_backfill_xbrl_receipts.add_argument(
+        "--targets-file",
+        required=True,
+        help=(
+            "Path to a JSON-lines file of targets, each with ticker, corp_code, "
+            "bsns_year, reprt_code, rcept_no."
+        ),
     )
-    metrics_coverage.add_argument(
-        "--reprt-codes",
-        default="11011",
-        help="Comma-separated report codes (default: 11011 for annual report).",
+    dart_backfill_xbrl_receipts.add_argument(
+        "--rate-limit-seconds",
+        type=float,
+        default=0.2,
+        help="Seconds between OpenDART requests (default: 0.2).",
     )
-    metrics_coverage.add_argument(
-        "--tickers",
-        default=None,
-        help="Optional comma-separated ticker allowlist.",
+    dart_backfill_xbrl_receipts.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-fetch even when an XBRL document is already stored for a target.",
     )
-    metrics_coverage.set_defaults(handler=_handle_metrics_coverage_report)
+    dart_backfill_xbrl_receipts.set_defaults(handler=_handle_dart_backfill_xbrl_receipts)
 
     # -- common ---------------------------------------------------------------
     common_parser = subparsers.add_parser(
@@ -2531,135 +2668,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Initialise/update the database schema before syncing.",
     )
     common_sync.set_defaults(handler=_handle_common_sync)
-
-    common_build_daily = common_sub.add_parser(
-        "build-daily",
-        help="Build KRX-date-aligned common feature daily facts.",
-    )
-    common_build_daily.add_argument(
-        "--feature-codes",
-        default=None,
-        help="Optional comma-separated common feature_code allowlist.",
-    )
-    common_build_daily.add_argument(
-        "--start",
-        type=_parse_date,
-        default=None,
-        help="Start date (YYYY-MM-DD). Required unless --incremental is used.",
-    )
-    common_build_daily.add_argument(
-        "--end",
-        type=_parse_date,
-        default=date.today(),
-        help="End date (YYYY-MM-DD). Default: today.",
-    )
-    common_build_daily.add_argument(
-        "--incremental",
-        action="store_true",
-        default=False,
-        help="Resolve start from stored daily fact latest dates.",
-    )
-    common_build_daily.add_argument(
-        "--lookback-days",
-        type=int,
-        default=0,
-        help="Recent calendar-day window to rebuild in --incremental mode.",
-    )
-    common_build_daily.add_argument(
-        "--max-auto-range-days",
-        type=int,
-        default=180,
-        help="Maximum inclusive day range allowed for --incremental without override.",
-    )
-    common_build_daily.add_argument(
-        "--allow-large-range",
-        action="store_true",
-        default=False,
-        help="Allow resolved common build ranges larger than the safety guard.",
-    )
-    common_build_daily.add_argument(
-        "--init-schema",
-        action="store_true",
-        default=False,
-        help="Initialise/update the database schema before building daily facts.",
-    )
-    common_build_daily.add_argument(
-        "--include-inactive",
-        action="store_true",
-        default=False,
-        help="Allow explicitly selected inactive feature codes for verification.",
-    )
-    common_build_daily.set_defaults(handler=_handle_common_build_daily)
-
-    common_coverage = common_sub.add_parser(
-        "coverage-report",
-        help="Report common feature daily fact coverage and PIT violations.",
-    )
-    common_coverage.add_argument(
-        "--feature-codes",
-        default=None,
-        help="Optional comma-separated common feature_code allowlist.",
-    )
-    common_coverage.add_argument(
-        "--start",
-        type=_parse_date,
-        required=True,
-        help="Start date (YYYY-MM-DD).",
-    )
-    common_coverage.add_argument(
-        "--end",
-        type=_parse_date,
-        required=True,
-        help="End date (YYYY-MM-DD).",
-    )
-    common_coverage.add_argument(
-        "--include-inactive",
-        action="store_true",
-        default=False,
-        help="Allow explicitly selected inactive feature codes in the report.",
-    )
-    common_coverage.set_defaults(handler=_handle_common_coverage_report)
-
-    common_readiness = common_sub.add_parser(
-        "readiness-report",
-        help="Report common feature active-transition readiness.",
-    )
-    common_readiness.add_argument(
-        "--feature-codes",
-        default=None,
-        help="Optional comma-separated common feature_code allowlist.",
-    )
-    common_readiness.add_argument(
-        "--start",
-        type=_parse_date,
-        required=True,
-        help="Start date (YYYY-MM-DD).",
-    )
-    common_readiness.add_argument(
-        "--end",
-        type=_parse_date,
-        required=True,
-        help="End date (YYYY-MM-DD).",
-    )
-    common_readiness.add_argument(
-        "--required-coverage-ratio",
-        type=_parse_coverage_ratio,
-        default=Decimal("1.0000"),
-        help="Required non-null coverage ratio for readiness (default: 1.0000).",
-    )
-    common_readiness.add_argument(
-        "--include-inactive",
-        action="store_true",
-        default=False,
-        help="Allow explicitly selected inactive feature codes in the report.",
-    )
-    common_readiness.add_argument(
-        "--fail-on-not-ready",
-        action="store_true",
-        default=False,
-        help="Exit non-zero when any selected feature is not ready or report errors exist.",
-    )
-    common_readiness.set_defaults(handler=_handle_common_readiness_report)
 
     # -- flows ----------------------------------------------------------------
     flows_parser = subparsers.add_parser("flows", help="Security flow ingestion commands.")
@@ -2838,73 +2846,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable randomized request order and preserve deterministic traversal.",
     )
+    flows_sync.add_argument(
+        "--universe-scope",
+        choices=["current", "historical"],
+        default="current",
+        help=(
+            "Which universe to target. 'current' = the active universe. "
+            "'historical' = every stock ever listed; required to collect flows "
+            "for names that have since delisted."
+        ),
+    )
     flows_sync.set_defaults(handler=_handle_flows_sync)
-
-    # -- operating ------------------------------------------------------------
-    operating_parser = subparsers.add_parser(
-        "operating", help="Sector-specific operating KPI commands."
-    )
-    operating_sub = operating_parser.add_subparsers(dest="operating_command", required=True)
-
-    operating_process = operating_sub.add_parser(
-        "process-document",
-        help="Persist one source document and run a sector-specific KPI extractor.",
-    )
-    operating_process.add_argument("--ticker", required=True, help="6-digit ticker code.")
-    operating_process.add_argument(
-        "--market",
-        required=True,
-        choices=["KOSPI", "KOSDAQ", "kospi", "kosdaq"],
-        help="Market segment.",
-    )
-    operating_process.add_argument(
-        "--sector-key",
-        required=True,
-        help="Sector extractor key, e.g. shipbuilding_defense.",
-    )
-    operating_process.add_argument(
-        "--document-type",
-        default="manual_text",
-        help="Document type label for provenance.",
-    )
-    operating_process.add_argument(
-        "--title",
-        required=True,
-        help="Document title for provenance.",
-    )
-    operating_process.add_argument(
-        "--document-date",
-        type=_parse_date,
-        default=None,
-        help="Document date (YYYY-MM-DD).",
-    )
-    operating_process.add_argument(
-        "--period-end",
-        type=_parse_date,
-        required=True,
-        help="Metric period end date (YYYY-MM-DD).",
-    )
-    operating_process.add_argument(
-        "--source-system",
-        default="LOCAL",
-        help="Document source system label.",
-    )
-    operating_process.add_argument(
-        "--source-url",
-        default="",
-        help="Optional source URL for provenance.",
-    )
-    operating_process.add_argument(
-        "--language",
-        default="ko",
-        help="Document language code.",
-    )
-    operating_process.add_argument(
-        "--text-file",
-        required=True,
-        help="UTF-8 text file containing extracted document text.",
-    )
-    operating_process.set_defaults(handler=_handle_operating_process_document)
 
     # -- universe -------------------------------------------------------------
     universe_parser = subparsers.add_parser("universe", help="Stock universe management.")
@@ -2935,6 +2887,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Replace all stock_master rows instead of incremental diff.",
     )
     universe_sync.set_defaults(handler=_handle_universe_sync)
+
+    universe_backfill = universe_sub.add_parser(
+        "backfill-snapshots",
+        help="Backfill month-end historical universe snapshots (survivorship audit).",
+    )
+    universe_backfill.add_argument(
+        "--markets",
+        default="kospi,kosdaq",
+        help="Comma-separated market list (default: kospi,kosdaq).",
+    )
+    universe_backfill.add_argument("--start", type=_parse_date, default=None)
+    universe_backfill.add_argument("--end", type=_parse_date, default=None)
+    universe_backfill.add_argument("--rate-limit-seconds", type=float, default=0.5)
+    universe_backfill.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Re-fetch dates that already have a backfilled snapshot.",
+    )
+    universe_backfill.set_defaults(handler=_handle_universe_backfill_snapshots)
 
     # -- prices ---------------------------------------------------------------
     prices_parser = subparsers.add_parser("prices", help="Price data commands.")
@@ -3001,13 +2973,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-auto-range-days",
         type=int,
         default=10,
-        help="Maximum inclusive day range allowed for --incremental without override.",
+        help=(
+            "Maximum inclusive day range allowed for --incremental without override. "
+            "Also bounds auto-derived new-ticker starts (listing_date/first_seen_date)."
+        ),
     )
     prices_backfill.add_argument(
         "--new-ticker-start",
         type=_parse_date,
         default=None,
-        help="Explicit start date for tickers with no stored price baseline.",
+        help=(
+            "Explicit start date for tickers with no stored price baseline; "
+            "overrides stock_master listing_date/first_seen_date and is not "
+            "clamped to the auto-range window."
+        ),
     )
     prices_backfill.add_argument(
         "--allow-new-ticker-backfill",
@@ -3021,7 +3000,54 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Allow resolved incremental price ranges larger than the safety guard.",
     )
+    prices_backfill.add_argument(
+        "--refetch",
+        action="store_true",
+        default=False,
+        help=(
+            "Re-fetch and overwrite the whole range instead of only filling gaps. "
+            "Needed to repair rows whose adjusted prices went stale after a split. "
+            "Cannot be combined with --incremental."
+        ),
+    )
+    prices_backfill.add_argument(
+        "--universe-scope",
+        choices=["current", "historical"],
+        default="current",
+        help=(
+            "Which universe to target. 'current' = the active universe. "
+            "'historical' = the full stock master; delisted tickers are "
+            "unreachable otherwise, even when named in --tickers."
+        ),
+    )
     prices_backfill.set_defaults(handler=_handle_prices_backfill)
+
+    prices_market_cap = prices_sub.add_parser(
+        "market-cap-backfill",
+        help="Backfill daily KRX market cap / trading value / listed shares.",
+    )
+    prices_market_cap.add_argument(
+        "--market",
+        type=str,
+        default="ALL",
+        help=(
+            "KOSPI | KOSDAQ | ALL (default). ALL means KOSPI and KOSDAQ as two "
+            "separate requests per date — it is never passed to pykrx, which "
+            "would fold in KONEX and leave the market column unfillable."
+        ),
+    )
+    prices_market_cap.add_argument("--start", type=_parse_date, default=None)
+    prices_market_cap.add_argument("--end", type=_parse_date, default=None)
+    prices_market_cap.add_argument("--rate-limit-seconds", type=float, default=None)
+    prices_market_cap.add_argument("--long-rest-interval", type=int, default=None)
+    prices_market_cap.add_argument("--long-rest-seconds", type=float, default=None)
+    prices_market_cap.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Re-fetch slices that are already complete.",
+    )
+    prices_market_cap.set_defaults(handler=_handle_prices_market_cap_backfill)
 
     # -- profile --------------------------------------------------------------
     profile_parser = subparsers.add_parser(
@@ -3188,6 +3214,15 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["kospi", "kosdaq", "all"],
         default="all",
         help="Market filter (default: all).",
+    )
+    validate_parser.add_argument(
+        "--universe-drift-pct",
+        type=float,
+        default=5.0,
+        help=(
+            "Alert when consecutive snapshot sizes change by more than this "
+            "percentage, within a source. 0 disables the check."
+        ),
     )
     validate_parser.set_defaults(handler=_handle_validate)
 

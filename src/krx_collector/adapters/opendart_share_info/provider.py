@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
 from krx_collector.adapters.opendart_common import (
+    CAPITAL_CHANGE_POLICY,
     DIVIDEND_POLICY,
     SHARE_COUNT_POLICY,
     TREASURY_STOCK_POLICY,
@@ -17,6 +18,8 @@ from krx_collector.adapters.opendart_common import (
 )
 from krx_collector.domain.enums import Source
 from krx_collector.domain.models import (
+    DartCapitalChangeLine,
+    DartCapitalChangeResult,
     DartCorp,
     DartShareCountLine,
     DartShareCountResult,
@@ -30,6 +33,7 @@ logger = logging.getLogger(__name__)
 OPENDART_STOCK_COUNT_URL = "https://opendart.fss.or.kr/api/stockTotqySttus.json"
 OPENDART_DIVIDEND_URL = "https://opendart.fss.or.kr/api/alotMatter.json"
 OPENDART_TREASURY_STOCK_URL = "https://opendart.fss.or.kr/api/tesstkAcqsDspsSttus.json"
+OPENDART_CAPITAL_CHANGE_URL = "https://opendart.fss.or.kr/api/irdsSttus.json"
 
 DIVIDEND_METRICS = {
     "thstrm": "당기",
@@ -66,13 +70,32 @@ def _parse_int(value: object) -> int | None:
     return int(decimal_value)
 
 
+_DATE_FORMATS = ("%Y-%m-%d", "%Y%m%d")
+
+
 def _parse_date(value: object) -> date | None:
+    """Parse an OpenDART date field.
+
+    ``stlm_dt`` arrives ISO (``2025-03-31``), but irdsSttus returns
+    ``isu_dcrs_de`` dot-separated (``2010.06.15``), so normalise the separator
+    before parsing. Unparseable values log and yield NULL rather than raising:
+    a response is parsed as a whole, so one bad field would otherwise discard
+    every row for that (corp, year, report) — and the original string is kept
+    verbatim in ``raw_payload`` either way.
+    """
     if value is None:
         return None
     text = str(value).strip()
     if not text or text == "-":
         return None
-    return date.fromisoformat(text)
+    normalized = text.replace(".", "-").replace("/", "-")
+    for date_format in _DATE_FORMATS:
+        try:
+            return datetime.strptime(normalized, date_format).date()
+        except ValueError:
+            continue
+    logger.warning("Unparseable OpenDART date %r; storing NULL", text)
+    return None
 
 
 def parse_stock_count_response(
@@ -239,6 +262,50 @@ def parse_treasury_stock_response(
     )
 
 
+def parse_capital_change_response(
+    payload: dict[str, object],
+    corp: DartCorp,
+    bsns_year: int,
+    reprt_code: str,
+) -> DartCapitalChangeResult:
+    """Parse an OpenDART capital-change success (``status=000``) payload."""
+    fetched_at = now_kst()
+    records: list[DartCapitalChangeLine] = []
+    for row in payload.get("list", []):
+        if not isinstance(row, dict):
+            continue
+        records.append(
+            DartCapitalChangeLine(
+                corp_code=corp.corp_code,
+                ticker=corp.ticker or "",
+                bsns_year=bsns_year,
+                reprt_code=reprt_code,
+                rcept_no=str(row.get("rcept_no", "")).strip(),
+                corp_cls=str(row.get("corp_cls", "")).strip(),
+                isu_dcrs_de=_parse_date(row.get("isu_dcrs_de")),
+                isu_dcrs_stle=str(row.get("isu_dcrs_stle", "")).strip(),
+                isu_dcrs_stock_knd=str(row.get("isu_dcrs_stock_knd", "")).strip(),
+                isu_dcrs_qy=_parse_int(row.get("isu_dcrs_qy")),
+                isu_dcrs_mstvdv_fval_amount=_parse_decimal(row.get("isu_dcrs_mstvdv_fval_amount")),
+                isu_dcrs_mstvdv_fval_amount2=_parse_decimal(
+                    row.get("isu_dcrs_mstvdv_fval_amount2")
+                ),
+                stlm_dt=_parse_date(row.get("stlm_dt")),
+                source=Source.OPENDART,
+                fetched_at=fetched_at,
+                raw_payload=dict(row),
+            )
+        )
+
+    return DartCapitalChangeResult(
+        corp_code=corp.corp_code,
+        ticker=corp.ticker or "",
+        bsns_year=bsns_year,
+        reprt_code=reprt_code,
+        records=records,
+    )
+
+
 class OpenDartShareInfoProvider:
     """Fetch share-count and shareholder-return disclosures from OpenDART."""
 
@@ -387,5 +454,40 @@ class OpenDartShareInfoProvider:
                 bsns_year=bsns_year,
                 reprt_code=reprt_code,
                 statement_type="treasury_stock",
+                error=str(exc),
+            )
+
+    def fetch_capital_change(
+        self,
+        corp: DartCorp,
+        bsns_year: int,
+        reprt_code: str,
+    ) -> DartCapitalChangeResult:
+        try:
+            call_result = self._fetch_json(
+                OPENDART_CAPITAL_CHANGE_URL, CAPITAL_CHANGE_POLICY, corp, bsns_year, reprt_code
+            )
+            if call_result.error or call_result.no_data:
+                return apply_call_result_meta(
+                    DartCapitalChangeResult(
+                        corp_code=corp.corp_code,
+                        ticker=corp.ticker or "",
+                        bsns_year=bsns_year,
+                        reprt_code=reprt_code,
+                    ),
+                    call_result,
+                )
+
+            payload = call_result.parsed_payload
+            if not isinstance(payload, dict):
+                raise RuntimeError("OpenDART returned an unexpected JSON payload.")
+            result = parse_capital_change_response(payload, corp, bsns_year, reprt_code)
+            return apply_call_result_meta(result, call_result)
+        except Exception as exc:
+            return DartCapitalChangeResult(
+                corp_code=corp.corp_code,
+                ticker=corp.ticker or "",
+                bsns_year=bsns_year,
+                reprt_code=reprt_code,
                 error=str(exc),
             )

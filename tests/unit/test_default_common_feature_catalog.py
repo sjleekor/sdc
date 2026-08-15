@@ -586,17 +586,18 @@ def test_default_common_feature_macro_monthly_candidates_are_active_after_valida
         assert feature.input_series_ids == (series_id,)
 
 
-def test_seed_common_feature_catalog_upserts_series_and_catalog() -> None:
+def test_seed_common_feature_catalog_upserts_series_only() -> None:
+    # Decision 7: seed only the common_feature_series table; the model-facing
+    # catalog is now code-only (read directly by the DuckDB marts).
     storage = MockCommonFeatureSeedStorage()
 
     result = seed_common_feature_catalog(storage)  # type: ignore[arg-type]
 
     assert result.series_upsert.updated == len(default_common_feature_series())
-    assert result.catalog_upsert.updated == len(default_common_feature_catalog())
+    assert result.catalog_upsert.updated == 0  # catalog no longer upserted
     assert [item.series_id for item in storage.series][:3] == [
         "market_kospi",
         "market_kosdaq",
         "market_kospi200",
     ]
-    assert storage.catalog
-    assert storage.catalog[0].feature_code == "market_kospi_close"
+    assert storage.catalog == []  # catalog table not seeded

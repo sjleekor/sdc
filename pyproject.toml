@@ -1,6 +1,6 @@
 [project]
 name = "krx-data-pipeline"
-version = "0.8.14"
+version = "0.9.2"
 description = "Maintainable Korean stock data pipeline: universe sync, daily OHLCV, OpenDART financials/XBRL, KRX flows, and sector-specific operating KPIs."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -44,8 +44,10 @@ research = [
     "duckdb>=1.5",
     "polars>=1.41",
     "pyarrow>=15",
+    "pyyaml>=6.0",
     "scikit-learn>=1.4",
     "numpy>=1.26",
+    "matplotlib>=3.8",
 ]
 
 [project.scripts]

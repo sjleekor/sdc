@@ -75,3 +75,33 @@ def test_split_folds_have_embargo(built) -> None:
     for f in folds:
         # valid_start strictly after train_end (embargo+purge gap in sessions).
         assert f["valid_start"] > f["train_end"]
+
+
+def test_feature_cols_override_restricts_design_columns(tmp_path: Path) -> None:
+    """Pinning an explicit column list drops every other raw feature column.
+
+    Exercises the acceptance-gate baseline/candidate split (research/models/
+    _01_20_access_return_rank/experiments/run_grade_a_acceptance_gate.py):
+    without an override, feat_price/feat_flow's full (wildcard-selected) column
+    set is used; with one, only the pinned columns (+ keys/labels) survive.
+    """
+    probe = LakeConfig()
+    if not probe.raw_root.exists():
+        pytest.skip(f"raw lake not present at {probe.raw_root}")
+    cfg = LakeConfig(datasets_root=tmp_path, engine=EngineOptions(threads=4, memory_limit="4GB"))
+    spec = ModelSpec(period_start="2024-01-01", period_end="2024-03-31", n_folds=2)
+
+    full = bd.build_dataset(spec, cfg, created_at="test", write=False)
+    assert "px_ret_20d" in full.feature_cols
+
+    restricted = bd.build_dataset(
+        spec,
+        cfg,
+        created_at="test",
+        write=False,
+        feature_cols_override=["px_ret_20d"],
+    )
+    assert "px_ret_20d" in restricted.feature_cols
+    assert "px_ret_5d" not in restricted.feature_cols  # in `full`, dropped by the override
+    assert "flow_foreign_netbuy_sum_5d" not in restricted.feature_cols  # whole flow group excluded
+    assert len(restricted.feature_cols) < len(full.feature_cols)

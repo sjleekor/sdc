@@ -5,10 +5,15 @@ from __future__ import annotations
 import logging
 
 from krx_collector.adapters.opendart_common.client import OpenDartRequestExecutor
-from krx_collector.domain.enums import RunStatus, RunType
+from krx_collector.domain.enums import RunStatus, RunType, UniverseScope
 from krx_collector.domain.models import DartShareInfoSyncResult, IngestionRun
-from krx_collector.ports.share_info import ShareCountProvider, ShareholderReturnProvider
+from krx_collector.ports.share_info import (
+    CapitalChangeProvider,
+    ShareCountProvider,
+    ShareholderReturnProvider,
+)
 from krx_collector.ports.storage import Storage
+from krx_collector.service.collection_targets import resolve_dart_targets
 from krx_collector.util.pipeline import (
     OpenDartKeyExhaustedError,
     build_run_counts,
@@ -41,8 +46,15 @@ def sync_dart_share_info(
     allowed_year_report_pairs: set[tuple[int, str]] | None = None,
     skip_request_keys: set[str] | None = None,
     run_params_extra: dict[str, object] | None = None,
+    capital_change_provider: CapitalChangeProvider | None = None,
+    scope: UniverseScope = UniverseScope.CURRENT,
 ) -> DartShareInfoSyncResult:
-    """Synchronise OpenDART share-count/dividend/treasury-stock raw rows."""
+    """Synchronise OpenDART share-count/dividend/treasury-stock raw rows.
+
+    ``capital_change_provider`` is optional: when omitted, the irdsSttus
+    (증자·감자 현황) request is skipped entirely so existing callers that
+    only need share-count/shareholder-return keep working unchanged.
+    """
     run = IngestionRun(
         run_type=RunType.DART_SHARE_INFO_SYNC,
         started_at=now_kst(),
@@ -61,7 +73,11 @@ def sync_dart_share_info(
             **(run_params_extra or {}),
         },
     )
-    executor = _get_executor(share_count_provider) or _get_executor(shareholder_return_provider)
+    executor = (
+        _get_executor(share_count_provider)
+        or _get_executor(shareholder_return_provider)
+        or _get_executor(capital_change_provider)
+    )
     if executor is not None:
         run.params["opendart_key_count"] = executor.configured_key_count
     storage.record_run(run)
@@ -70,7 +86,7 @@ def sync_dart_share_info(
     no_data_request_keys: list[str] = []
     skip_request_keys = set() if force else (skip_request_keys or set())
     try:
-        targets = storage.get_dart_corp_master(active_only=True, tickers=tickers)
+        targets = resolve_dart_targets(storage, scope, tickers)
         if not targets:
             raise RuntimeError(
                 "No active OpenDART corp mappings found. Run `dart sync-corp` first."
@@ -78,9 +94,11 @@ def sync_dart_share_info(
 
         existing_share_count_keys: set[tuple[str, int, str]]
         existing_return_keys: set[tuple[str, int, str, str]]
+        existing_capital_change_keys: set[tuple[str, int, str]]
         if force:
             existing_share_count_keys = set()
             existing_return_keys = set()
+            existing_capital_change_keys = set()
         else:
             corp_codes = [corp.corp_code for corp in targets]
             existing_share_count_keys = storage.get_existing_dart_share_count_keys(
@@ -92,6 +110,15 @@ def sync_dart_share_info(
                 bsns_years=bsns_years,
                 reprt_codes=reprt_codes,
                 corp_codes=corp_codes,
+            )
+            existing_capital_change_keys = (
+                storage.get_existing_dart_capital_change_keys(
+                    bsns_years=bsns_years,
+                    reprt_codes=reprt_codes,
+                    corp_codes=corp_codes,
+                )
+                if capital_change_provider is not None
+                else set()
             )
 
         for corp in targets:
@@ -237,6 +264,56 @@ def sync_dart_share_info(
                             result.shareholder_return_upsert.errors += upsert.errors
                             result.shareholder_return_rows_upserted += upsert.updated
 
+                    if capital_change_provider is not None:
+                        capital_change_key = f"{request_prefix}:capital_change"
+                        if (
+                            corp.corp_code,
+                            bsns_year,
+                            reprt_code,
+                        ) in existing_capital_change_keys:
+                            logger.debug(
+                                "Skipping existing capital_change request %s", request_prefix
+                            )
+                            result.requests_skipped += 1
+                        elif capital_change_key in skip_request_keys:
+                            logger.debug(
+                                "Skipping negative-cached capital_change request %s",
+                                request_prefix,
+                            )
+                            result.requests_skipped += 1
+                        else:
+                            result.requests_attempted += 1
+                            attempted_any = True
+                            capital_change_result = call_with_retry(
+                                lambda: capital_change_provider.fetch_capital_change(
+                                    corp=corp,
+                                    bsns_year=bsns_year,
+                                    reprt_code=reprt_code,
+                                ),
+                                request_label=f"{request_prefix}:capital_change",
+                                logger_instance=logger,
+                                should_retry_result=should_retry_opendart_result,
+                            )
+                            if is_opendart_daily_limit_exhausted(capital_change_result):
+                                raise OpenDartKeyExhaustedError(
+                                    capital_change_result.error
+                                    or "All OpenDART API keys are temporarily rate limited."
+                                )
+                            if capital_change_result.error:
+                                result.errors[f"{request_prefix}:capital_change"] = (
+                                    capital_change_result.error
+                                )
+                            elif capital_change_result.no_data:
+                                result.no_data_requests += 1
+                                no_data_request_keys.append(capital_change_key)
+                            elif capital_change_result.records:
+                                upsert = storage.upsert_dart_capital_change_raw(
+                                    capital_change_result.records
+                                )
+                                result.capital_change_upsert.updated += upsert.updated
+                                result.capital_change_upsert.errors += upsert.errors
+                                result.capital_change_rows_upserted += upsert.updated
+
                     if attempted_any:
                         sleep_with_jitter(rate_limit_seconds)
 
@@ -249,6 +326,7 @@ def sync_dart_share_info(
                 requests_skipped=result.requests_skipped,
                 share_count_rows_upserted=result.share_count_rows_upserted,
                 shareholder_return_rows_upserted=result.shareholder_return_rows_upserted,
+                capital_change_rows_upserted=result.capital_change_rows_upserted,
                 no_data_requests=result.no_data_requests,
                 **(executor.snapshot_metrics() if executor is not None else {}),
             ),

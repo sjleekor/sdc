@@ -25,14 +25,15 @@ def _normalized_ddl() -> str:
 def test_common_feature_tables_are_declared_in_postgres_ddl() -> None:
     ddl = _normalized_ddl()
 
+    # Decision 7 / refactor §5: only the raw observations + the shared series
+    # config remain Postgres tables. The catalog(_input) + daily fact were
+    # decommissioned (catalog -> code, daily fact -> DuckDB mart).
     assert "CREATE TABLE IF NOT EXISTS common_feature_series" in ddl
     assert "CREATE TABLE IF NOT EXISTS common_feature_observation_raw" in ddl
-    assert "CREATE TABLE IF NOT EXISTS common_feature_catalog" in ddl
-    assert "CREATE TABLE IF NOT EXISTS common_feature_catalog_input" in ddl
-    assert "CREATE TABLE IF NOT EXISTS common_feature_daily_fact" in ddl
+    assert "CREATE TABLE IF NOT EXISTS common_feature_catalog" not in ddl
+    assert "CREATE TABLE IF NOT EXISTS common_feature_daily_fact" not in ddl
     assert "UNIQUE NULLS NOT DISTINCT" in ddl
     assert "REFERENCES common_feature_series(series_id)" in ddl
-    assert "PRIMARY KEY (feature_date, feature_code)" in ddl
 
 
 def test_common_feature_empty_upserts_do_not_connect() -> None:
@@ -121,7 +122,10 @@ def test_upsert_common_feature_series_maps_domain_fields(monkeypatch: pytest.Mon
     sql, args, page_size = execute_values_calls[0]
     assert "INSERT INTO common_feature_series" in sql
     assert "ON CONFLICT (series_id) DO UPDATE" in sql
-    assert page_size == 1000
+    # Batching is owned by _execute_values_counted now: it slices the args and
+    # passes the actual page length, so the value seen here is the page size,
+    # not the configured maximum. What matters is that every row went through.
+    assert page_size == len(args)
     assert args[0][0:6] == (
         "market_kospi",
         "PYKRX",
@@ -182,3 +186,77 @@ def test_upsert_common_feature_catalog_writes_input_roles(
     assert ("market_kospi_close", "market_kospi", "primary") in link_args
     assert ("rate_kr_term_spread_10y_3y", "rate_kr_gov10y", "spread_long") in link_args
     assert ("rate_kr_term_spread_10y_3y", "rate_kr_gov3y", "spread_short") in link_args
+
+
+# ---------------------------------------------------------------------------
+# _execute_values_counted (O-6)
+#
+# psycopg2 issues one statement per page, so cur.rowcount afterwards reports
+# only the FINAL page. Callers compare that number against what they fetched
+# to decide whether a write landed, so a 1,704-row batch coming back as 704
+# fails every slice larger than a page — which is exactly what the market-cap
+# reconciliation reported on 2026-08-15.
+# ---------------------------------------------------------------------------
+
+
+class _CountingCursor:
+    """Mimics psycopg2: rowcount reflects only the most recent statement."""
+
+    def __init__(self) -> None:
+        self.rowcount = 0
+        self.pages: list[int] = []
+
+
+def _counting_execute_values(cur, sql, args, page_size, **kwargs):  # noqa: ANN001
+    cur.pages.append(len(args))
+    cur.rowcount = len(args)  # last statement only, as psycopg2 does
+
+
+def test_execute_values_counted_sums_every_page(monkeypatch) -> None:
+    monkeypatch.setattr(repositories.psycopg2.extras, "execute_values", _counting_execute_values)
+    cur = _CountingCursor()
+
+    total = repositories._execute_values_counted(
+        cur, "INSERT ...", [(i,) for i in range(1704)], page_size=1000
+    )
+
+    assert cur.pages == [1000, 704]
+    # cur.rowcount alone would say 704 here; that undercount is the defect.
+    assert cur.rowcount == 704
+    assert total == 1704
+
+
+def test_execute_values_counted_handles_a_single_page(monkeypatch) -> None:
+    monkeypatch.setattr(repositories.psycopg2.extras, "execute_values", _counting_execute_values)
+    cur = _CountingCursor()
+
+    total = repositories._execute_values_counted(cur, "INSERT ...", [(1,), (2,)], page_size=1000)
+
+    assert cur.pages == [2]
+    assert total == 2
+
+
+def test_execute_values_counted_on_empty_input_writes_nothing(monkeypatch) -> None:
+    monkeypatch.setattr(repositories.psycopg2.extras, "execute_values", _counting_execute_values)
+    cur = _CountingCursor()
+
+    assert repositories._execute_values_counted(cur, "INSERT ...", [], page_size=1000) == 0
+    assert cur.pages == []
+
+
+def test_execute_values_counted_omits_template_when_unset(monkeypatch) -> None:
+    # Passing template=None explicitly breaks callers that never accepted the
+    # keyword; only forward it when the caller actually supplied one.
+    seen: list[dict] = []
+
+    def _record(cur, sql, args, page_size, **kwargs):  # noqa: ANN001
+        seen.append(kwargs)
+        cur.rowcount = len(args)
+
+    monkeypatch.setattr(repositories.psycopg2.extras, "execute_values", _record)
+    cur = _CountingCursor()
+
+    repositories._execute_values_counted(cur, "INSERT ...", [(1,)])
+    repositories._execute_values_counted(cur, "INSERT ...", [(1,)], template="(%s)")
+
+    assert seen == [{}, {"template": "(%s)"}]

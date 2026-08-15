@@ -6,7 +6,6 @@ data providers (FDR, pykrx) to avoid network flakiness and rate limits.
 
 import uuid
 from datetime import date
-from pathlib import Path
 
 import pytest
 
@@ -14,7 +13,6 @@ from krx_collector.domain.enums import ListingStatus, Market, Source
 from krx_collector.domain.models import (
     DailyBar,
     DailyPriceResult,
-    OperatingSourceDocument,
     Stock,
     StockUniverseSnapshot,
     UniverseResult,
@@ -22,21 +20,9 @@ from krx_collector.domain.models import (
 from krx_collector.infra.config.settings import get_settings
 from krx_collector.infra.db_postgres.repositories import PostgresStorage
 from krx_collector.service.backfill_daily import backfill_daily_prices
-from krx_collector.service.default_operating_registry import build_default_operating_registry
-from krx_collector.service.process_operating_document import (
-    build_operating_document_key,
-    process_operating_document,
-)
 from krx_collector.service.sync_universe import sync_universe
 from krx_collector.service.validate import validate
 from krx_collector.util.time import now_kst
-
-OPERATING_FIXTURE_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "fixtures"
-    / "operating"
-    / "shipbuilding_defense_sample.txt"
-)
 
 
 class MockUniverseProvider:
@@ -110,8 +96,7 @@ def clean_db(storage: PostgresStorage) -> None:
         with get_connection(storage._dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "TRUNCATE TABLE operating_metric_fact, operating_source_document, "
-                    "daily_ohlcv, stock_master, "
+                    "TRUNCATE TABLE daily_ohlcv, stock_master, "
                     "stock_master_snapshot_items, stock_master_snapshot, "
                     "ingestion_runs CASCADE;"
                 )
@@ -169,47 +154,92 @@ def test_end_to_end_pipeline(storage: PostgresStorage) -> None:
     validate(storage=storage, market=Market.KOSPI, target_date=test_date)
 
 
-def test_operating_document_pipeline(storage: PostgresStorage) -> None:
-    """Test the operating KPI pipeline: persist source doc -> extract -> query facts."""
-    content_text = OPERATING_FIXTURE_PATH.read_text(encoding="utf-8")
-    document = OperatingSourceDocument(
-        document_key=build_operating_document_key(
-            ticker="009540",
-            sector_key="shipbuilding_defense",
-            document_type="manual_text",
-            title="조선 방산 수주 샘플",
-            period_end="2025-12-31",
-            content_text=content_text,
-        ),
-        ticker="009540",
-        market=Market.KOSPI,
-        sector_key="shipbuilding_defense",
-        document_type="manual_text",
-        title="조선 방산 수주 샘플",
-        document_date=date(2026, 4, 19),
-        period_end=date(2025, 12, 31),
-        source_system="LOCAL",
-        source_url="",
-        language="ko",
-        content_text=content_text,
+def _snapshot(records: list[Stock], as_of: date) -> StockUniverseSnapshot:
+    return StockUniverseSnapshot(
+        snapshot_id=str(uuid.uuid4()),
+        as_of_date=as_of,
+        source=Source.FDR,
         fetched_at=now_kst(),
-        raw_payload={},
+        records=records,
     )
 
-    result = process_operating_document(
-        storage=storage,
-        registry=build_default_operating_registry(),
-        document=document,
-    )
 
-    assert result.errors == {}
-    assert result.documents_processed == 1
-    assert result.facts_upserted == 2
+def test_first_seen_and_listing_dates_persist_and_are_preserved(
+    storage: PostgresStorage,
+) -> None:
+    """T14: first_seen_date is set once and preserved; a NULL-listing sync does
+    not erase an existing listing_date."""
+    first_as_of = date(2026, 6, 1)
+    ticker = "111111"
 
-    facts = storage.get_operating_metric_facts(
-        tickers=["009540"], sector_keys=["shipbuilding_defense"]
+    # First sync (FDR) with an explicit listing date.
+    fdr_stock = Stock(
+        ticker=ticker,
+        market=Market.KOSPI,
+        name="First Corp",
+        status=ListingStatus.ACTIVE,
+        last_seen_date=first_as_of,
+        source=Source.FDR,
+        listing_date=date(2026, 5, 20),
     )
-    fact_map = {fact.metric_code: fact for fact in facts}
-    assert sorted(fact_map) == ["order_backlog_amount", "order_intake_amount"]
-    assert str(fact_map["order_intake_amount"].value_numeric) == "3250000000000.0000"
-    assert str(fact_map["order_backlog_amount"].value_numeric) == "24130000000000.0000"
+    storage.upsert_stock_master([fdr_stock], _snapshot([fdr_stock], first_as_of))
+
+    stored = {s.ticker: s for s in storage.get_active_stocks()}[ticker]
+    assert stored.listing_date == date(2026, 5, 20)
+    assert stored.first_seen_date == first_as_of
+
+    # Second sync (pykrx) later, with NO listing date -> must not erase it, and
+    # first_seen_date must stay at the original value.
+    second_as_of = date(2026, 6, 10)
+    pykrx_stock = Stock(
+        ticker=ticker,
+        market=Market.KOSPI,
+        name="First Corp",
+        status=ListingStatus.ACTIVE,
+        last_seen_date=second_as_of,
+        source=Source.PYKRX,
+        listing_date=None,
+    )
+    storage.upsert_stock_master([pykrx_stock], _snapshot([pykrx_stock], second_as_of))
+
+    stored = {s.ticker: s for s in storage.get_active_stocks()}[ticker]
+    assert stored.listing_date == date(2026, 5, 20)  # preserved
+    assert stored.first_seen_date == first_as_of  # preserved
+    assert stored.last_seen_date == second_as_of  # updated
+
+
+def test_get_active_stocks_round_trips_dates_and_snapshot_items(
+    storage: PostgresStorage,
+) -> None:
+    """T15: get_active_stocks returns both dates; snapshot item rows persist
+    listing_date."""
+    as_of = date(2026, 6, 15)
+    ticker = "222222"
+    stock = Stock(
+        ticker=ticker,
+        market=Market.KOSDAQ,
+        name="Round Trip Corp",
+        status=ListingStatus.ACTIVE,
+        last_seen_date=as_of,
+        source=Source.FDR,
+        listing_date=date(2026, 6, 12),
+    )
+    snapshot = _snapshot([stock], as_of)
+    storage.upsert_stock_master([stock], snapshot)
+
+    stored = {s.ticker: s for s in storage.get_active_stocks()}[ticker]
+    assert stored.listing_date == date(2026, 6, 12)
+    assert stored.first_seen_date == as_of
+
+    from krx_collector.infra.db_postgres.connection import get_connection
+
+    with get_connection(storage._dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT listing_date FROM stock_master_snapshot_items "
+                "WHERE snapshot_id = %s AND ticker = %s AND market = %s",
+                (snapshot.snapshot_id, ticker, Market.KOSDAQ.value),
+            )
+            row = cur.fetchone()
+    assert row is not None
+    assert row[0] == date(2026, 6, 12)

@@ -10,6 +10,7 @@ import logging
 from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import psycopg2.extras
 
@@ -19,8 +20,12 @@ from krx_collector.domain.models import (
     CommonFeatureDailyFact,
     CommonFeatureObservation,
     CommonFeatureSeries,
+    CompanyProfile,
     DailyBar,
+    DailyMarketCapRow,
+    DartCapitalChangeLine,
     DartCorp,
+    DartFilingReceiptLine,
     DartFinancialStatementLine,
     DartShareCountLine,
     DartShareholderReturnLine,
@@ -41,6 +46,33 @@ from krx_collector.infra.calendar.trading_days import get_trading_days
 from krx_collector.infra.db_postgres.connection import get_connection
 
 logger = logging.getLogger(__name__)
+
+
+def _execute_values_counted(
+    cur: Any,
+    statement: str,
+    args: list,
+    *,
+    page_size: int = 1000,
+    template: str | None = None,
+) -> int:
+    """``execute_values`` whose returned count is the total, not the last page.
+
+    psycopg2 issues one statement per page, so ``cur.rowcount`` afterwards
+    reports only the FINAL page: a 1,704-row batch at ``page_size=1000`` comes
+    back as 704.  Callers compare that number against what they fetched to
+    decide whether a write landed, so the undercount is not cosmetic — it fails
+    every slice larger than a page.  Found 2026-08-15 when the market-cap
+    reconciliation check reported "fetched 1702, stored 702" for every KOSDAQ
+    slice.
+    """
+    total = 0
+    for offset in range(0, len(args), page_size):
+        page = args[offset : offset + page_size]
+        extra = {} if template is None else {"template": template}
+        psycopg2.extras.execute_values(cur, statement, page, page_size=len(page), **extra)
+        total += cur.rowcount
+    return total
 
 
 class PostgresStorage:
@@ -114,10 +146,11 @@ class PostgresStorage:
                         s.market.value,
                         s.name,
                         s.status.value,
+                        s.listing_date,
                     )
                     for s in snapshot.records
                 ]
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO stock_master_snapshot_items (
@@ -125,7 +158,8 @@ class PostgresStorage:
                         ticker,
                         market,
                         name,
-                        status
+                        status,
+                        listing_date
                     )
                     VALUES %s
                     ON CONFLICT (snapshot_id, ticker, market) DO NOTHING
@@ -143,6 +177,8 @@ class PostgresStorage:
                         s.status.value,
                         s.last_seen_date,
                         s.source.value,
+                        s.listing_date,
+                        s.first_seen_date or snapshot.as_of_date,
                     )
                     for s in stocks
                 ]
@@ -151,18 +187,27 @@ class PostgresStorage:
                 # We will approximate or just use rowcount for total affected.
                 # Actually, DO UPDATE returns the affected rows if we append RETURNING.
 
-                # To accurately count, we can do a standard execute_values
+                # To accurately count, we can do a standard execute_values.
+                # listing_date: a fresh non-NULL source value wins (corrections
+                #   propagate); a source NULL never clobbers a stored value.
+                # first_seen_date: set once on first insert, never overwritten.
                 psycopg2.extras.execute_values(
                     cur,
                     """
-                    INSERT INTO stock_master (ticker, market, name, status, last_seen_date, source)
+                    INSERT INTO stock_master
+                        (ticker, market, name, status, last_seen_date, source,
+                         listing_date, first_seen_date)
                     VALUES %s
                     ON CONFLICT (ticker, market) DO UPDATE SET
-                        name = EXCLUDED.name,
-                        status = EXCLUDED.status,
-                        last_seen_date = EXCLUDED.last_seen_date,
-                        source = EXCLUDED.source,
-                        updated_at = now()
+                        name            = EXCLUDED.name,
+                        status          = EXCLUDED.status,
+                        last_seen_date  = EXCLUDED.last_seen_date,
+                        source          = EXCLUDED.source,
+                        listing_date    = COALESCE(EXCLUDED.listing_date,
+                                                   stock_master.listing_date),
+                        first_seen_date = COALESCE(stock_master.first_seen_date,
+                                                   EXCLUDED.first_seen_date),
+                        updated_at      = now()
                     """,
                     master_args,
                     page_size=1000,
@@ -171,6 +216,190 @@ class PostgresStorage:
                 result.updated = cur.rowcount
 
         return result
+
+    def insert_stock_master_snapshot_only(
+        self,
+        snapshot: StockUniverseSnapshot,
+    ) -> UpsertResult:
+        """Persist a snapshot and its items without touching ``stock_master``.
+
+        Deliberately steps 1 and 2 of ``upsert_stock_master`` and NOT step 3 —
+        see the port docstring.  A historical snapshot must never rewrite the
+        current universe.
+        """
+        if not snapshot.records:
+            return UpsertResult()
+
+        result = UpsertResult()
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                # Idempotent on (as_of_date, source): a second run over the same
+                # date must not stack duplicate snapshots.
+                cur.execute(
+                    """
+                    SELECT 1 FROM stock_master_snapshot
+                    WHERE as_of_date = %s AND source = %s
+                    LIMIT 1
+                    """,
+                    (snapshot.as_of_date, snapshot.source.value),
+                )
+                if cur.fetchone() is not None:
+                    return result
+
+                cur.execute(
+                    """
+                    INSERT INTO stock_master_snapshot (
+                        snapshot_id,
+                        as_of_date,
+                        source,
+                        fetched_at,
+                        record_count
+                    )
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (
+                        snapshot.snapshot_id,
+                        snapshot.as_of_date,
+                        snapshot.source.value,
+                        snapshot.fetched_at,
+                        snapshot.record_count,
+                    ),
+                )
+
+                items = [
+                    (
+                        snapshot.snapshot_id,
+                        s.ticker,
+                        s.market.value,
+                        s.name,
+                        s.status.value,
+                        s.listing_date,
+                    )
+                    for s in snapshot.records
+                ]
+                result.inserted = _execute_values_counted(
+                    cur,
+                    """
+                    INSERT INTO stock_master_snapshot_items (
+                        snapshot_id,
+                        ticker,
+                        market,
+                        name,
+                        status,
+                        listing_date
+                    )
+                    VALUES %s
+                    ON CONFLICT (snapshot_id, ticker, market) DO NOTHING
+                    """,
+                    items,
+                )
+
+        return result
+
+    def get_universe_as_of(
+        self,
+        as_of: date,
+        market: Market | None = None,
+    ) -> tuple[date, set[str]] | None:
+        """Return the universe listed on or before ``as_of``, from snapshots."""
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT snapshot_id, as_of_date
+                    FROM stock_master_snapshot
+                    WHERE as_of_date <= %s
+                    ORDER BY as_of_date DESC, fetched_at DESC
+                    LIMIT 1
+                    """,
+                    (as_of,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                snapshot_id, snapshot_date = row
+
+                query = "SELECT ticker FROM stock_master_snapshot_items WHERE snapshot_id = %s"
+                params: list[object] = [snapshot_id]
+                if market is not None:
+                    query += " AND market = %s"
+                    params.append(market.value)
+
+                cur.execute(query, params)
+                return snapshot_date, {r[0] for r in cur.fetchall()}
+
+    def get_snapshot_record_counts(
+        self,
+        limit: int = 24,
+    ) -> list[tuple[date, Source, int]]:
+        """Return recent snapshot sizes, newest first."""
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT as_of_date, source, record_count
+                    FROM stock_master_snapshot
+                    ORDER BY as_of_date DESC, fetched_at DESC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+                return [(r[0], Source(r[1]), r[2]) for r in cur.fetchall()]
+
+    def get_existing_snapshot_dates(self, source: Source) -> set[date]:
+        """Return ``as_of_date`` values already captured for *source*."""
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT as_of_date FROM stock_master_snapshot WHERE source = %s",
+                    (source.value,),
+                )
+                return {row[0] for row in cur.fetchall()}
+
+    def get_stocks(
+        self,
+        market: Market | None = None,
+        statuses: list[ListingStatus] | None = None,
+        tickers: list[str] | None = None,
+    ) -> list[Stock]:
+        """Return stock-master rows without assuming they are still listed."""
+        sql = "SELECT * FROM stock_master"
+        conditions: list[str] = []
+        params: list[object] = []
+
+        if statuses:
+            conditions.append("status = ANY(%s)")
+            params.append([s.value for s in statuses])
+        if market:
+            conditions.append("market = %s")
+            params.append(market.value)
+        if tickers:
+            conditions.append("ticker = ANY(%s)")
+            params.append(list(tickers))
+
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        sql += " ORDER BY ticker, market"
+
+        stocks: list[Stock] = []
+        with get_connection(self._dsn) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute(sql, params)
+                for row in cur.fetchall():
+                    stocks.append(
+                        Stock(
+                            ticker=row["ticker"],
+                            market=Market(row["market"]),
+                            name=row["name"],
+                            status=ListingStatus(row["status"]),
+                            last_seen_date=row["last_seen_date"],
+                            source=Source(row["source"]),
+                            listing_date=row["listing_date"],
+                            first_seen_date=row["first_seen_date"],
+                        )
+                    )
+        return stocks
 
     def get_active_stocks(self, market: Market | None = None) -> list[Stock]:
         """Return currently active stocks from stock_master."""
@@ -194,6 +423,8 @@ class PostgresStorage:
                             status=ListingStatus(row["status"]),
                             last_seen_date=row["last_seen_date"],
                             source=Source(row["source"]),
+                            listing_date=row["listing_date"],
+                            first_seen_date=row["first_seen_date"],
                         )
                     )
         return stocks
@@ -251,7 +482,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
         return result
 
@@ -259,6 +489,7 @@ class PostgresStorage:
         self,
         active_only: bool = True,
         tickers: list[str] | None = None,
+        include_delisted: bool = False,
     ) -> list[DartCorp]:
         """Return OpenDART corp master rows mapped to local tickers."""
         records: list[DartCorp] = []
@@ -268,7 +499,13 @@ class PostgresStorage:
                 conditions: list[str] = []
                 params: list[object] = []
 
-                if active_only:
+                if include_delisted:
+                    # The HISTORICAL listed set: every corp that ever carried a
+                    # stock_code, whether or not it is listed today (3,959 vs
+                    # 2,657).  Deliberately NOT `active_only=False`, which would
+                    # also pull in the ~112k corps that never had a ticker.
+                    conditions.append("ticker IS NOT NULL AND ticker <> ''")
+                elif active_only:
                     conditions.append("is_active = TRUE")
                 if tickers:
                     conditions.append("ticker = ANY(%s)")
@@ -294,6 +531,67 @@ class PostgresStorage:
                         )
                     )
         return records
+
+    def upsert_company_profiles(self, profiles: list[CompanyProfile]) -> UpsertResult:
+        """Write company.json fields onto existing ``dart_corp_master`` rows.
+
+        An UPDATE, not an upsert — a profile whose corp_code is not already in
+        the master would be an upstream bug, and inserting it would create a row
+        with no corp_name (NOT NULL) anyway.
+        """
+        import json
+
+        if not profiles:
+            return UpsertResult()
+
+        result = UpsertResult()
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        p.corp_code,
+                        p.induty_code,
+                        p.corp_cls,
+                        p.est_dt,
+                        p.acc_mt,
+                        json.dumps(p.raw_payload, ensure_ascii=False),
+                        p.fetched_at,
+                    )
+                    for p in profiles
+                ]
+
+                result.updated = _execute_values_counted(
+                    cur,
+                    """
+                    UPDATE dart_corp_master AS m SET
+                        induty_code        = v.induty_code,
+                        corp_cls           = v.corp_cls,
+                        est_dt             = v.est_dt,
+                        acc_mt             = v.acc_mt,
+                        profile_raw        = v.profile_raw,
+                        profile_fetched_at = v.profile_fetched_at,
+                        updated_at         = now()
+                    FROM (VALUES %s) AS v (
+                        corp_code, induty_code, corp_cls, est_dt, acc_mt,
+                        profile_raw, profile_fetched_at
+                    )
+                    WHERE m.corp_code = v.corp_code
+                    """,
+                    args,
+                    template="(%s, %s, %s, %s::date, %s, %s::jsonb, %s::timestamptz)",
+                )
+
+        return result
+
+    def get_profiled_corp_codes(self) -> set[str]:
+        """Return corp_codes whose profile has already been fetched."""
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT corp_code FROM dart_corp_master WHERE profile_fetched_at IS NOT NULL"
+                )
+                return {row[0] for row in cur.fetchall()}
 
     def get_existing_dart_financial_statement_keys(
         self,
@@ -368,6 +666,52 @@ class PostgresStorage:
             with conn.cursor() as cur:
                 cur.execute(sql, tuple(params))
                 return {(row[0], row[1], row[2], row[3]) for row in cur.fetchall()}
+
+    def get_existing_dart_capital_change_keys(
+        self,
+        bsns_years: list[int],
+        reprt_codes: list[str],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int, str]]:
+        """Return (corp_code, bsns_year, reprt_code) tuples already present."""
+        if not bsns_years or not reprt_codes:
+            return set()
+        sql = """
+            SELECT DISTINCT corp_code, bsns_year, reprt_code
+            FROM dart_capital_change_raw
+            WHERE bsns_year = ANY(%s)
+              AND reprt_code = ANY(%s)
+        """
+        params: list[object] = [bsns_years, reprt_codes]
+        if corp_codes:
+            sql += " AND corp_code = ANY(%s)"
+            params.append(corp_codes)
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, tuple(params))
+                return {(row[0], row[1], row[2]) for row in cur.fetchall()}
+
+    def get_existing_dart_filing_receipt_years(
+        self,
+        years: list[int],
+        corp_codes: list[str] | None = None,
+    ) -> set[tuple[str, int]]:
+        """Return (corp_code, year) pairs with at least one receipt already stored."""
+        if not years:
+            return set()
+        sql = """
+            SELECT DISTINCT corp_code, EXTRACT(YEAR FROM rcept_dt)::int AS year
+            FROM dart_filing_receipt_raw
+            WHERE EXTRACT(YEAR FROM rcept_dt)::int = ANY(%s)
+        """
+        params: list[object] = [years]
+        if corp_codes:
+            sql += " AND corp_code = ANY(%s)"
+            params.append(corp_codes)
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, tuple(params))
+                return {(row[0], row[1]) for row in cur.fetchall()}
 
     def get_existing_dart_xbrl_document_keys(
         self,
@@ -494,7 +838,7 @@ class PostgresStorage:
                     for record in deduped_records.values()
                 ]
 
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO dart_financial_statement_raw (
@@ -560,7 +904,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
         return result
 
@@ -612,7 +955,7 @@ class PostgresStorage:
                     for record in deduped_records.values()
                 ]
 
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO dart_share_count_raw (
@@ -661,7 +1004,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
         return result
 
@@ -718,7 +1060,7 @@ class PostgresStorage:
                     for record in deduped_records.values()
                 ]
 
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO dart_shareholder_return_raw (
@@ -771,7 +1113,164 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
+
+        return result
+
+    def upsert_dart_capital_change_raw(
+        self,
+        records: list[DartCapitalChangeLine],
+    ) -> UpsertResult:
+        """Upsert OpenDART capital-change (irdsSttus) raw rows."""
+        if not records:
+            return UpsertResult()
+
+        result = UpsertResult()
+        deduped_records = {
+            (
+                record.corp_code,
+                record.bsns_year,
+                record.reprt_code,
+                record.rcept_no,
+                record.isu_dcrs_de,
+                record.isu_dcrs_stle,
+                record.isu_dcrs_stock_knd,
+            ): record
+            for record in records
+        }
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        record.corp_code,
+                        record.ticker,
+                        record.bsns_year,
+                        record.reprt_code,
+                        record.rcept_no,
+                        record.corp_cls,
+                        record.isu_dcrs_de,
+                        record.isu_dcrs_stle,
+                        record.isu_dcrs_stock_knd,
+                        record.isu_dcrs_qy,
+                        record.isu_dcrs_mstvdv_fval_amount,
+                        record.isu_dcrs_mstvdv_fval_amount2,
+                        record.stlm_dt,
+                        record.source.value,
+                        record.fetched_at,
+                        psycopg2.extras.Json(record.raw_payload),
+                    )
+                    for record in deduped_records.values()
+                ]
+
+                result.updated = _execute_values_counted(
+                    cur,
+                    """
+                    INSERT INTO dart_capital_change_raw (
+                        corp_code,
+                        ticker,
+                        bsns_year,
+                        reprt_code,
+                        rcept_no,
+                        corp_cls,
+                        isu_dcrs_de,
+                        isu_dcrs_stle,
+                        isu_dcrs_stock_knd,
+                        isu_dcrs_qy,
+                        isu_dcrs_mstvdv_fval_amount,
+                        isu_dcrs_mstvdv_fval_amount2,
+                        stlm_dt,
+                        source,
+                        fetched_at,
+                        raw_payload
+                    )
+                    VALUES %s
+                    ON CONFLICT (
+                        corp_code, bsns_year, reprt_code, rcept_no,
+                        isu_dcrs_de, isu_dcrs_stle, isu_dcrs_stock_knd
+                    )
+                    DO UPDATE SET
+                        ticker = EXCLUDED.ticker,
+                        corp_cls = EXCLUDED.corp_cls,
+                        isu_dcrs_qy = EXCLUDED.isu_dcrs_qy,
+                        isu_dcrs_mstvdv_fval_amount = EXCLUDED.isu_dcrs_mstvdv_fval_amount,
+                        isu_dcrs_mstvdv_fval_amount2 = EXCLUDED.isu_dcrs_mstvdv_fval_amount2,
+                        stlm_dt = EXCLUDED.stlm_dt,
+                        source = EXCLUDED.source,
+                        fetched_at = EXCLUDED.fetched_at,
+                        raw_payload = EXCLUDED.raw_payload
+                    """,
+                    args,
+                    page_size=1000,
+                )
+
+        return result
+
+    def upsert_dart_filing_receipt_raw(
+        self,
+        records: list[DartFilingReceiptLine],
+    ) -> UpsertResult:
+        """Upsert OpenDART disclosure-receipt raw rows."""
+        if not records:
+            return UpsertResult()
+
+        result = UpsertResult()
+        deduped_records = {(record.corp_code, record.rcept_no): record for record in records}
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        record.corp_code,
+                        record.ticker,
+                        record.corp_name,
+                        record.stock_code,
+                        record.corp_cls,
+                        record.report_nm,
+                        record.rcept_no,
+                        record.flr_nm,
+                        record.rcept_dt,
+                        record.rm,
+                        record.source.value,
+                        record.fetched_at,
+                        psycopg2.extras.Json(record.raw_payload),
+                    )
+                    for record in deduped_records.values()
+                ]
+
+                result.updated = _execute_values_counted(
+                    cur,
+                    """
+                    INSERT INTO dart_filing_receipt_raw (
+                        corp_code,
+                        ticker,
+                        corp_name,
+                        stock_code,
+                        corp_cls,
+                        report_nm,
+                        rcept_no,
+                        flr_nm,
+                        rcept_dt,
+                        rm,
+                        source,
+                        fetched_at,
+                        raw_payload
+                    )
+                    VALUES %s
+                    ON CONFLICT (corp_code, rcept_no)
+                    DO UPDATE SET
+                        ticker = EXCLUDED.ticker,
+                        corp_name = EXCLUDED.corp_name,
+                        stock_code = EXCLUDED.stock_code,
+                        corp_cls = EXCLUDED.corp_cls,
+                        report_nm = EXCLUDED.report_nm,
+                        flr_nm = EXCLUDED.flr_nm,
+                        rcept_dt = EXCLUDED.rcept_dt,
+                        rm = EXCLUDED.rm,
+                        source = EXCLUDED.source,
+                        fetched_at = EXCLUDED.fetched_at,
+                        raw_payload = EXCLUDED.raw_payload
+                    """,
+                    args,
+                    page_size=1000,
+                )
 
         return result
 
@@ -807,7 +1306,7 @@ class PostgresStorage:
                     for record in deduped_records.values()
                 ]
 
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO dart_xbrl_document (
@@ -837,7 +1336,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
         return result
 
@@ -893,7 +1391,7 @@ class PostgresStorage:
                     for record in deduped_records.values()
                 ]
 
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO dart_xbrl_fact_raw (
@@ -947,7 +1445,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
         return result
 
@@ -988,7 +1485,7 @@ class PostgresStorage:
                     for record in deduped_records.values()
                 ]
 
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO krx_security_flow_raw (
@@ -1015,7 +1512,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
         return result
 
@@ -1130,7 +1626,7 @@ class PostgresStorage:
                     for record in deduped_records.values()
                 ]
 
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO operating_source_document (
@@ -1169,7 +1665,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
         return result
 
@@ -1214,7 +1709,7 @@ class PostgresStorage:
                     for record in deduped_records.values()
                 ]
 
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO operating_metric_fact (
@@ -1250,7 +1745,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
         return result
 
@@ -1273,7 +1767,7 @@ class PostgresStorage:
                     )
                     for record in records
                 ]
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO metric_catalog (
@@ -1291,7 +1785,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
         return result
 
     def replace_metric_mapping_rules(self, records: list[MetricMappingRule]) -> UpsertResult:
@@ -1325,7 +1818,7 @@ class PostgresStorage:
                     )
                     for record in records
                 ]
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO metric_mapping_rule (
@@ -1370,7 +1863,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
         return result
 
     def get_metric_mapping_rules(self) -> list[MetricMappingRule]:
@@ -1983,7 +2475,7 @@ class PostgresStorage:
                     )
                     for record in deduped_records.values()
                 ]
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO stock_metric_fact (
@@ -2024,7 +2516,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
         return result
 
     def delete_stock_metric_facts_for_inactive_rules(
@@ -2198,7 +2689,7 @@ class PostgresStorage:
                     )
                     for record in deduped_records.values()
                 ]
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO common_feature_series (
@@ -2247,7 +2738,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
         return result
 
     def get_common_feature_series(
@@ -2346,7 +2836,7 @@ class PostgresStorage:
                     )
                     for record in deduped_records.values()
                 ]
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO common_feature_observation_raw (
@@ -2380,7 +2870,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
         return result
 
     def count_common_feature_observations(
@@ -2499,6 +2988,30 @@ class PostgresStorage:
                 cur.execute(sql, params)
                 return {row[0]: row[1] for row in cur.fetchall() if row[1] is not None}
 
+    def get_common_feature_observation_dates(
+        self,
+        *,
+        source: Source,
+        series_id: str,
+        start: date,
+        end: date,
+    ) -> set[date]:
+        """Return stored raw observation dates for one source series and range."""
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT observation_date
+                    FROM common_feature_observation_raw
+                    WHERE source = %s
+                      AND series_id = %s
+                      AND observation_date >= %s
+                      AND observation_date <= %s
+                    """,
+                    (source.value, series_id, start, end),
+                )
+                return {row[0] for row in cur.fetchall()}
+
     def upsert_common_feature_catalog(
         self,
         records: list[CommonFeatureCatalogEntry],
@@ -2524,7 +3037,7 @@ class PostgresStorage:
                     )
                     for record in deduped_records.values()
                 ]
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO common_feature_catalog (
@@ -2551,7 +3064,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
                 feature_codes = list(deduped_records)
                 cur.execute(
@@ -2662,7 +3174,7 @@ class PostgresStorage:
                     )
                     for record in deduped_records.values()
                 ]
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO common_feature_daily_fact (
@@ -2693,7 +3205,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
         return result
 
     def get_common_feature_daily_facts(
@@ -2808,7 +3319,7 @@ class PostgresStorage:
                     for b in bars
                 ]
 
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO daily_ohlcv (
@@ -2836,9 +3347,105 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
         return result
+
+    # -- Daily market cap -----------------------------------------------------
+
+    def upsert_daily_market_cap(self, rows: list[DailyMarketCapRow]) -> UpsertResult:
+        """Upsert one ``(trade_date, market)`` slice of market-cap rows.
+
+        The whole slice goes in one ``execute_values`` inside one connection
+        context, so it commits or it does not.  A slice split across
+        transactions could be left permanently half-written — see the port
+        docstring.
+        """
+        if not rows:
+            return UpsertResult()
+
+        result = UpsertResult()
+        page_size = 1000
+
+        statement = """
+            INSERT INTO daily_market_cap (
+                trade_date,
+                ticker,
+                market,
+                source_close,
+                market_cap,
+                trading_value,
+                listed_shares,
+                volume,
+                source,
+                fetched_at
+            )
+            VALUES %s
+            ON CONFLICT (trade_date, ticker, market) DO UPDATE SET
+                source_close = EXCLUDED.source_close,
+                market_cap = EXCLUDED.market_cap,
+                trading_value = EXCLUDED.trading_value,
+                listed_shares = EXCLUDED.listed_shares,
+                volume = EXCLUDED.volume,
+                source = EXCLUDED.source,
+                fetched_at = EXCLUDED.fetched_at
+        """
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        r.trade_date,
+                        r.ticker,
+                        r.market.value,
+                        r.source_close,
+                        r.market_cap,
+                        r.trading_value,
+                        r.listed_shares,
+                        r.volume,
+                        r.source.value,
+                        r.fetched_at,
+                    )
+                    for r in rows
+                ]
+
+                # Paged explicitly so the counts add up.  ``execute_values``
+                # with ``page_size`` issues one statement per page, and
+                # ``cur.rowcount`` then reports only the LAST page — a 1,704-row
+                # slice comes back as 704.  The caller reconciles this count
+                # against the response to decide whether the slice is complete,
+                # so an under-count is not cosmetic here: it would fail every
+                # slice over 1,000 rows.  (``upsert_daily_bars`` has the same
+                # pattern; there the count is only reported, not acted on.)
+                result.updated = _execute_values_counted(cur, statement, args, page_size=page_size)
+
+        return result
+
+    def get_market_cap_slice_row_counts(
+        self,
+        start: date,
+        end: date,
+        market: Market | None = None,
+    ) -> dict[tuple[date, Market], int]:
+        """Return stored row counts per ``(trade_date, market)`` slice."""
+        query = """
+            SELECT trade_date, market, COUNT(*)
+            FROM daily_market_cap
+            WHERE trade_date BETWEEN %s AND %s
+        """
+        params: list[object] = [start, end]
+        if market is not None:
+            query += " AND market = %s"
+            params.append(market.value)
+        query += " GROUP BY trade_date, market"
+
+        counts: dict[tuple[date, Market], int] = {}
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+                for trade_date, market_value, row_count in cur.fetchall():
+                    counts[(trade_date, Market(market_value))] = row_count
+
+        return counts
 
     # -- Ingestion runs -------------------------------------------------------
 

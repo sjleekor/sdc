@@ -249,9 +249,7 @@ class KrxMdcClient:
             raise KrxMdcAuthenticationError(f"KRX returned login HTML for bld={bld}.")
 
         if status_code < 200 or status_code >= 300:
-            raise KrxMdcResponseError(
-                f"KRX HTTP {status_code} for bld={bld}: {text[:300].strip()}"
-            )
+            raise KrxMdcResponseError(f"KRX HTTP {status_code} for bld={bld}: {text[:300].strip()}")
 
         try:
             data = response.json()
@@ -270,9 +268,7 @@ class KrxMdcClient:
                 raise KrxMdcAuthenticationError(
                     f"KRX auth error for bld={bld}, code={error_code}: {message}"
                 )
-            raise KrxMdcResponseError(
-                f"KRX error for bld={bld}, code={error_code}: {message}"
-            )
+            raise KrxMdcResponseError(f"KRX error for bld={bld}, code={error_code}: {message}")
 
         return data
 

@@ -40,6 +40,11 @@ class Stock:
         status: Current listing status.
         last_seen_date: Date when the stock was last observed in a universe fetch.
         source: Data source that provided this record.
+        listing_date: Source-reported listing date (FDR only, best-effort);
+            ``None`` when the provider did not supply one.
+        first_seen_date: First ``as_of_date`` on which the collector observed
+            this ticker as ``ACTIVE``. Storage-managed collector metadata,
+            never provider-set; ``None`` until persisted.
     """
 
     ticker: str
@@ -48,6 +53,8 @@ class Stock:
     status: ListingStatus
     last_seen_date: date
     source: Source
+    listing_date: date | None = None
+    first_seen_date: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +111,46 @@ class DailyBar:
     low: int
     close: int
     volume: int
+    source: Source
+    fetched_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class DailyMarketCapRow:
+    """Single day of KRX market cap / trading value / listed shares for a stock.
+
+    Same grain as :class:`DailyBar` but a different source, and the difference
+    matters.  ``DailyBar.close`` is the naver ADJUSTED close; ``source_close``
+    here is the KRX UNADJUSTED session close.  The name says so on purpose.
+
+    Every value field is optional because pykrx casts blanks to ``0`` and the
+    adapter maps an unusable response to ``None`` rather than storing a zero
+    that cannot be told apart from a real one.
+
+    Attributes:
+        ticker: 6-digit KRX ticker code.
+        market: Exchange market segment — comes from the CALL ARGUMENT, never
+            from the response (which has no market column) and never from a
+            ``stock_master`` join (which would leak a stock's present-day
+            market into its pre-transfer rows).
+        trade_date: Trading date.
+        source_close: KRX unadjusted session close (KRW).
+        market_cap: Market capitalisation (KRW).
+        trading_value: Traded value (KRW).
+        listed_shares: Listed share count.
+        volume: Traded volume on a KRX basis.
+        source: Data source.
+        fetched_at: KST timestamp when the data was retrieved.
+    """
+
+    ticker: str
+    market: Market
+    trade_date: date
+    source_close: int | None
+    market_cap: int | None
+    trading_value: int | None
+    listed_shares: int | None
+    volume: int | None
     source: Source
     fetched_at: datetime
 
@@ -218,6 +265,58 @@ class DartShareholderReturnLine:
     source: Source
     fetched_at: datetime
     raw_payload: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class DartFilingReceiptLine:
+    """Single raw disclosure-receipt row from OpenDART list.json (공시검색)."""
+
+    corp_code: str
+    ticker: str
+    corp_name: str
+    stock_code: str
+    corp_cls: str
+    report_nm: str
+    rcept_no: str
+    flr_nm: str
+    rcept_dt: date | None
+    rm: str
+    source: Source
+    fetched_at: datetime
+    raw_payload: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class DartCapitalChangeLine:
+    """Single raw row from OpenDART irdsSttus (증자(감자)현황)."""
+
+    corp_code: str
+    ticker: str
+    bsns_year: int
+    reprt_code: str
+    rcept_no: str
+    corp_cls: str
+    isu_dcrs_de: date | None
+    isu_dcrs_stle: str
+    isu_dcrs_stock_knd: str
+    isu_dcrs_qy: int | None
+    isu_dcrs_mstvdv_fval_amount: Decimal | None
+    isu_dcrs_mstvdv_fval_amount2: Decimal | None
+    stlm_dt: date | None
+    source: Source
+    fetched_at: datetime
+    raw_payload: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class XbrlBackfillTarget:
+    """One explicit (corp, filing, receipt) target for a receipt-targeted XBRL refetch."""
+
+    ticker: str
+    corp_code: str
+    bsns_year: int
+    reprt_code: str
+    rcept_no: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -524,6 +623,128 @@ class DailyPriceResult:
 
 
 @dataclass(slots=True)
+class DailyMarketCapResult:
+    """Result of a market-cap fetch for one ``(trade_date, market)`` slice.
+
+    Attributes:
+        trade_date: Date that was fetched.
+        market: Market segment that was fetched.
+        rows: Rows retrieved (already missing-value normalised).
+        response_rows: Rows the provider saw before dropping unusable ones.
+            The service reconciles this against what storage wrote — a slice
+            is not complete just because some of its rows landed.
+        error: Error message if the fetch failed.
+    """
+
+    trade_date: date | None = None
+    market: Market | None = None
+    rows: list[DailyMarketCapRow] = field(default_factory=list)
+    response_rows: int = 0
+    error: str | None = None
+
+
+@dataclass(slots=True)
+class MarketCapBackfillResult:
+    """Outcome of a market-cap backfill run.
+
+    Attributes:
+        slices_attempted: ``(trade_date, market)`` slices requested.
+        slices_skipped: Slices already complete and skipped.
+        slices_completed: Slices fetched and stored with a matching row count.
+        rows_upserted: Total rows written.
+        rows_dropped: Response rows dropped as unusable (holiday zero-fill).
+        errors: Per-slice error messages, keyed ``"YYYY-MM-DD/MARKET"``.
+    """
+
+    slices_attempted: int = 0
+    slices_skipped: int = 0
+    slices_completed: int = 0
+    rows_upserted: int = 0
+    rows_dropped: int = 0
+    errors: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class CompanyProfile:
+    """OpenDART company profile (``company.json``, DS001) for one corporation.
+
+    Attributes:
+        corp_code: OpenDART corporation code.
+        induty_code: KSIC industry code.  **Length varies** — 2, 3, 4 and 5
+            digits all occur, so any grouping rule must take a prefix rather
+            than assume a fixed width.
+        corp_cls: Y (KOSPI) / K (KOSDAQ) / N (KONEX) / E (other).
+        est_dt: Incorporation date — the input for firm age.
+        acc_mt: Fiscal-year-end month as ``MM``.  Anything other than ``12``
+            breaks the mart's hardcoded period-end calendar.
+        raw_payload: Full response, kept so unused fields stay recoverable.
+        fetched_at: KST timestamp when the profile was retrieved.
+    """
+
+    corp_code: str
+    induty_code: str | None
+    corp_cls: str | None
+    est_dt: date | None
+    acc_mt: str | None
+    raw_payload: dict
+    fetched_at: datetime
+
+
+@dataclass(slots=True)
+class CompanyProfileResult:
+    """Result of a single ``company.json`` fetch."""
+
+    profile: CompanyProfile | None = None
+    error: str | None = None
+    status_code: str | None = None
+    retryable: bool = False
+    no_data: bool = False
+    all_rate_limited: bool = False
+
+
+@dataclass(slots=True)
+class CompanyProfileSyncResult:
+    """Outcome of the DART company-profile sync.
+
+    Attributes:
+        requests_attempted: Corporations fetched.
+        requests_skipped: Corporations skipped as already profiled.
+        no_data: Corporations OpenDART had no profile for.
+        rows_upserted: Profile rows written.
+        errors: Per-corporation error messages.
+        opendart_exhaustion_reason: Set to ``"all_rate_limited"`` when every
+            OpenDART key hit its daily limit, so the CLI can exit 75 and the
+            scheduler resumes tomorrow.
+    """
+
+    requests_attempted: int = 0
+    requests_skipped: int = 0
+    no_data: int = 0
+    rows_upserted: int = 0
+    errors: dict[str, str] = field(default_factory=dict)
+    opendart_exhaustion_reason: str | None = None
+
+
+@dataclass(slots=True)
+class UniverseSnapshotBackfillResult:
+    """Outcome of a historical universe-snapshot backfill run.
+
+    Attributes:
+        snapshots_attempted: Month-end dates considered.
+        snapshots_skipped: Dates that already had a backfilled snapshot.
+        snapshots_written: Snapshots newly persisted.
+        items_written: Snapshot item rows inserted.
+        errors: Per-date error messages, keyed ``"YYYY-MM-DD"``.
+    """
+
+    snapshots_attempted: int = 0
+    snapshots_skipped: int = 0
+    snapshots_written: int = 0
+    items_written: int = 0
+    errors: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class DartCorpCodeResult:
     """Result of fetching the OpenDART corporation-code master."""
 
@@ -580,6 +801,41 @@ class DartShareholderReturnResult:
     reprt_code: str = ""
     statement_type: str = ""
     records: list[DartShareholderReturnLine] = field(default_factory=list)
+    no_data: bool = False
+    error: str | None = None
+    status_code: str | None = None
+    retryable: bool = False
+    retry_after_seconds: float | None = None
+    exhaustion_reason: str | None = None
+
+
+@dataclass(slots=True)
+class DartFilingReceiptResult:
+    """Result of fetching one OpenDART disclosure-receipt window (all pages)."""
+
+    corp_code: str = ""
+    ticker: str = ""
+    bgn_de: date | None = None
+    end_de: date | None = None
+    records: list[DartFilingReceiptLine] = field(default_factory=list)
+    total_count: int = 0
+    no_data: bool = False
+    error: str | None = None
+    status_code: str | None = None
+    retryable: bool = False
+    retry_after_seconds: float | None = None
+    exhaustion_reason: str | None = None
+
+
+@dataclass(slots=True)
+class DartCapitalChangeResult:
+    """Result of fetching one OpenDART capital-change (irdsSttus) payload."""
+
+    corp_code: str = ""
+    ticker: str = ""
+    bsns_year: int = 0
+    reprt_code: str = ""
+    records: list[DartCapitalChangeLine] = field(default_factory=list)
     no_data: bool = False
     error: str | None = None
     status_code: str | None = None
@@ -660,11 +916,18 @@ class BackfillResult:
     Attributes:
         tickers_processed: Number of tickers attempted.
         bars_upserted: Total bars written.
+        baseline_clamped_tickers: Incremental baseline-missing tickers whose
+            auto-derived start was clamped to the ``max_auto_range_days`` window
+            (each needs a separate full-history repair).
+        auto_new_ticker_start_tickers: Incremental baseline-missing tickers that
+            used an auto-derived ``listing_date`` / ``first_seen_date`` start.
         errors: Per-ticker error messages.
     """
 
     tickers_processed: int = 0
     bars_upserted: int = 0
+    baseline_clamped_tickers: int = 0
+    auto_new_ticker_start_tickers: int = 0
     errors: dict[str, str] = field(default_factory=dict)
 
 
@@ -696,15 +959,31 @@ class DartFinancialSyncResult:
 
 @dataclass(slots=True)
 class DartShareInfoSyncResult:
-    """Outcome of syncing share-count and shareholder-return raw rows."""
+    """Outcome of syncing share-count, shareholder-return, and capital-change raw rows."""
 
     share_count_upsert: UpsertResult = field(default_factory=UpsertResult)
     shareholder_return_upsert: UpsertResult = field(default_factory=UpsertResult)
+    capital_change_upsert: UpsertResult = field(default_factory=UpsertResult)
     targets_processed: int = 0
     requests_attempted: int = 0
     requests_skipped: int = 0
     share_count_rows_upserted: int = 0
     shareholder_return_rows_upserted: int = 0
+    capital_change_rows_upserted: int = 0
+    no_data_requests: int = 0
+    errors: dict[str, str] = field(default_factory=dict)
+    opendart_exhaustion_reason: str | None = None
+
+
+@dataclass(slots=True)
+class DartFilingReceiptSyncResult:
+    """Outcome of syncing OpenDART disclosure-receipt history raw rows."""
+
+    upsert: UpsertResult = field(default_factory=UpsertResult)
+    targets_processed: int = 0
+    requests_attempted: int = 0
+    requests_skipped: int = 0
+    rows_upserted: int = 0
     no_data_requests: int = 0
     errors: dict[str, str] = field(default_factory=dict)
     opendart_exhaustion_reason: str | None = None

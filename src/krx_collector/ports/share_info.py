@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from krx_collector.domain.models import (
+    DartCapitalChangeResult,
     DartCorp,
     DartShareCountResult,
     DartShareholderReturnResult,
@@ -45,4 +46,18 @@ class ShareholderReturnProvider(Protocol):
         reprt_code: str,
     ) -> DartShareholderReturnResult:
         """Retrieve tesstkAcqsDspsSttus rows for one company/report."""
+        ...
+
+
+@runtime_checkable
+class CapitalChangeProvider(Protocol):
+    """Fetches OpenDART issuance/decrease (증자·감자) disclosures."""
+
+    def fetch_capital_change(
+        self,
+        corp: DartCorp,
+        bsns_year: int,
+        reprt_code: str,
+    ) -> DartCapitalChangeResult:
+        """Retrieve irdsSttus raw rows for one company/report."""
         ...

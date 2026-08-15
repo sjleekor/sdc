@@ -24,6 +24,11 @@ class Source(StrEnum):
 
     FDR = "FDR"
     PYKRX = "PYKRX"
+    # Historical universe snapshots reconstructed after the fact.  Kept
+    # distinct from PYKRX so that `sync_universe`'s snapshot diff (which infers
+    # delistings from consecutive snapshots) never mixes a backfilled snapshot
+    # in with the live series.
+    PYKRX_BACKFILL = "PYKRX_BACKFILL"
     OPENDART = "OPENDART"
     KRX = "KRX"
     ECOS = "ECOS"
@@ -35,6 +40,25 @@ class Source(StrEnum):
     # Future sources (not implemented):
     # KIS = "KIS"
     # KIWOOM = "KIWOOM"
+
+
+class UniverseScope(StrEnum):
+    """Which universe a collection targets.
+
+    Every collector used to resolve its own targets, and every one of them
+    reached for the currently-listed set.  That is correct for a daily sync —
+    a delisted company files nothing today — and wrong for any backfill that
+    feeds a backtest, because the companies that failed are precisely the ones
+    that leave the current set.  The result was 2.0-2.3% coverage of 1,330
+    delisted names across every raw table, and 13.9% of the 2016 cross-section
+    absent (``poc/survivorship_gap.md``).
+
+    Naming the choice makes it visible at the call site.  ``CURRENT`` is a
+    decision about time, not a neutral default.
+    """
+
+    CURRENT = "current"
+    HISTORICAL = "historical"
 
 
 class ListingStatus(StrEnum):
@@ -49,14 +73,20 @@ class RunType(StrEnum):
     """Pipeline run type recorded in ingestion_runs."""
 
     UNIVERSE_SYNC = "universe_sync"
+    UNIVERSE_SNAPSHOT_BACKFILL = "universe_snapshot_backfill"
     DAILY_BACKFILL = "daily_backfill"
+    MARKET_CAP_BACKFILL = "market_cap_backfill"
     VALIDATE = "validate"
     REMOTE_DB_SYNC = "remote_db_sync"
     DART_CORP_SYNC = "dart_corp_sync"
+    DART_CORP_PROFILE_SYNC = "dart_corp_profile_sync"
     DART_FINANCIAL_SYNC = "dart_financial_sync"
     DART_SHARE_COUNT_SYNC = "dart_share_count_sync"
     DART_SHAREHOLDER_RETURN_SYNC = "dart_shareholder_return_sync"
     DART_SHARE_INFO_SYNC = "dart_share_info_sync"
+    DART_CAPITAL_CHANGE_SYNC = "dart_capital_change_sync"
+    DART_FILING_RECEIPT_SYNC = "dart_filing_receipt_sync"
+    XBRL_RECEIPT_BACKFILL = "xbrl_receipt_backfill"
     METRIC_NORMALIZE = "metric_normalize"
     KRX_FLOW_SYNC = "krx_flow_sync"
     XBRL_PARSE = "xbrl_parse"

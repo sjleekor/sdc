@@ -99,6 +99,7 @@ PIPELINE_FULL_REFRESH_TABLE_NAMES: tuple[str, ...] = (
     "stock_master_snapshot_items",
     # prices backfill
     "daily_ohlcv",
+    "daily_market_cap",
     # KRX security-level flow metrics
     "krx_security_flow_raw",
     # account / financial / XBRL pipeline
@@ -106,40 +107,36 @@ PIPELINE_FULL_REFRESH_TABLE_NAMES: tuple[str, ...] = (
     "dart_financial_statement_raw",
     "dart_share_count_raw",
     "dart_shareholder_return_raw",
+    "dart_capital_change_raw",
+    "dart_filing_receipt_raw",
     "dart_xbrl_document",
     "dart_xbrl_fact_raw",
-    "metric_catalog",
-    "metric_mapping_rule",
-    "stock_metric_fact",
-    # model-facing common feature layer
+    # model-facing common feature layer. Only the raw observations + the shared
+    # series config are mirrored; the derived facts (stock_metric_fact,
+    # common_feature_daily_fact) and the compute-only catalog/rule tables are no
+    # longer mirrored — the DuckDB marts recompute them from raw (refactor §5.2,
+    # decision 7). common_feature_series is kept (collector + compute share it).
     "common_feature_series",
     "common_feature_observation_raw",
-    "common_feature_catalog",
-    "common_feature_catalog_input",
-    "common_feature_daily_fact",
 )
 PIPELINE_FULL_REFRESH_TABLES: tuple[DatabaseTable, ...] = tuple(
-    DatabaseTable(schema=PUBLIC_SCHEMA, name=name)
-    for name in PIPELINE_FULL_REFRESH_TABLE_NAMES
+    DatabaseTable(schema=PUBLIC_SCHEMA, name=name) for name in PIPELINE_FULL_REFRESH_TABLE_NAMES
 )
 
 SYNC_TABLE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "stock_master_snapshot_items": ("stock_master_snapshot",),
-    "metric_mapping_rule": ("metric_catalog",),
-    "stock_metric_fact": ("metric_catalog", "metric_mapping_rule"),
     "common_feature_observation_raw": ("common_feature_series",),
-    "common_feature_catalog_input": (
-        "common_feature_catalog",
-        "common_feature_series",
-    ),
-    "common_feature_daily_fact": ("common_feature_catalog",),
 }
 
 
 SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
     TableSyncSpec(
         name="stock_master",
-        select_list="ticker, market, name, status, last_seen_date, source, updated_at",
+        # listing_date/first_seen_date appended after updated_at so insert_columns
+        # stays a positional prefix of select_list and the updated_at cursor at
+        # index 6 is unchanged.
+        select_list="ticker, market, name, status, last_seen_date, source, updated_at, "
+        "listing_date, first_seen_date",
         from_clause="stock_master",
         order_columns=("updated_at", "ticker", "market"),
         insert_columns=(
@@ -150,9 +147,19 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
             "last_seen_date",
             "source",
             "updated_at",
+            "listing_date",
+            "first_seen_date",
         ),
         conflict_columns=("ticker", "market"),
-        update_columns=("name", "status", "last_seen_date", "source", "updated_at"),
+        update_columns=(
+            "name",
+            "status",
+            "last_seen_date",
+            "source",
+            "updated_at",
+            "listing_date",
+            "first_seen_date",
+        ),
         local_cursor_sql=(
             "SELECT updated_at, ticker, market "
             "FROM stock_master "
@@ -183,15 +190,19 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
     ),
     TableSyncSpec(
         name="stock_master_snapshot_items",
-        select_list="i.snapshot_id, i.ticker, i.market, i.name, i.status, s.fetched_at",
+        # s.fetched_at is the joined parent watermark and is NOT inserted, so
+        # i.listing_date must precede it to keep insert_columns a positional
+        # prefix of select_list; the fetched_at cursor moves 5 -> 6.
+        select_list="i.snapshot_id, i.ticker, i.market, i.name, i.status, "
+        "i.listing_date, s.fetched_at",
         from_clause=(
             "stock_master_snapshot_items i "
             "JOIN stock_master_snapshot s ON s.snapshot_id = i.snapshot_id"
         ),
         order_columns=("s.fetched_at", "i.snapshot_id", "i.ticker", "i.market"),
-        insert_columns=("snapshot_id", "ticker", "market", "name", "status"),
+        insert_columns=("snapshot_id", "ticker", "market", "name", "status", "listing_date"),
         conflict_columns=("snapshot_id", "ticker", "market"),
-        update_columns=("name", "status"),
+        update_columns=("name", "status", "listing_date"),
         local_cursor_sql=(
             "SELECT s.fetched_at, i.snapshot_id, i.ticker, i.market "
             "FROM stock_master_snapshot_items i "
@@ -199,7 +210,7 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
             "ORDER BY s.fetched_at DESC, i.snapshot_id DESC, i.ticker DESC, i.market DESC "
             "LIMIT 1"
         ),
-        cursor_indexes=(5, 0, 1, 2),
+        cursor_indexes=(6, 0, 1, 2),
         always_full_scan=True,
         prune_missing_after_full_scan=True,
     ),
@@ -233,6 +244,46 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
         cursor_indexes=(9, 0, 1, 2),
         copy_merge_enabled=True,
         conflict_update_where_sql="daily_ohlcv.fetched_at <= EXCLUDED.fetched_at",
+    ),
+    TableSyncSpec(
+        name="daily_market_cap",
+        select_list=(
+            "trade_date, ticker, market, source_close, market_cap, trading_value, "
+            "listed_shares, volume, source, fetched_at"
+        ),
+        from_clause="daily_market_cap",
+        order_columns=("fetched_at", "trade_date", "ticker", "market"),
+        insert_columns=(
+            "trade_date",
+            "ticker",
+            "market",
+            "source_close",
+            "market_cap",
+            "trading_value",
+            "listed_shares",
+            "volume",
+            "source",
+            "fetched_at",
+        ),
+        conflict_columns=("trade_date", "ticker", "market"),
+        update_columns=(
+            "source_close",
+            "market_cap",
+            "trading_value",
+            "listed_shares",
+            "volume",
+            "source",
+            "fetched_at",
+        ),
+        local_cursor_sql=(
+            "SELECT fetched_at, trade_date, ticker, market "
+            "FROM daily_market_cap "
+            "ORDER BY fetched_at DESC, trade_date DESC, ticker DESC, market DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(9, 0, 1, 2),
+        copy_merge_enabled=True,
+        conflict_update_where_sql="daily_market_cap.fetched_at <= EXCLUDED.fetched_at",
     ),
     TableSyncSpec(
         name="krx_security_flow_raw",
@@ -270,9 +321,15 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
     ),
     TableSyncSpec(
         name="dart_corp_master",
+        # N2 profile columns are appended AFTER updated_at so the cursor stays
+        # at index 9.  They must be listed here explicitly: this select/insert
+        # list is not derived from the DDL, so a column missing here is dropped
+        # from the mirror silently — and unlike the profile catalog, no test
+        # catches it for free.
         select_list=(
             "corp_code, ticker, corp_name, market, stock_name, modify_date, is_active, "
-            "source, fetched_at, updated_at"
+            "source, fetched_at, updated_at, "
+            "induty_code, corp_cls, est_dt, acc_mt, profile_raw, profile_fetched_at"
         ),
         from_clause="dart_corp_master",
         order_columns=("updated_at", "corp_code"),
@@ -287,6 +344,12 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
             "source",
             "fetched_at",
             "updated_at",
+            "induty_code",
+            "corp_cls",
+            "est_dt",
+            "acc_mt",
+            "profile_raw",
+            "profile_fetched_at",
         ),
         conflict_columns=("corp_code",),
         update_columns=(
@@ -299,6 +362,12 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
             "source",
             "fetched_at",
             "updated_at",
+            "induty_code",
+            "corp_cls",
+            "est_dt",
+            "acc_mt",
+            "profile_raw",
+            "profile_fetched_at",
         ),
         local_cursor_sql=(
             "SELECT updated_at, corp_code "
@@ -516,6 +585,115 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
             "LIMIT 1"
         ),
         cursor_indexes=(19, 0),
+        json_columns=("raw_payload",),
+        preserve_remote_surrogate_columns=("raw_id",),
+        copy_merge_enabled=True,
+    ),
+    TableSyncSpec(
+        name="dart_capital_change_raw",
+        select_list=(
+            "raw_id, corp_code, ticker, bsns_year, reprt_code, rcept_no, corp_cls, "
+            "isu_dcrs_de, isu_dcrs_stle, isu_dcrs_stock_knd, isu_dcrs_qy, "
+            "isu_dcrs_mstvdv_fval_amount, isu_dcrs_mstvdv_fval_amount2, stlm_dt, "
+            "source, fetched_at, raw_payload"
+        ),
+        from_clause="dart_capital_change_raw",
+        order_columns=("fetched_at", "raw_id"),
+        insert_columns=(
+            "raw_id",
+            "corp_code",
+            "ticker",
+            "bsns_year",
+            "reprt_code",
+            "rcept_no",
+            "corp_cls",
+            "isu_dcrs_de",
+            "isu_dcrs_stle",
+            "isu_dcrs_stock_knd",
+            "isu_dcrs_qy",
+            "isu_dcrs_mstvdv_fval_amount",
+            "isu_dcrs_mstvdv_fval_amount2",
+            "stlm_dt",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        conflict_columns=(
+            "corp_code",
+            "bsns_year",
+            "reprt_code",
+            "rcept_no",
+            "isu_dcrs_de",
+            "isu_dcrs_stle",
+            "isu_dcrs_stock_knd",
+        ),
+        update_columns=(
+            "ticker",
+            "corp_cls",
+            "isu_dcrs_qy",
+            "isu_dcrs_mstvdv_fval_amount",
+            "isu_dcrs_mstvdv_fval_amount2",
+            "stlm_dt",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        local_cursor_sql=(
+            "SELECT fetched_at, raw_id "
+            "FROM dart_capital_change_raw "
+            "ORDER BY fetched_at DESC, raw_id DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(15, 0),
+        json_columns=("raw_payload",),
+        preserve_remote_surrogate_columns=("raw_id",),
+        copy_merge_enabled=True,
+    ),
+    TableSyncSpec(
+        name="dart_filing_receipt_raw",
+        select_list=(
+            "raw_id, corp_code, ticker, corp_name, stock_code, corp_cls, report_nm, "
+            "rcept_no, flr_nm, rcept_dt, rm, source, fetched_at, raw_payload"
+        ),
+        from_clause="dart_filing_receipt_raw",
+        order_columns=("fetched_at", "raw_id"),
+        insert_columns=(
+            "raw_id",
+            "corp_code",
+            "ticker",
+            "corp_name",
+            "stock_code",
+            "corp_cls",
+            "report_nm",
+            "rcept_no",
+            "flr_nm",
+            "rcept_dt",
+            "rm",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        conflict_columns=("corp_code", "rcept_no"),
+        update_columns=(
+            "ticker",
+            "corp_name",
+            "stock_code",
+            "corp_cls",
+            "report_nm",
+            "flr_nm",
+            "rcept_dt",
+            "rm",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        local_cursor_sql=(
+            "SELECT fetched_at, raw_id "
+            "FROM dart_filing_receipt_raw "
+            "ORDER BY fetched_at DESC, raw_id DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(12, 0),
         json_columns=("raw_payload",),
         preserve_remote_surrogate_columns=("raw_id",),
         copy_merge_enabled=True,
@@ -1049,9 +1227,7 @@ def reset_local_public_tables(
             )
             existing_names = {row[0] for row in cur.fetchall()}
 
-            tables_to_drop = tuple(
-                table for table in target_tables if table.name in existing_names
-            )
+            tables_to_drop = tuple(table for table in target_tables if table.name in existing_names)
             if tables_to_drop:
                 table_list = sql.SQL(", ").join(
                     _table_identifier(table) for table in tables_to_drop
@@ -1239,10 +1415,15 @@ def validate_remote_sync_options(
 
 
 def _select_sync_specs(table_names: tuple[str, ...] | None) -> tuple[TableSyncSpec, ...]:
-    """Resolve requested table names to ordered sync specs with FK parents included."""
+    """Resolve requested table names to ordered sync specs with FK parents included.
+
+    The default ("all") set is the mirror list ``PIPELINE_FULL_REFRESH_TABLE_NAMES``,
+    not every spec: the specs for the decommissioned derived/catalog tables remain
+    defined (harmless) but are no longer mirrored (refactor §5.2, decision 7).
+    """
     specs_by_name = {spec.name: spec for spec in SYNC_TABLE_SPECS}
     if table_names is None:
-        selected_names = set(specs_by_name)
+        selected_names = set(PIPELINE_FULL_REFRESH_TABLE_NAMES)
     else:
         requested = tuple(dict.fromkeys(name.strip() for name in table_names if name.strip()))
         unknown = sorted(name for name in requested if name not in specs_by_name)
@@ -1285,9 +1466,7 @@ def _database_tables_for_specs(specs: tuple[TableSyncSpec, ...]) -> tuple[Databa
     return tuple(DatabaseTable(schema=PUBLIC_SCHEMA, name=spec.name) for spec in specs)
 
 
-def _sync_pipeline_public_tables_to_local(
-    *, remote_conn: Any, local_conn: Any
-) -> dict[str, int]:
+def _sync_pipeline_public_tables_to_local(*, remote_conn: Any, local_conn: Any) -> dict[str, int]:
     """Replace selected local pipeline tables with the matching remote table data."""
     _prepare_local_full_refresh_session(local_conn)
 
@@ -1554,9 +1733,7 @@ def _sort_tables_by_fk_dependencies(
         ready.sort(key=_table_sort_key)
 
     if len(ordered) != len(tables):
-        cyclic_tables = sorted(
-            table.display_name for table in tables if table not in set(ordered)
-        )
+        cyclic_tables = sorted(table.display_name for table in tables if table not in set(ordered))
         raise ValueError(
             "Cannot determine full database copy order due to cyclic foreign keys: "
             + ", ".join(cyclic_tables)
@@ -2223,8 +2400,7 @@ def _get_staging_cursor(
     order_columns = ", ".join(spec.order_columns)
     with local_conn.cursor() as cur:
         cur.execute(
-            f"SELECT {order_columns} FROM {stage_table} "
-            f"ORDER BY {order_columns} DESC LIMIT 1"
+            f"SELECT {order_columns} FROM {stage_table} " f"ORDER BY {order_columns} DESC LIMIT 1"
         )
         row = cur.fetchone()
 

@@ -45,7 +45,12 @@ def _runner(dsn: str):
 
 
 def test_profile_small_table_end_to_end(dsn: str, tmp_path: Path) -> None:
-    """metric_catalog → checks → JSON/MD artifacts, all checks clean."""
+    """common_feature_series → checks → JSON/MD artifacts, all checks clean.
+
+    ``metric_catalog`` was decommissioned from the profile catalog (refactor
+    §5 — recomputed by the DuckDB marts); ``common_feature_series`` is the one
+    remaining small, well-formed reference table this pipeline still profiles.
+    """
     _require_db(dsn)
     from krx_collector.adapters.profiling_render.artifact_renderer import ArtifactRenderer
     from krx_collector.adapters.profiling_render.markdown_renderer import MarkdownRenderer
@@ -53,20 +58,20 @@ def test_profile_small_table_end_to_end(dsn: str, tmp_path: Path) -> None:
     from krx_collector.service.profiling.runner import build_profile
 
     runner = _runner(dsn)
-    spec = get_spec("metric_catalog")
+    spec = get_spec("common_feature_series")
     if not runner.describe_schema(spec.table):
-        pytest.skip("metric_catalog table absent")
+        pytest.skip("common_feature_series table absent")
 
     result = build_profile(spec, runner, target="local")
     assert result.preflight.exists
-    # No warnings expected on a tiny, well-formed catalog table.
+    # No warnings expected on a tiny, well-formed reference table.
     assert result.warnings == []
 
     written = ArtifactRenderer().render(result, out_dir=tmp_path, formats=["json"])
     written += MarkdownRenderer().render(result, out_dir=tmp_path, formats=["md"])
     assert any(p.suffix == ".json" for p in written)
-    data = json.loads((tmp_path / "artifacts" / "metric_catalog.stats.json").read_text())
-    assert data["table"] == "metric_catalog"
+    data = json.loads((tmp_path / "artifacts" / "common_feature_series.stats.json").read_text())
+    assert data["table"] == "common_feature_series"
     assert data["checks"]
 
 
@@ -100,15 +105,22 @@ def test_profile_run_is_idempotent_and_diff_zero(dsn: str, tmp_path: Path) -> No
 
 
 def test_empty_table_is_skipped(dsn: str) -> None:
-    """operating_* tables (0 rows pre-load) record skipped:empty, not a crash."""
+    """A freshly-added, not-yet-synced raw table (0 rows) records skipped:empty,
+    not a crash.
+
+    ``operating_metric_fact`` — the original example here — was decommissioned
+    from the profile catalog (refactor §5). ``dart_filing_receipt_raw`` is a
+    brand-new raw table (Phase B `dart sync-filings`, not yet run against most
+    databases), so it exercises the same "0 rows pre-load" path.
+    """
     _require_db(dsn)
     from krx_collector.service.profiling.catalog import get_spec
     from krx_collector.service.profiling.runner import build_profile
 
     runner = _runner(dsn)
-    spec = get_spec("operating_metric_fact")
+    spec = get_spec("dart_filing_receipt_raw")
     if not runner.describe_schema(spec.table):
-        pytest.skip("operating_metric_fact table absent")
+        pytest.skip("dart_filing_receipt_raw table absent")
 
     result = build_profile(spec, runner, target="local")
     # If data has since landed this assertion is intentionally relaxed.

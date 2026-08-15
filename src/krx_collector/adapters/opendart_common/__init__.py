@@ -12,8 +12,11 @@ from krx_collector.adapters.opendart_common.client import (
     extract_xml_status,
 )
 from krx_collector.adapters.opendart_common.policy import (
+    CAPITAL_CHANGE_POLICY,
+    COMPANY_PROFILE_POLICY,
     CORP_CODE_POLICY,
     DIVIDEND_POLICY,
+    FILING_RECEIPT_POLICY,
     FINANCIAL_STATEMENT_POLICY,
     SHARE_COUNT_POLICY,
     TREASURY_STOCK_POLICY,
@@ -23,8 +26,11 @@ from krx_collector.adapters.opendart_common.policy import (
 )
 
 __all__ = [
+    "CAPITAL_CHANGE_POLICY",
+    "COMPANY_PROFILE_POLICY",
     "CORP_CODE_POLICY",
     "DIVIDEND_POLICY",
+    "FILING_RECEIPT_POLICY",
     "FINANCIAL_STATEMENT_POLICY",
     "OPENDART_KEY_DISABLED_STATUSES",
     "OPENDART_OK_STATUS",

@@ -16,8 +16,9 @@ from krx_collector.domain.models import (
     DartXbrlResult,
     IngestionRun,
     UpsertResult,
+    XbrlBackfillTarget,
 )
-from krx_collector.service.sync_dart_xbrl import sync_dart_xbrl
+from krx_collector.service.sync_dart_xbrl import sync_dart_xbrl, sync_dart_xbrl_receipt_targeted
 from krx_collector.util.time import now_kst
 from tests.helpers.fake_opendart_executor import FakeOpenDartExecutor
 
@@ -231,6 +232,7 @@ class MockXbrlStorage:
         self,
         active_only: bool = True,
         tickers: list[str] | None = None,
+        include_delisted: bool = False,
     ) -> list[DartCorp]:
         records = [_sample_corp()]
         if tickers is None:
@@ -365,3 +367,99 @@ def test_sync_dart_xbrl_force_bypasses_existing_check() -> None:
     assert result.requests_skipped == 0
     assert provider.calls == 1
     assert len(storage.documents) == 1
+
+
+def test_sync_dart_xbrl_receipt_targeted_fetches_explicit_targets() -> None:
+    storage = MockXbrlStorage()
+    provider = MockXbrlProvider()
+    targets = [
+        XbrlBackfillTarget(
+            ticker="005930",
+            corp_code="00126380",
+            bsns_year=2025,
+            reprt_code="11011",
+            rcept_no="20250101000001",
+        )
+    ]
+
+    result = sync_dart_xbrl_receipt_targeted(
+        provider=provider,
+        storage=storage,
+        targets=targets,
+        rate_limit_seconds=0.0,
+    )
+
+    assert result.errors == {}
+    assert result.targets_processed == 1
+    assert result.requests_attempted == 1
+    assert provider.calls == 1
+    assert len(storage.documents) == 1
+    assert storage.documents[0].rcept_no == "20250101000001"
+    assert storage.runs[0].run_type == RunType.XBRL_RECEIPT_BACKFILL
+    assert storage.runs[-1].status == RunStatus.SUCCESS
+
+
+def test_sync_dart_xbrl_receipt_targeted_skips_existing_document() -> None:
+    storage = MockXbrlStorage()
+    storage.existing_xbrl_documents.add(("00126380", 2025, "11011", "20250101000001"))
+    provider = MockXbrlProvider()
+    targets = [
+        XbrlBackfillTarget(
+            ticker="005930",
+            corp_code="00126380",
+            bsns_year=2025,
+            reprt_code="11011",
+            rcept_no="20250101000001",
+        )
+    ]
+
+    result = sync_dart_xbrl_receipt_targeted(
+        provider=provider,
+        storage=storage,
+        targets=targets,
+        rate_limit_seconds=0.0,
+    )
+
+    assert result.requests_attempted == 0
+    assert result.requests_skipped == 1
+    assert provider.calls == 0
+
+
+def test_sync_dart_xbrl_receipt_targeted_errors_on_unmapped_ticker() -> None:
+    storage = MockXbrlStorage()
+    provider = MockXbrlProvider()
+    targets = [
+        XbrlBackfillTarget(
+            ticker="000000",
+            corp_code="00000000",
+            bsns_year=2025,
+            reprt_code="11011",
+            rcept_no="20250101000001",
+        )
+    ]
+
+    result = sync_dart_xbrl_receipt_targeted(
+        provider=provider,
+        storage=storage,
+        targets=targets,
+        rate_limit_seconds=0.0,
+    )
+
+    assert result.requests_attempted == 0
+    assert len(result.errors) == 1
+    assert provider.calls == 0
+
+
+def test_sync_dart_xbrl_receipt_targeted_requires_targets() -> None:
+    storage = MockXbrlStorage()
+    provider = MockXbrlProvider()
+
+    result = sync_dart_xbrl_receipt_targeted(
+        provider=provider,
+        storage=storage,
+        targets=[],
+        rate_limit_seconds=0.0,
+    )
+
+    assert "pipeline" in result.errors
+    assert storage.runs[-1].status == RunStatus.FAILED

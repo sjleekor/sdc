@@ -50,6 +50,61 @@ def test_fdr_provider_maps_symbol_column(monkeypatch) -> None:
     assert [stock.ticker for stock in result.snapshot.records] == ["035420"]
 
 
+def test_fdr_provider_parses_listing_date(monkeypatch) -> None:
+    provider = FdrUniverseProvider()
+
+    monkeypatch.setattr(
+        "krx_collector.adapters.universe_fdr.provider.fdr.StockListing",
+        lambda _market: pd.DataFrame(
+            [{"Code": "005930", "Name": "Samsung", "ListingDate": "2020-01-02"}]
+        ),
+    )
+
+    result = provider.fetch_universe([Market.KOSPI], as_of=date(2026, 5, 21))
+
+    assert result.error is None
+    assert result.snapshot is not None
+    assert result.snapshot.records[0].listing_date == date(2020, 1, 2)
+
+
+def test_fdr_provider_tolerates_missing_or_nat_listing_date(monkeypatch) -> None:
+    provider = FdrUniverseProvider()
+
+    monkeypatch.setattr(
+        "krx_collector.adapters.universe_fdr.provider.fdr.StockListing",
+        lambda _market: pd.DataFrame(
+            [
+                {"Code": "005930", "Name": "Samsung", "ListingDate": pd.NaT},
+                {"Code": "000660", "Name": "SK hynix", "ListingDate": ""},
+                {"Code": "035420", "Name": "NAVER"},  # missing column entirely
+            ]
+        ),
+    )
+
+    result = provider.fetch_universe([Market.KOSPI], as_of=date(2026, 5, 21))
+
+    assert result.error is None
+    assert result.snapshot is not None
+    assert [s.listing_date for s in result.snapshot.records] == [None, None, None]
+
+
+def test_fdr_provider_honors_alternate_listing_date_column(monkeypatch) -> None:
+    provider = FdrUniverseProvider()
+
+    monkeypatch.setattr(
+        "krx_collector.adapters.universe_fdr.provider.fdr.StockListing",
+        lambda _market: pd.DataFrame(
+            [{"Symbol": "035420", "Name": "NAVER", "ListedDate": "2002-10-29"}]
+        ),
+    )
+
+    result = provider.fetch_universe([Market.KOSPI], as_of=date(2026, 5, 21))
+
+    assert result.error is None
+    assert result.snapshot is not None
+    assert result.snapshot.records[0].listing_date == date(2002, 10, 29)
+
+
 def test_fdr_provider_falls_back_to_pykrx(monkeypatch) -> None:
     provider = FdrUniverseProvider()
 

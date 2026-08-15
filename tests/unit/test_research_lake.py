@@ -120,3 +120,45 @@ def test_register_requested_but_absent_table_raises(synthetic_lake: LakeConfig) 
     # explicit request must fail loudly rather than skip.
     with pytest.raises(FileNotFoundError):
         lake.register_views(con, synthetic_lake, tables=["stock_metric_fact"])
+
+
+# --- mart cache contract (etl_01 §5) ----------------------------------------
+
+
+def test_mart_cache_detects_a_formula_change_that_keeps_the_schema(
+    synthetic_lake: LakeConfig,
+) -> None:
+    """A changed formula must invalidate the cache even at an identical schema.
+
+    The cache key used to be (analysis_config_hash, output schema). A fixed NULL
+    guard or a corrected mapping keeps every column name and type, so the stale
+    mart was silently reused and a "rerun" reproduced the old numbers. See
+    10_known_issues.md I10.
+    """
+    from research.etl import mart
+
+    con = lake.connect(synthetic_lake)
+    mart.materialize(con, synthetic_lake, "t", "SELECT 1 AS a")
+    # Same schema (one INTEGER column named a), different formula.
+    with pytest.raises(RuntimeError, match="contract mismatch"):
+        mart.materialize(con, synthetic_lake, "t", "SELECT 2 AS a")
+    # Unchanged formula still hits the cache.
+    mart.materialize(con, synthetic_lake, "t", "SELECT 1 AS a")
+
+
+def test_mart_cache_accepts_legacy_metadata_without_sql_hash(
+    synthetic_lake: LakeConfig,
+) -> None:
+    """Entries written before ``sql_hash`` existed must not force a rebuild."""
+    import json
+
+    from research.etl import mart
+
+    con = lake.connect(synthetic_lake)
+    mart.materialize(con, synthetic_lake, "t", "SELECT 1 AS a")
+    metadata_path = mart.mart_table_dir(synthetic_lake, "t") / "_cache_metadata.json"
+    legacy = json.loads(metadata_path.read_text(encoding="utf-8"))
+    legacy.pop("sql_hash")
+    metadata_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    mart.materialize(con, synthetic_lake, "t", "SELECT 1 AS a")

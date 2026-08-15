@@ -121,14 +121,98 @@ def test_service_validates_before_full_refresh_reset(monkeypatch, tmp_path: Path
 
 def test_managed_mirror_tables_exclude_local_audit_tables() -> None:
     pipeline_names = [table.name for table in PIPELINE_FULL_REFRESH_TABLES]
-    spec_names = [spec.name for spec in SYNC_TABLE_SPECS]
+    spec_names = {spec.name for spec in SYNC_TABLE_SPECS}
 
-    assert len(pipeline_names) == 19
-    assert pipeline_names == spec_names
+    # The mirror only carries raw + the shared common_feature_series config now;
+    # the derived/catalog tables are recomputed by the DuckDB marts (refactor §5.2).
+    assert len(pipeline_names) == 16  # +daily_market_cap (N1)
+    assert set(pipeline_names).issubset(spec_names)  # every mirrored table has a spec
     assert "ingestion_runs" not in pipeline_names
     assert "sync_checkpoints" not in pipeline_names
     assert "krx_security_flow_raw" in pipeline_names
-    assert "common_feature_daily_fact" in pipeline_names
+    assert "common_feature_series" in pipeline_names
+    # decommissioned -> no longer mirrored.
+    assert "stock_metric_fact" not in pipeline_names
+    assert "common_feature_daily_fact" not in pipeline_names
+    assert "metric_catalog" not in pipeline_names
+
+
+def test_daily_market_cap_spec_matches_ddl_and_cursor() -> None:
+    # N1.  The mirror's select/insert column lists are explicit, so a column
+    # added to the DDL but not here is dropped silently — no test catches that
+    # for free the way the profile catalog does.  Pin the shape.
+    spec = next(spec for spec in SYNC_TABLE_SPECS if spec.name == "daily_market_cap")
+
+    select_columns = tuple(col.strip() for col in spec.select_list.split(","))
+    # insert_columns must be a positional prefix of select_list
+    assert select_columns[: len(spec.insert_columns)] == spec.insert_columns
+
+    assert spec.insert_columns == (
+        "trade_date",
+        "ticker",
+        "market",
+        "source_close",
+        "market_cap",
+        "trading_value",
+        "listed_shares",
+        "volume",
+        "source",
+        "fetched_at",
+    )
+    assert spec.conflict_columns == ("trade_date", "ticker", "market")
+    # PK columns are never in update_columns; every value column is.
+    assert set(spec.update_columns) == set(spec.insert_columns) - set(spec.conflict_columns)
+    # cursor_indexes point at (fetched_at, trade_date, ticker, market)
+    assert tuple(select_columns[i] for i in spec.cursor_indexes) == (
+        "fetched_at",
+        "trade_date",
+        "ticker",
+        "market",
+    )
+
+
+def test_daily_market_cap_registered_in_every_required_place() -> None:
+    # `01_implementation_checklist.md` §1: a new table must land in six places.
+    # Places 2 (this module), 3 (profile catalog) and 6 (research config) are
+    # importable, so assert them together — the other three are config/shell.
+    from research.etl.config import RAW_TABLES
+
+    from krx_collector.infra.db_postgres.remote_sync import (
+        PIPELINE_FULL_REFRESH_TABLE_NAMES,
+    )
+    from krx_collector.service.profiling import catalog
+
+    assert "daily_market_cap" in PIPELINE_FULL_REFRESH_TABLE_NAMES
+    assert "daily_market_cap" in catalog.known_tables()
+    assert "daily_market_cap" in RAW_TABLES
+
+
+def test_stock_master_spec_includes_new_date_columns() -> None:
+    spec = next(spec for spec in SYNC_TABLE_SPECS if spec.name == "stock_master")
+
+    select_columns = tuple(col.strip() for col in spec.select_list.split(","))
+    assert select_columns[: len(spec.insert_columns)] == spec.insert_columns
+    assert "listing_date" in spec.insert_columns
+    assert "first_seen_date" in spec.insert_columns
+    assert "listing_date" in spec.update_columns
+    assert "first_seen_date" in spec.update_columns
+    # updated_at cursor is unchanged at index 6.
+    assert spec.cursor_indexes == (6, 0, 1)
+    assert select_columns[6] == "updated_at"
+
+
+def test_stock_master_snapshot_items_spec_includes_listing_date() -> None:
+    spec = next(spec for spec in SYNC_TABLE_SPECS if spec.name == "stock_master_snapshot_items")
+
+    select_columns = tuple(col.strip() for col in spec.select_list.split(","))
+    # insert_columns strips the table alias prefix present in select_list.
+    stripped = tuple(col.split(".")[-1] for col in select_columns)
+    assert stripped[: len(spec.insert_columns)] == spec.insert_columns
+    assert "listing_date" in spec.insert_columns
+    assert "listing_date" in spec.update_columns
+    # fetched_at is the joined parent watermark and moves from index 5 -> 6.
+    assert spec.cursor_indexes == (6, 0, 1, 2)
+    assert select_columns[6] == "s.fetched_at"
 
 
 def test_security_flow_raw_uses_update_aware_incremental_cursor() -> None:
@@ -143,16 +227,13 @@ def test_security_flow_raw_uses_update_aware_incremental_cursor() -> None:
 
 
 def test_partial_sync_includes_fk_dependency_closure() -> None:
-    selected_names = [
-        spec.name for spec in _select_sync_specs(("stock_metric_fact", "common_feature_daily_fact"))
-    ]
+    # common_feature_observation_raw FK-depends on common_feature_series, so a
+    # partial sync of the observations pulls the series config first.
+    selected_names = [spec.name for spec in _select_sync_specs(("common_feature_observation_raw",))]
 
     assert selected_names == [
-        "metric_catalog",
-        "metric_mapping_rule",
-        "stock_metric_fact",
-        "common_feature_catalog",
-        "common_feature_daily_fact",
+        "common_feature_series",
+        "common_feature_observation_raw",
     ]
 
 
@@ -181,10 +262,13 @@ def test_copy_merge_specs_are_limited_to_update_aware_tables() -> None:
 
     assert copy_merge_specs == {
         "daily_ohlcv",
+        "daily_market_cap",
         "krx_security_flow_raw",
         "dart_financial_statement_raw",
         "dart_share_count_raw",
         "dart_shareholder_return_raw",
+        "dart_capital_change_raw",
+        "dart_filing_receipt_raw",
         "dart_xbrl_document",
         "dart_xbrl_fact_raw",
         "stock_metric_fact",

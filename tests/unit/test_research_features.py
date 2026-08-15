@@ -86,6 +86,70 @@ def test_price_rows_preserved(price_con) -> None:
     assert n == 5
 
 
+def test_amihud_lag1_matches_prior_session_native_value() -> None:
+    """px_amihud_20d is joined in via a separate subquery from the other lag1
+    columns (research/etl/features/price.py) — its own _lag1 must still obey
+    the same "prior valid session" contract §A-1 requires of every family."""
+    con = duckdb.connect()
+    rows = [
+        f"(DATE '2020-01-01' + {i}, '005930', 'KOSPI', 100, 105, 95, {100 + i}, {10 + i})"
+        for i in range(25)
+    ]
+    con.execute(
+        "CREATE VIEW daily_ohlcv AS SELECT * FROM (VALUES "
+        + ",".join(rows)
+        + ") t(trade_date, ticker, market, open, high, low, close, volume)"
+    )
+    con.execute(f"CREATE VIEW feat_price AS {price.build_price_sql('daily_ohlcv')}")
+    day_n, day_n_minus_1_lag1 = con.execute("""
+        SELECT
+            (SELECT px_amihud_20d FROM feat_price WHERE trade_date = DATE '2020-01-01' + 23),
+            (SELECT px_amihud_20d_lag1 FROM feat_price WHERE trade_date = DATE '2020-01-01' + 24)
+    """).fetchone()
+    assert day_n is not None
+    assert day_n_minus_1_lag1 == pytest.approx(day_n)
+
+
+def test_residual_momentum_waits_for_full_regression_and_momentum_windows() -> None:
+    con = duckdb.connect()
+    rows = []
+    for i in range(510):
+        rows.extend([
+            f"(DATE '2020-01-01'+{i}, 'A','KOSPI',1,1,1,{100+i},100)",
+            f"(DATE '2020-01-01'+{i}, 'B','KOSPI',1,1,1,{200+2*i},100)",
+        ])
+    con.execute(
+        "CREATE VIEW daily_ohlcv AS SELECT * FROM (VALUES "
+        + ",".join(rows)
+        + ") t(trade_date,ticker,market,open,high,low,close,volume)"
+    )
+    con.execute(f"CREATE VIEW feat_price AS {price.build_price_sql()}")
+    values = con.execute(
+        "SELECT px_resid_mom_12_1 FROM feat_price WHERE ticker='A' "
+        "ORDER BY trade_date OFFSET 500 LIMIT 6"
+    ).fetchall()
+    assert all(row[0] is None for row in values[:5])
+    assert values[5][0] is not None
+
+
+def test_turnover_shock_nulls_zero_volume_instead_of_crashing() -> None:
+    # A non-halted zero-volume session (open/high/low != 0, volume=0) must not
+    # trip DuckDB's "cannot take logarithm of zero" on the LN(turnover/...) arg.
+    con = duckdb.connect()
+    rows = [f"(DATE '2020-01-01'+{i}, 'A','KOSPI',100,105,95,100,10)" for i in range(65)]
+    rows[64] = "(DATE '2020-01-01'+64, 'A','KOSPI',100,105,95,100,0)"
+    con.execute(
+        "CREATE VIEW daily_ohlcv AS SELECT * FROM (VALUES "
+        + ",".join(rows)
+        + ") t(trade_date,ticker,market,open,high,low,close,volume)"
+    )
+    con.execute(f"CREATE VIEW feat_price AS {price.build_price_sql()}")
+    (shock,) = con.execute(
+        "SELECT px_turnover_shock FROM feat_price WHERE trade_date = DATE '2020-01-01'+64"
+    ).fetchone()
+    assert shock is None
+
+
 # --- feat_flow --------------------------------------------------------------
 
 

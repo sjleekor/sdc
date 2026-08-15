@@ -104,6 +104,13 @@ CORP_CODE_POLICY = OpenDartEndpointPolicy(
     request_invalid_statuses=frozenset(OPENDART_REQUEST_INVALID_STATUSES | {"014"}),
 )
 
+COMPANY_PROFILE_POLICY = OpenDartEndpointPolicy(
+    endpoint="company",
+    payload_kind="json",
+    no_data_statuses=frozenset({"013"}),
+    request_invalid_statuses=frozenset(OPENDART_REQUEST_INVALID_STATUSES | {"014"}),
+)
+
 FINANCIAL_STATEMENT_POLICY = OpenDartEndpointPolicy(
     endpoint="fnlttSinglAcntAll",
     payload_kind="json",
@@ -137,4 +144,18 @@ XBRL_POLICY = OpenDartEndpointPolicy(
     payload_kind="xml_zip",
     no_data_statuses=frozenset({"013", "014"}),
     request_invalid_statuses=frozenset(OPENDART_REQUEST_INVALID_STATUSES),
+)
+
+CAPITAL_CHANGE_POLICY = OpenDartEndpointPolicy(
+    endpoint="irdsSttus",
+    payload_kind="json",
+    no_data_statuses=frozenset({"013"}),
+    request_invalid_statuses=frozenset(OPENDART_REQUEST_INVALID_STATUSES | {"014"}),
+)
+
+FILING_RECEIPT_POLICY = OpenDartEndpointPolicy(
+    endpoint="list",
+    payload_kind="json",
+    no_data_statuses=frozenset({"013"}),
+    request_invalid_statuses=frozenset(OPENDART_REQUEST_INVALID_STATUSES | {"014"}),
 )

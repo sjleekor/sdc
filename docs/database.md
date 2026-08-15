@@ -68,6 +68,52 @@
 **기본키(Primary key):** `(trade_date, ticker, market)`
 **인덱스(Index):** `(ticker, market, trade_date DESC)` - 특정 종목별 조회를 위한 인덱스.
 
+### 4b. `daily_market_cap`
+
+KRX가 일별로 공표하는 시가총액·거래대금·상장주식수입니다. `daily_ohlcv`와 **격자는 같지만
+원천이 다릅니다.**
+
+| | `daily_ohlcv` | `daily_market_cap` |
+|---|---|---|
+| pykrx 엔드포인트 | `get_market_ohlcv_by_date` | `get_market_cap_by_ticker` |
+| 실제 원천 | **naver** (`adjusted=True` 기본) | **KRX** |
+| 가격 | **수정주가** | **당일 실제 종가(미수정)** |
+
+그래서 종가 컬럼 이름이 `close`가 아니라 `source_close`입니다 — 호출부에서 의미 차이가
+드러나게 하기 위해서입니다.
+
+| 컬럼명          | 타입            | 비고                                   |
+|-----------------|-----------------|----------------------------------------|
+| `trade_date`    | DATE NOT NULL   | 거래일 (PK part 1)                     |
+| `ticker`        | TEXT NOT NULL   | 6자리 KRX 종목 코드 (PK part 2)        |
+| `market`        | TEXT NOT NULL   | KOSPI \| KOSDAQ (PK part 3)            |
+| `source_close`  | BIGINT          | KRX 당일 실제 종가 (미수정)            |
+| `market_cap`    | BIGINT          | 시가총액 (KRW)                         |
+| `trading_value` | BIGINT          | 거래대금 (KRW)                         |
+| `listed_shares` | BIGINT          | 상장주식수                             |
+| `volume`        | BIGINT          | KRX 기준 거래량 (naver 기준과 대조용)  |
+| `source`        | TEXT NOT NULL   | PYKRX                                  |
+| `fetched_at`    | TIMESTAMPTZ NOT NULL | 데이터를 수집한 시간              |
+
+**기본키(Primary key):** `(trade_date, ticker, market)`
+**인덱스(Index):** `(ticker, market, trade_date DESC)`, `(fetched_at, trade_date, ticker, market)`
+
+**`market`은 호출 인자로만 채웁니다.** 응답에 시장 구분 컬럼이 없어서
+`market='ALL'` 한 번이 아니라 **날짜마다 시장별로 따로 호출**합니다. `stock_master`를 조인해
+채우면 KOSDAQ→KOSPI 이전상장 종목의 과거 행에 확정 이후의 시장이 붙어 룩어헤드가 됩니다.
+`ALL`을 쓰지 않는 두 번째 이유는 KONEX가 섞이기 때문입니다(2024-01-02 기준 129종목).
+
+**결측 규칙.** pykrx가 빈 값을 `0`으로 캐스팅해 진짜 0과 결측이 구분되지 않습니다.
+
+- `source_close == 0` → **행 전체가 결측**입니다. 휴장일에 pykrx가 빈 응답 대신
+  가격만 0인 전종목 행을 돌려주기 때문입니다
+- `source_close > 0`인데 `volume`·`trading_value`가 0이면 **진짜 0**(거래정지)입니다.
+  NULL로 바꾸지 않습니다
+
+**항등식.** `market_cap = source_close × listed_shares`가 정확히 성립합니다
+(PoC 6,904행 전수 확인). 즉 `market_cap`은 파생값이고, 이 테이블이 새로 가져오는 정보는
+`listed_shares`와 `trading_value`입니다.
+
 ### 5. `ingestion_runs`
 
 파이프라인의 모든 실행 이력을 기록하는 감사(Audit) 로그입니다.
@@ -109,6 +155,36 @@ OpenDART `corp_code`와 KRX ticker를 연결하는 기준 테이블입니다.
 | `source`       | TEXT NOT NULL   | 기본값 `OPENDART`                  |
 | `fetched_at`   | TIMESTAMPTZ     | 데이터를 수집한 시간               |
 | `updated_at`   | TIMESTAMPTZ     | Insert/Update 시 자동 갱신         |
+
+아래는 **기업개황 `company.json`(DS001)에서 채우는 컬럼**입니다. 위 컬럼들은
+`corpCode.xml` 벌크 zip에서 오는데 거기엔 업종이 없어서, corp_code당 1회 호출하는
+별도 API로 받습니다. 그래서 수집 시각도 따로 기록합니다.
+
+| 컬럼명               | 타입        | 비고                                       |
+|----------------------|-------------|--------------------------------------------|
+| `induty_code`        | TEXT        | KSIC 업종코드. **자릿수가 2~5로 섞입니다**  |
+| `corp_cls`           | TEXT        | Y(유가) \| K(코스닥) \| N(코넥스) \| E(기타) |
+| `est_dt`             | DATE        | 설립일 — 기업 연령(firm age) 재료          |
+| `acc_mt`             | TEXT        | 결산월 `MM`                                 |
+| `profile_raw`        | JSONB       | 원본 응답 전체 (지금 안 쓰는 필드 보존)     |
+| `profile_fetched_at` | TIMESTAMPTZ | **skip-if-present 키.** NULL이면 미수집     |
+
+**`induty_code` 자릿수가 섞이는 것이 중요합니다.** 실측(150 법인 표본)에서 2자리 3건,
+3자리 52건, 4자리 21건, 5자리 74건이 나왔습니다. 삼성전자 `264`, 크래프톤 `5821`,
+셀트리온 `21100`입니다.
+
+> 따라서 그룹핑 규칙은 **반드시 prefix**여야 합니다. `code[:2]`는 원본 길이와 무관하게
+> KSIC 중분류를 줍니다. 고정 폭을 가정한 규칙은 틀립니다.
+> 그룹 매핑은 `krx_collector.definitions.industry_groups`에 순수 코드로 있습니다.
+
+**한계 두 가지.**
+
+- **금융업과 지주회사가 갈리지 않습니다.** LG(비금융 지주)와 KB금융(은행지주)이 5자리
+  원본까지 똑같이 `64992`이고 `corp_cls`도 둘 다 `Y`입니다. 이 필드로는 분리할 수 없습니다
+- **`acc_mt != '12'`가 약 4%입니다.** 마트(`research/etl/marts/metric_vintages.py`)가
+  결산월을 12월로 하드코딩하고 있어 비12월 결산 법인의 `period_end`가 어긋납니다
+
+**인덱스(Index):** `induty_code`
 
 **기본키(Primary key):** `corp_code`
 **인덱스(Index):** `ticker`
@@ -270,79 +346,69 @@ OpenDART XBRL instance에서 추출한 fact raw 저장용 테이블입니다.
 **고유키(Unique):** `(corp_code, bsns_year, reprt_code, rcept_no, context_id, concept_id)`
 **인덱스(Index):** `(ticker, bsns_year, reprt_code, concept_id)`
 
-### 13. `metric_catalog`
+### 13. `dart_filing_receipt_raw`
 
-정규화된 canonical metric 정의 사전입니다.
+OpenDART `list.json`(공시검색) 접수 이력 raw 저장용 테이블입니다. Phase B의 원공시·정정공시
+관계 판별과 SUE original-event source 확보에 사용합니다(`docs/dev/20260731_raw_features/`).
 
-| 컬럼명         | 타입            | 비고                    |
-|----------------|-----------------|-------------------------|
-| `metric_code`  | TEXT PK         | 내부 metric code        |
-| `metric_name`  | TEXT NOT NULL   | 표시용 이름             |
-| `category`     | TEXT NOT NULL   | financial, share_count, xbrl 등 |
-| `unit`         | TEXT NOT NULL   | KRW, shares 등          |
-| `description`  | TEXT NOT NULL   | metric 설명             |
-| `is_active`    | BOOLEAN         | 활성 여부               |
-| `updated_at`   | TIMESTAMPTZ     | 수정 시각               |
+| 컬럼명        | 타입              | 비고                             |
+|---------------|-------------------|-----------------------------------|
+| `raw_id`      | BIGSERIAL PK      | 내부 surrogate key                |
+| `corp_code`   | TEXT NOT NULL     | OpenDART 기업 고유번호            |
+| `ticker`      | TEXT              | 6자리 KRX 종목 코드               |
+| `corp_name`   | TEXT NOT NULL     | 법인명                            |
+| `stock_code`  | TEXT NOT NULL     | 종목코드(공시 응답 기준)          |
+| `corp_cls`    | TEXT NOT NULL     | 법인 구분                         |
+| `report_nm`   | TEXT NOT NULL     | 보고서명                          |
+| `rcept_no`    | TEXT NOT NULL     | 접수번호                          |
+| `flr_nm`      | TEXT NOT NULL     | 공시 제출인명                     |
+| `rcept_dt`    | DATE              | 접수일자                          |
+| `rm`          | TEXT NOT NULL     | 비고(코스피/코스닥/정정 등 flag)  |
+| `source`      | TEXT NOT NULL     | `OPENDART`                        |
+| `fetched_at`  | TIMESTAMPTZ       | 데이터를 수집한 시간              |
+| `raw_payload` | JSONB NOT NULL    | 원본 응답 payload                 |
 
-### 14. `metric_mapping_rule`
+**고유키(Unique):** `(corp_code, rcept_no)`
+**인덱스(Index):** `(ticker, rcept_dt)`
 
-raw row를 canonical metric으로 연결하는 규칙 테이블입니다.
+### 14. `dart_capital_change_raw`
 
-| 컬럼명              | 타입            | 비고                                  |
-|---------------------|-----------------|---------------------------------------|
-| `rule_code`         | TEXT PK         | 안정적인 규칙 식별자                  |
-| `metric_code`       | TEXT FK         | `metric_catalog` 참조                 |
-| `source_table`      | TEXT NOT NULL   | raw source table 명                   |
-| `value_selector`    | TEXT NOT NULL   | raw row에서 읽을 값 컬럼              |
-| `priority`          | INT NOT NULL    | 낮을수록 우선                         |
-| `statement_type`    | TEXT NOT NULL   | dividend 등                           |
-| `fs_div`            | TEXT NOT NULL   | CFS \| OFS                            |
-| `sj_div`            | TEXT NOT NULL   | BS \| IS \| CF 등                     |
-| `account_id`        | TEXT NOT NULL   | 재무계정 매핑용 account_id            |
-| `account_nm`        | TEXT NOT NULL   | 재무계정 매핑용 account_nm            |
-| `row_name`          | TEXT NOT NULL   | 배당/주식수 row 이름                  |
-| `stock_knd`         | TEXT NOT NULL   | 보통주/우선주 등                      |
-| `dim1`              | TEXT NOT NULL   | treasury stock 1차 분류축             |
-| `dim2`              | TEXT NOT NULL   | treasury stock 2차 분류축             |
-| `dim3`              | TEXT NOT NULL   | treasury stock 3차 분류축             |
-| `metric_code_match` | TEXT NOT NULL   | raw metric_code 매칭값                |
-| `is_active`         | BOOLEAN         | 활성 여부                             |
-| `updated_at`        | TIMESTAMPTZ     | 수정 시각                             |
+OpenDART `irdsSttus`(증자(감자)현황) raw 저장용 테이블입니다. Phase B의 경제적 순발행
+(`ev_net_share_issuance_yoy`) 산식에서 유상증자/감자 등 발행·감소 사유를 액면분할·무상증자 같은
+mechanical action과 구분하는 데 사용합니다.
 
-### 15. `stock_metric_fact`
+| 컬럼명                          | 타입              | 비고                        |
+|---------------------------------|-------------------|-----------------------------|
+| `raw_id`                        | BIGSERIAL PK      | 내부 surrogate key          |
+| `corp_code`                     | TEXT NOT NULL     | OpenDART 기업 고유번호      |
+| `ticker`                        | TEXT              | 6자리 KRX 종목 코드         |
+| `bsns_year`                     | INT NOT NULL      | 사업연도                    |
+| `reprt_code`                    | TEXT NOT NULL     | 보고서 코드                 |
+| `rcept_no`                      | TEXT NOT NULL     | 접수번호                    |
+| `corp_cls`                      | TEXT NOT NULL     | 법인 구분                   |
+| `isu_dcrs_de`                   | DATE              | 발행/감소 일자              |
+| `isu_dcrs_stle`                 | TEXT NOT NULL     | 발행/감소 형태(유상증자 등) |
+| `isu_dcrs_stock_knd`            | TEXT NOT NULL     | 주식 종류                   |
+| `isu_dcrs_qy`                   | BIGINT            | 발행/감소 수량              |
+| `isu_dcrs_mstvdv_fval_amount`   | NUMERIC(30,4)     | 주당 액면가액               |
+| `isu_dcrs_mstvdv_fval_amount2`  | NUMERIC(30,4)     | 주당 발행/감소 가액         |
+| `stlm_dt`                       | DATE              | 결산일                      |
+| `source`                        | TEXT NOT NULL     | `OPENDART`                  |
+| `fetched_at`                    | TIMESTAMPTZ       | 데이터를 수집한 시간        |
+| `raw_payload`                   | JSONB NOT NULL    | 원본 응답 payload           |
 
-raw를 정규화해 적재한 종목별 canonical metric fact 테이블입니다.
+**고유키(Unique):** `(corp_code, bsns_year, reprt_code, rcept_no, isu_dcrs_de, isu_dcrs_stle, isu_dcrs_stock_knd)`
+**인덱스(Index):** `(ticker, bsns_year, reprt_code)`
 
-| 컬럼명              | 타입              | 비고                                  |
-|---------------------|-------------------|---------------------------------------|
-| `fact_id`           | BIGSERIAL PK      | 내부 surrogate key                    |
-| `ticker`            | TEXT NOT NULL     | 6자리 KRX 종목 코드                   |
-| `market`            | TEXT NOT NULL     | KOSPI \| KOSDAQ                       |
-| `corp_code`         | TEXT NOT NULL     | OpenDART 기업 고유번호                |
-| `metric_code`       | TEXT FK           | canonical metric code                 |
-| `period_type`       | TEXT NOT NULL     | annual, q1, half, q3 등               |
-| `period_end`        | DATE              | 기준 종료일                           |
-| `bsns_year`         | INT NOT NULL      | 사업연도                              |
-| `reprt_code`        | TEXT NOT NULL     | 보고서 코드                           |
-| `fs_div`            | TEXT NOT NULL     | 재무 raw의 경우 CFS \| OFS, 아니면 빈 문자열 |
-| `value_numeric`     | NUMERIC(30,4)     | 정규화 수치 값                        |
-| `value_text`        | TEXT NOT NULL     | 텍스트 표현                           |
-| `unit`              | TEXT NOT NULL     | KRW, shares 등                        |
-| `source_table`      | TEXT NOT NULL     | 원천 raw table                        |
-| `source_key`        | TEXT NOT NULL     | 원천 row 식별자                       |
-| `mapping_rule_code` | TEXT FK           | 적용된 mapping rule                   |
-| `fetched_at`        | TIMESTAMPTZ       | 원천 row 수집 시각                    |
-| `updated_at`        | TIMESTAMPTZ       | fact 갱신 시각                        |
+### Removed derived metric tables
 
-**고유키(Unique):** `(ticker, metric_code, bsns_year, reprt_code)`
-**인덱스(Index):** `(ticker, metric_code, bsns_year DESC, reprt_code)`
+리팩터 이후 PostgreSQL에는 raw 수집 테이블만 남기고, `metric_catalog`,
+`metric_mapping_rule`, `stock_metric_fact`는 DDL에서 제거했습니다. metric 정의와 mapping rule은
+`src/krx_collector/definitions/metric_rules.py`의 코드 정의가 source of truth이며,
+canonical-compatible `stock_metric_fact`는 `bin/parquet-compute-all.sh`가 raw parquet 위에서
+DuckDB derived mart로 재계산합니다.
 
-주의:
-
-- `period_end`는 share info raw에 결산일이 있으면 그 값을 사용합니다.
-- 재무 raw는 OpenDART 응답에 직접 결산일이 없으므로 `reprt_code` 기반으로 분기말을 추론합니다.
-
-### 16. `krx_security_flow_raw`
+### 15. `krx_security_flow_raw`
 
 KRX MDC 기반 수급 raw 저장용 테이블입니다.
 
@@ -377,56 +443,10 @@ KRX MDC 기반 수급 raw 저장용 테이블입니다.
 
 - `borrow_balance_quantity`
 
-### 17. `operating_source_document`
+### Removed operating pilot tables
 
-섹터별 사업 KPI 추출에 사용하는 원문 문서 provenance 저장용 테이블입니다.
-
-| 컬럼명           | 타입            | 비고                                 |
-|------------------|-----------------|--------------------------------------|
-| `document_key`   | TEXT PK         | 문서 자연키 해시                     |
-| `ticker`         | TEXT NOT NULL   | 6자리 KRX 종목 코드                  |
-| `market`         | TEXT NOT NULL   | KOSPI \| KOSDAQ                      |
-| `sector_key`     | TEXT NOT NULL   | extractor 선택용 sector key          |
-| `document_type`  | TEXT NOT NULL   | `manual_text`, `dart_report` 등      |
-| `title`          | TEXT NOT NULL   | 문서 제목                            |
-| `document_date`  | DATE            | 문서 기준일                          |
-| `period_end`     | DATE            | KPI 대상 기간 종료일                 |
-| `source_system`  | TEXT NOT NULL   | `LOCAL`, `DART`, `IR` 등             |
-| `source_url`     | TEXT NOT NULL   | 원문 URL                             |
-| `language`       | TEXT NOT NULL   | 기본 `ko`                            |
-| `content_text`   | TEXT NOT NULL   | extractor 입력 텍스트                |
-| `fetched_at`     | TIMESTAMPTZ     | 문서 적재 시각                       |
-| `raw_payload`    | JSONB NOT NULL  | 파일 경로 등 추가 provenance         |
-| `updated_at`     | TIMESTAMPTZ     | 문서 갱신 시각                       |
-
-**기본키(Primary key):** `document_key`
-**인덱스(Index):** `(ticker, sector_key, period_end DESC)`
-
-### 18. `operating_metric_fact`
-
-섹터별 extractor가 추출한 비정형 사업 KPI fact 저장용 테이블입니다.
-
-| 컬럼명          | 타입            | 비고                                  |
-|-----------------|-----------------|---------------------------------------|
-| `fact_id`       | BIGSERIAL PK    | 내부 surrogate key                    |
-| `ticker`        | TEXT NOT NULL   | 6자리 KRX 종목 코드                   |
-| `market`        | TEXT NOT NULL   | KOSPI \| KOSDAQ                       |
-| `sector_key`    | TEXT NOT NULL   | sector key                            |
-| `metric_code`   | TEXT NOT NULL   | `order_intake_amount` 등              |
-| `metric_name`   | TEXT NOT NULL   | 표시용 metric 명                      |
-| `period_end`    | DATE            | KPI 대상 기간 종료일                  |
-| `value_numeric` | NUMERIC(30,4)   | 수치형 값                             |
-| `value_text`    | TEXT NOT NULL   | 표시용 원문 값                        |
-| `unit`          | TEXT NOT NULL   | `KRW`, `count` 등                     |
-| `document_key`  | TEXT FK         | `operating_source_document` 참조      |
-| `extractor_code`| TEXT NOT NULL   | extractor 버전 식별자                 |
-| `raw_snippet`   | TEXT NOT NULL   | 추출 근거 snippet                     |
-| `fetched_at`    | TIMESTAMPTZ     | fact 적재 시각                        |
-| `raw_payload`   | JSONB NOT NULL  | extractor 부가 메타                   |
-| `updated_at`    | TIMESTAMPTZ     | fact 갱신 시각                        |
-
-**고유키(Unique):** `(ticker, metric_code, period_end, document_key, extractor_code)`
-**인덱스(Index):** `(ticker, sector_key, metric_code, period_end DESC)`
+파일럿 operating KPI 경로(`operating_source_document`, `operating_metric_fact`)는 스케줄과
+프로덕션 데이터가 없어 리팩터 P5에서 DDL과 CLI 경로를 제거했습니다.
 
 ## Upsert 전략
 
@@ -446,6 +466,26 @@ ON CONFLICT (trade_date, ticker, market) DO UPDATE SET
 ```
 
 **설계 이유:** KRX에서 가끔 가격 데이터를 수정하는 경우가 있기 때문에, `DO NOTHING` 대신 `DO UPDATE`를 사용하여 재수집 시 기존(수정 전) 데이터를 덮어쓰도록 했습니다.
+
+### `daily_market_cap`
+
+```sql
+INSERT INTO daily_market_cap (trade_date, ticker, market, source_close, market_cap,
+                              trading_value, listed_shares, volume, source, fetched_at)
+VALUES (...)
+ON CONFLICT (trade_date, ticker, market) DO UPDATE SET
+    source_close = EXCLUDED.source_close,
+    market_cap = EXCLUDED.market_cap,
+    trading_value = EXCLUDED.trading_value,
+    listed_shares = EXCLUDED.listed_shares,
+    volume = EXCLUDED.volume,
+    source = EXCLUDED.source,
+    fetched_at = EXCLUDED.fetched_at;
+```
+
+**설계 이유:** `daily_ohlcv`와 같습니다. 추가로 **한 응답(= 한 날짜 · 한 시장)의 전체 행을
+한 트랜잭션으로** upsert합니다. 배치를 쪼개면 중간에 중단됐을 때 그 슬라이스가 영구히
+불완전하게 남고, "행이 있으면 완료"로 판정하는 skip 규칙이 다시는 그 구멍을 채우지 않습니다.
 
 ### `stock_master`
 

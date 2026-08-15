@@ -14,7 +14,7 @@ import polars as pl
 import pytest
 from research.etl.config import EngineOptions, LakeConfig
 from research.etl.features import common, event
-from research.etl.lake import connect, register_views
+from research.etl.lake import connect, register_derived_marts, register_views
 from research.etl.universe import UniverseFilter, build_universe_sql
 from research.models._01_20_access_return_rank import build_dataset as bd
 from research.models._01_20_access_return_rank.spec import ModelSpec
@@ -23,10 +23,12 @@ from research.models._01_20_access_return_rank.spec import ModelSpec
 @pytest.fixture()
 def cf_con():
     cfg = LakeConfig(engine=EngineOptions(threads=4, memory_limit="4GB"))
-    if not cfg.canonical_root.exists():
-        pytest.skip(f"canonical lake not present at {cfg.canonical_root}")
+    if not cfg.raw_root.exists():
+        pytest.skip(f"raw lake not present at {cfg.raw_root}")
     con = connect(cfg)
-    register_views(con, cfg, tables=["common_feature_daily_fact"])
+    # common_feature_daily_fact is recomputed from the raw observation lake (§3.3).
+    register_views(con, cfg, tables=["common_feature_observation_raw"])
+    register_derived_marts(con, cfg, which=["common_feature_daily_fact"])
     con.execute(f"CREATE VIEW feat_common AS {common.build_common_sql()}")
     return con
 
@@ -70,8 +72,8 @@ def test_event_treasury_ratio_bounded(ev_con) -> None:
 @pytest.fixture()
 def full_built(tmp_path: Path):
     cfg = LakeConfig(datasets_root=tmp_path, engine=EngineOptions(threads=4, memory_limit="4GB"))
-    if not cfg.canonical_root.exists():
-        pytest.skip("canonical lake not present")
+    if not cfg.raw_root.exists():
+        pytest.skip("raw lake not present")
     base = ModelSpec(period_start="2025-01-01", period_end="2026-06-10", n_folds=2)
     spec = dataclasses.replace(base, feature_groups=("px", "flow", "fin", "cf", "ev"))
     return bd.build_dataset(spec, cfg, created_at="x", write=True)

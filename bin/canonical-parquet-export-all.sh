@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# DEPRECATED (refactor §5.3, §6). The derived facts (stock_metric_fact,
+# common_feature_daily_fact) are no longer exported from Postgres — the DuckDB
+# compute marts in research/etl/marts recompute them from the raw lake. Use
+# bin/parquet-compute-all.sh instead. This script and
+# tools/raw-parquet-exporter/config/export_canonical_tables.toml are retained
+# only to re-materialize a one-off pre-drop backup of the legacy canonical lake.
+#
 # Export canonical/derived PostgreSQL tables to a SEPARATE Parquet lake root
 # (data_lake/canonical_postgres) so the strict-raw lake stays pure.
-#
-# These tables (stock_metric_fact, common_feature_daily_fact, and their
-# catalogs) are intentionally excluded from the raw export but are read
-# directly by the model ETL. See:
-#   tools/raw-parquet-exporter/config/export_canonical_tables.toml
-#   docs/target/01_20_access_return_rank/etl_01_parquet_data_flow_plan.md §5
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 app_dir="${SDC_APP_DIR:-$(cd "$script_dir/.." && pwd)}"

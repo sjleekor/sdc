@@ -45,8 +45,8 @@ uv run krx-collector prices backfill --market kospi
 
 | 모드 | 시작일 결정 | 조회 범위 | 주 용도 |
 |---|---|---|---|
-| **기본** | `--start` (또는 2000-01-01), 각 티커의 `MIN(trade_date)`로 자동 클램핑 | 거래일 캘린더 기준 누락된 모든 영업일을 구간으로 묶어 fetch | 최초 백필, 히스토리 보강, 중간 구멍(holes) 메우기 |
-| **`--incremental`** | 각 티커의 `MAX(trade_date) + 1` (또는 `--start` 중 더 늦은 날) | 시작일 ~ `--end`까지 단일 연속 구간 | 매일 돌리는 catch-up cron |
+| **기본** | `--start` (또는 2000-01-01). `--start`가 없을 때만 각 티커의 `MIN(trade_date)`로 자동 클램핑 | 거래일 캘린더 기준 누락된 모든 영업일을 구간으로 묶어 fetch | 최초 백필, 히스토리 보강, 중간 구멍(holes) 메우기 |
+| **`--incremental`** | 각 티커의 `MAX(trade_date) + 1` (또는 `--start` 중 더 늦은 날). baseline이 없으면 `--new-ticker-start` / `listing_date` / `first_seen_date`로 결정(아래 참고) | 시작일 ~ `--end`까지 단일 연속 구간 | 매일 돌리는 catch-up cron |
 
 **언제 어떤 모드를 써야 하나?**
 
@@ -65,7 +65,40 @@ uv run krx-collector prices backfill --tickers 005930,000660 --incremental
 uv run krx-collector prices backfill --market all
 ```
 
-> **메모**: 두 모드 모두 주말·공휴일은 `query_missing_days` / 단일 구간 fetch 단계에서 자연스럽게 배제됩니다. 또한 기본 모드에서는 `MIN(trade_date)` 클램프 덕분에 005930처럼 pykrx가 제공하지 못하는 과거 구간(예: 2014-01-20 이전)을 매 실행마다 헛스캔하지 않습니다.
+> **메모**: 두 모드 모두 주말·공휴일은 `query_missing_days` / 단일 구간 fetch 단계에서 자연스럽게 배제됩니다. 또한 기본 모드에서는 `MIN(trade_date)` 클램프 덕분에 005930처럼 pykrx가 제공하지 못하는 과거 구간(예: 2014-01-20 이전)을 매 실행마다 헛스캔하지 않습니다. 단, `MIN(trade_date)` 클램프는 **`--start`가 없을 때만** 적용됩니다. 명시적 `--start`는 운영자 의도로 존중되므로, 최근 baseline이 이미 있어도 그보다 이른 히스토리를 다시 채울 수 있습니다(아래 신규 종목 full-history 복구 참고).
+
+#### 신규 상장 종목 (baseline 없는 티커) 시작일 결정
+
+`--incremental` 모드에서 `daily_ohlcv` baseline이 아직 없는 `ACTIVE` 티커는 다음 우선순위로 시작일을 정합니다(운영자가 `PRICE_NEW_TICKER_START`를 설정할 필요 없음):
+
+1. `--new-ticker-start`가 있으면 그대로 사용(클램프하지 않음).
+2. 없으면 `stock_master.listing_date`(FDR 제공) → 자동 시작일; **클램프**.
+3. 없으면 `stock_master.first_seen_date`(수집기가 처음 ACTIVE로 관측한 날) → 자동 시작일; **클램프**.
+4. 셋 다 없으면 baseline-missing 에러로 기록하고 해당 티커만 건너뜁니다.
+
+클램프는 자동 시작일(2·3번)을 `--max-auto-range-days` 가드 윈도(`end - (N-1)`)까지 끌어올려, 긴 과거 백필이 daily critical path에 들어오지 않게 합니다. 클램프된 티커 수는 `ingestion_runs.counts.baseline_clamped_tickers`와 stdout(`- Clamped new-ticker starts: N`)에 집계됩니다. 명시적 `--new-ticker-start`(오래된 날짜)와 오래된 기존 `MAX(trade_date)`는 여전히 `--allow-large-range` 없이는 range 가드에서 실패합니다.
+
+**클램프된 티커의 full-history 복구** — daily chain 밖에서, **비증분(`--incremental` 생략)** 모드로 명시적 `--start`를 주어 실행합니다. §5.7 수정 덕분에 명시적 `--start`는 최근 baseline의 `MIN(trade_date)`로 앞당겨지지 않고 그대로 존중됩니다:
+
+```bash
+# baseline_clamped_tickers로 잡힌 종목을 상장일부터 다시 채우기
+uv run krx-collector prices backfill \
+  --tickers 475040,153890,0164H0 \
+  --start 2026-06-01 --end 2026-07-03
+```
+
+상장일보다 늦게 첫 가격이 찍힌 종목을 찾는 운영자 쿼리:
+
+```sql
+SELECT sm.ticker, sm.name, sm.market, sm.listing_date, sm.first_seen_date,
+       MIN(d.trade_date) AS first_price_date
+FROM stock_master sm
+JOIN daily_ohlcv d ON d.ticker = sm.ticker AND d.market = sm.market
+WHERE sm.status = 'ACTIVE' AND sm.listing_date IS NOT NULL
+GROUP BY sm.ticker, sm.name, sm.market, sm.listing_date, sm.first_seen_date
+HAVING MIN(d.trade_date) > sm.listing_date
+ORDER BY sm.listing_date DESC, sm.ticker;
+```
 
 ### 종목 유니버스 전체 갱신 (Full Refresh)
 
@@ -99,7 +132,7 @@ uv run krx-collector validate
 uv run krx-collector db init
 ```
 
-### 계정/수급/사업 KPI 파이프라인 실행
+### 계정/수급 raw 파이프라인 실행
 
 ```bash
 # 1) OpenDART corp_code 마스터 동기화
@@ -114,24 +147,31 @@ uv run krx-collector dart sync-share-info --tickers 005930 --bsns-years 2025 --r
 # 4) XBRL 원문 파싱
 uv run krx-collector dart sync-xbrl --tickers 005930 --bsns-years 2025 --reprt-codes 11011
 
-# 5) canonical metric 정규화
-uv run krx-collector metrics normalize --tickers 005930 --bsns-years 2025 --reprt-codes 11011
-
-# 6) 수급 raw 적재 (KRX MDC 직접 호출)
+# 5) 수급 raw 적재 (KRX MDC 직접 호출)
 uv run krx-collector flows sync --tickers 005930 --start 2026-04-17 --end 2026-04-17
 
-# 7) 사업 KPI 파일럿 문서 처리
-uv run krx-collector operating process-document \
-  --ticker 009540 \
-  --market KOSPI \
-  --sector-key shipbuilding_defense \
-  --document-type manual_text \
-  --title "조선 방산 수주 샘플" \
-  --document-date 2026-04-19 \
-  --period-end 2025-12-31 \
-  --source-system LOCAL \
-  --text-file tests/fixtures/operating/shipbuilding_defense_sample.txt
+# 6) 공시 접수 이력 적재 (Phase B: 원공시/정정 관계, SUE original-event source)
+uv run krx-collector dart sync-filings --tickers 005930 --years 2025
+
+# 7) 증자(감자) 현황은 sync-share-info에 포함되어 함께 수집됨 (irdsSttus)
 ```
+
+재무 metric 정규화와 common daily fact 생성은 PostgreSQL CLI가 아니라 아래 "Parquet compute 파이프라인"에서 DuckDB 마트로 실행합니다.
+
+`dart sync-filings`는 `dart-backfill-all-years.sh`에 포함돼 있습니다(아래 "OpenDART 전체
+사업연도 백필"). 일일 wrapper에는 아직 없습니다 — 접수 이력은 Phase B 전용이라 매일 돌릴
+이유가 없고, 백필 스크립트가 현재 연도를 매번 다시 받으므로 최신분도 그때 따라옵니다.
+`dart sync-share-info`는 기존 주식수/배당/자사주 raw와 함께
+`dart_capital_change_raw`(증자·감자 현황)도 같은 실행에서 수집합니다.
+
+`dart sync-filings`는 다른 OpenDART 커맨드와 달리 (corp, 연도) 윈도우 하나가 여러 페이지로
+나뉘어 옵니다. `--rate-limit-seconds`는 윈도우 사이와 **페이지 사이 모두**에 적용되므로, 공시가
+많은 발행사에서도 요청 간격이 다른 수집기와 같게 유지됩니다. 대량 백필에서는 이 값을 기본값
+0.2보다 높여(예: 0.5) 평균 호출률을 낮추는 것을 권장합니다.
+
+원공시 receipt를 지정해 XBRL을 다시 받아야 할 때(예: 기존 raw가 정정본만 captured한 경우)는
+`dart backfill-xbrl-receipts --targets-file <jsonl>`을 사용합니다. 어떤 receipt가 백필 대상인지
+찾는 것은 이 커맨드의 범위가 아니며 `dart_filing_receipt_raw` 위에서 별도로 분석해야 합니다.
 
 ### OpenDART 전체 사업연도 백필
 
@@ -158,7 +198,17 @@ uv run krx-collector operating process-document \
 - 종료연도: 현재연도 - 1
 - 보고서 코드: `11011,11012,11013,11014`
 - 재무제표 구분: `CFS,OFS`
-- 처리 순서: 최신 연도부터 `dart sync-financials`, `dart sync-share-info`, `dart sync-xbrl`, `metrics normalize`
+- 처리 순서: 최신 연도부터 `dart sync-financials`, `dart sync-share-info`, `dart sync-xbrl` raw 적재
+- 마지막 단계: `dart sync-filings`로 공시 접수 이력(`dart_filing_receipt_raw`) 적재
+
+접수 이력 단계는 앞의 세 단계와 **연도 축이 다릅니다.** 나머지는 사업연도(bsns_year) 기준인데
+접수 이력은 접수 **달력연도** 기준입니다 — FY2025 사업보고서는 2026년에 접수되므로, 이 단계만
+`end_year`가 아니라 **현재 달력연도까지** 돌립니다. 순서는 과거 연도를 내림차순으로 먼저 하고
+현재 연도를 맨 마지막에 둡니다. 저장된 과거 연도는 이후 실행에서 영원히 skip되지만 현재 연도는
+설계상 매번 다시 받으므로, 마지막에 둬야 가장 신선한 상태로 끝납니다.
+
+접수 이력을 마지막에 두는 이유는 또 있습니다. quota로 exit 75가 나도 다른 모든 consumer가
+쓰는 metric raw는 이미 들어와 있게 됩니다. 접수 이력은 Phase B SUE 원공시 source 전용입니다.
 
 필요하면 Cronicle 이벤트 환경 변수로 범위를 좁힙니다.
 
@@ -168,9 +218,22 @@ SDC_DART_BACKFILL_END_YEAR=2025
 SDC_DART_BACKFILL_INCLUDE_CURRENT_YEAR=0
 SDC_DART_BACKFILL_REPRT_CODES=11011,11012,11013,11014
 SDC_DART_BACKFILL_FS_DIVS=CFS,OFS
+SDC_DART_BACKFILL_FILINGS=1              # 0이면 접수 이력 단계 skip
+SDC_DART_BACKFILL_FILINGS_END_YEAR=2026  # 기본값 = 현재 달력연도
+SDC_DART_BACKFILL_FILINGS_RATE_LIMIT=0.5 # sync-filings에만 적용
 ```
 
 모든 OpenDART API key가 일일 한도에 도달하면 각 OpenDART CLI는 exit code `75`로 종료됩니다. 스크립트는 `set -euo pipefail`이므로 그 지점에서 멈추고, 다음 실행 때 이미 저장된 raw/XBRL은 skip되어 같은 범위를 이어받습니다.
+
+#### 소요 시간 실측 (2026-08-12)
+
+접수 이력 11개 연도를 prod에서 실제로 돌린 결과 **연도당 약 36분**, 전체 약 6시간 30분이었습니다
+(`--rate-limit-seconds 0.5`, API key 9개). 요청 수는 약 32,000건으로 일일 한도(9키 × 20,000)에는
+여유가 있었습니다. `sync-share-info`를 연간보고서(`11011`)만으로 한정한 증자·감자 수집은 3개
+연도에 약 1시간 10분이었습니다.
+
+전체 백필(재무 + 주식수 + XBRL + 접수 이력)은 하루를 넘길 수 있으므로, 다음 날 04:00 OpenDART
+daily chain과 겹치지 않는지 확인하고 필요하면 daily event를 그때까지 disable 상태로 둡니다.
 
 ### KRX 수급 범위 백필
 
@@ -189,9 +252,9 @@ FLOW_START=2026-05-01 FLOW_END=2026-05-31 /home/whi/apps/sdc/bin/flows-backfill-
 
 `flows-backfill-range.sh`는 `krx_marketdata` source lock을 유지하지만, daily KRX wrapper는 기본값에서 source lock을 잡지 않습니다. 따라서 daily event disable이 daily-backfill overlap을 막는 1차 방어선입니다. 자동 schedule guard는 아직 wrapper에 구현하지 않았습니다.
 
-### 공통 시장/거시 feature 갱신
+### 공통 시장/거시 feature raw 갱신
 
-공통 feature layer는 별도 Cronicle 이벤트(예: `sdc_daily_common_features`)로 운영합니다. 기존 가격/수급/계정 파이프라인과 독립적으로 실행해도 되며, 실패 여부는 마지막 `readiness-report --fail-on-not-ready` exit code로 판단합니다.
+공통 feature source sync는 raw 수집 이벤트로 운영합니다. 기존 가격/수급/계정 파이프라인과 독립적으로 실행할 수 있으며, coverage/readiness 판단은 sj2가 아니라 아래 "Parquet compute 파이프라인"에서 수행합니다.
 
 권장 Cronicle command:
 
@@ -204,9 +267,7 @@ FLOW_START=2026-05-01 FLOW_END=2026-05-31 /home/whi/apps/sdc/bin/flows-backfill-
 1. `common seed-catalog --init-schema`
 2. 일간 source sync: `fdr,fred,ecos,krx`, 최근 45일
 3. monthly macro sync: CPI/PPI/M2/CSI, 최근 540일, `--force`
-4. active feature 전체 `build-daily`, 최근 120일
-5. 최근 60일 `coverage-report`
-6. 최근 60일 `readiness-report --required-coverage-ratio 1.0 --fail-on-not-ready`
+4. 파생 daily fact, coverage, readiness는 로컬/compute 노드에서 `bin/parquet-compute-all.sh`로 실행
 
 필요하면 Cronicle 이벤트 환경 변수로 범위를 조정합니다.
 
@@ -270,6 +331,107 @@ ORDER BY started_at DESC;
 - `ingestion_runs` 테이블에 `status = 'partial'`가 반복 기록되면 경고 알림.
 - 유니버스 동기화 시 수집된 종목 수(`record_count`)가 평소 대비 10% 이상 감소하면 알림.
 - 영업일(주말, 공휴일 아님)인데 `daily_ohlcv`에 새로운 행이 전혀 없다면 알림.
+
+## Parquet compute 파이프라인 (수동 실행)
+
+> 리팩터(2026-07): `metrics normalize`·`common build-daily`·`coverage-report`·`readiness-report`
+> 같은 *compute* 단계는 더 이상 sj2(Postgres)에서 돌지 않습니다. sj2는 **raw 수집 전용**이고,
+> 파생 데이터는 사용자가 필요할 때 로컬에서 **parquet → DuckDB 마트**로 재계산합니다. 자동
+> 스케줄러는 없습니다(raw 수집만 sj2가 자동).
+
+### 한 번에 실행
+
+```bash
+# raw 미러 → parquet export → freshness 게이트 → normalize/build-daily 마트 → coverage/readiness
+bin/parquet-compute-all.sh
+
+# feat_*/labels 마트까지 빌드
+bin/parquet-compute-all.sh --features
+```
+
+### 경로 선택 (`--route local` / `--route remote`)
+
+raw 확보는 **두 경로 중 선택**할 수 있습니다(`docs/dev/20260730_refactor_dump/00_dual_route_raw_export_plan.md`).
+`--route`를 생략하면 지금까지와 완전히 동일하게 동작합니다(`local`이 기본값).
+
+| 경로 | 흐름 | 로컬 SSD | 용도 |
+|---|---|---|---|
+| **`local`(기본)** | sj2 → `db sync-remote --full-refresh` → mydb → parquet | ~189 GB 상주 | 반복 재계산, 오프라인, 재현 가능한 재읽기 |
+| **`remote`** | sj2 → parquet 직접 캡처 | 0 GB(출력만) | 1회성 최신 캡처, 디스크 절약, 전체적으로 더 빠름(90분 미러 갱신을 생략) |
+
+```bash
+# 직접 캡처 경로 (sj2 SSH 터널 필요 시 --ssh-host 전달)
+bin/parquet-compute-all.sh --route remote --ssh-host sj2-server
+```
+
+- `remote` 경로는 raw-parquet-exporter 바이너리를 손대지 않고 `db with-remote-dsn`으로 감싸
+  `SDC_REMOTE_DSN`을 export 하위 프로세스에만 주입합니다. 자격증명은 `stock_data_collector_secrets/db_info`에서
+  읽습니다(`db sync-remote`와 동일).
+- **캡처 격리 수준.** 정책은 여전히 테이블 export 시점별 read-committed입니다(공유 스냅샷 아님).
+  raw 테이블이 `ON CONFLICT ... DO UPDATE`로 기존 행도 갱신하므로, export가 수집(Cronicle) 창과
+  겹치면 한 테이블 안에 서로 다른 시점의 값이 섞일 수 있습니다. 그래서 결과물을 "스냅샷"이 아니라
+  **"캡처(capture)"**라고 부릅니다. 가능하면 Cronicle 체인(18:30/20:30/23:30/04:00 KST)과 겹치지 않는
+  시각에 실행하세요. 캡처 창과 수집 창이 겹쳤는지는 `_SUCCESS.json`의 `collector_overlap`에 기록됩니다.
+- `--route remote --features`는 아직 차단되어 있습니다 — 모델별 dataset 경로(`dataset_dir()`)가 아직
+  `source=`로 분리되지 않아, remote 캡처로 만든 feature/label 마트가 local 캡처 결과를 같은
+  `--snapshot-date`에서 덮어쓸 수 있기 때문입니다.
+
+### `_SUCCESS.json` 완료 표식
+
+`bin/raw-parquet-export-all.sh`는 설정된 13개 테이블이 **전부** skip/export/resume으로 완료된 뒤에만
+`data_lake/raw_postgres/snapshot_date=<D>/source=<S>/_manifests/_SUCCESS.json`을 원자적으로 씁니다.
+`research.etl.compute_all`은 이 표식이 없거나 테이블 목록이 기대치(13개)와 다르면 **거부**합니다 —
+export가 절반만 끝난 레이크로 조용히 계산이 도는 것을 막기 위함입니다.
+
+긴급하게 우회해야 하면(예: 부분 이력만으로 먼저 확인하고 싶을 때) `--allow-incomplete-lake`를 씁니다.
+기본은 off이고, 쓰면 stderr에 경고가 남습니다.
+
+```bash
+uv run python -m research.etl.compute_all --snapshot-date 2026-07-30 --allow-incomplete-lake
+```
+
+### export 실패 후 재실행
+
+한 테이블이라도 실패하면 `_SUCCESS.json`은 쓰이지 않고 스크립트는 실패한 테이블 목록과 함께
+non-zero로 종료합니다. **같은 `--snapshot-date`/`--route`로 다시 실행**하면 됩니다 — 이미 완료된
+테이블(유효한 manifest 존재)은 skip, 도중에 끊긴 테이블(체크포인트 1개, `raw_id_range`/`date_month`
+전략만)은 `resume`으로 이어받고, resume을 지원하지 않는 나머지 7개 테이블(`full_table`/
+`snapshot_items` 전략)은 저렴하므로 그냥 다시 `--force` export합니다. 한 테이블에 미완료 체크포인트가
+2개 이상 쌓여 있으면(반복 중단) 자동 판단을 포기하고 에러를 내며 `--force-table <테이블명>`을
+요구합니다.
+
+### 단계 (각 단계는 게이트)
+
+1. `db sync-remote --full-refresh`(`--route local`) 또는 sj2 직접 캡처(`--route remote`) — raw +
+   `common_feature_series` 확보.
+2. `bin/raw-parquet-export-all.sh` — 확보한 DB → `data_lake/raw_postgres/<snapshot>/...` parquet.
+3. **freshness 게이트** — raw 입력이 충분히 신선한지(`common_feature_observation_raw` 최신 관측이
+   series별 허용 lag 이내) 확인. 미달 시 non-zero exit + stderr 요약 → compute가 stale raw 위에서
+   도는 것을 차단.
+4. **normalize/build-daily 마트** — `stock_metric_fact` / `common_feature_daily_fact`를 raw에서 재계산
+   (`research/etl/marts/`). 룰·카탈로그는 `krx_collector.definitions` 코드 정의에서 직접 읽습니다.
+5. **coverage / readiness 게이트** — `common_feature_daily_fact` 마트 위에서 커버리지/준비도 체크.
+   미달 시 non-zero exit + stderr 요약.
+
+### 부분 실행
+
+```bash
+# 이미 미러/export된 스냅샷을 재계산만 (sync/export 건너뜀)
+bin/parquet-compute-all.sh --skip-sync --snapshot-date 2026-06-19
+
+# 특정 단계부터: sync|export|freshness|marts|reports|features
+bin/parquet-compute-all.sh --from-step marts --snapshot-date 2026-06-19
+
+# readiness 임계값 조정(부분 이력 스냅샷에서 게이트 완화)
+bin/parquet-compute-all.sh --from-step reports --required-coverage-ratio 0.0
+```
+
+### 게이트 실패 시
+
+대화형 실행이므로 별도 notifier가 없습니다. 스크립트가 non-zero로 종료하며 stderr에 사람이 읽는
+요약(어떤 series/feature가 왜 미달인지)을 출력합니다. freshness 실패면 raw 수집(sj2)을 먼저
+확인하고, readiness 실패면 해당 feature의 커버리지/누락/PIT 위반 내역을 보고 재수집 또는
+스냅샷/임계값을 조정해 재실행하세요.
 
 ## 트러블슈팅
 

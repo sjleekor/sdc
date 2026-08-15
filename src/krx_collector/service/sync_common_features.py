@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import date, timedelta
@@ -34,6 +35,8 @@ KrxTradingDayProvider = Callable[[date, date], Sequence[date]]
 _STRICT_DAILY_COVERAGE_SOURCES = {Source.KRX, Source.PYKRX}
 _RELAXED_DAILY_COVERAGE_MIN_NUMERATOR = 9
 _RELAXED_DAILY_COVERAGE_MIN_DENOMINATOR = 10
+_MARKET_BREADTH_KIND = "market_breadth"
+_MARKET_BREADTH_PROGRESS_INTERVAL = 50
 
 
 def sync_common_features(
@@ -161,13 +164,31 @@ def sync_common_features(
                 )
                 continue
 
+            if _is_krx_market_breadth_series(series):
+                _sync_market_breadth_series_by_day(
+                    provider=provider,
+                    storage=storage,
+                    series=series,
+                    start=effective_start,
+                    end=end,
+                    force=force,
+                    rate_limit_seconds=rate_limit_seconds,
+                    krx_trading_days=calendar,
+                    result=result,
+                )
+                continue
+
             skip_existing_coverage = not incremental or lookback_days == 0
-            if skip_existing_coverage and not force and _has_existing_coverage(
-                storage=storage,
-                series=series,
-                start=effective_start,
-                end=end,
-                krx_trading_days=calendar,
+            if (
+                skip_existing_coverage
+                and not force
+                and _has_existing_coverage(
+                    storage=storage,
+                    series=series,
+                    start=effective_start,
+                    end=end,
+                    krx_trading_days=calendar,
+                )
             ):
                 result.requests_skipped += 1
                 logger.info(
@@ -182,6 +203,17 @@ def sync_common_features(
 
             result.requests_attempted += 1
             request_key = f"{series.source.value}:{series.series_id}"
+            logger.info(
+                "Common feature series fetch starting: source=%s series=%s "
+                "range=%s..%s days=%d incremental=%s lookback_days=%d",
+                series.source.value,
+                series.series_id,
+                effective_start.isoformat(),
+                end.isoformat(),
+                auto_range_days,
+                incremental,
+                lookback_days,
+            )
             fetch_result = call_with_retry(
                 lambda: provider.fetch_series(series=series, start=effective_start, end=end),
                 request_label=request_key,
@@ -198,7 +230,22 @@ def sync_common_features(
                 result.errors[series.series_id] = fetch_result.error
             elif fetch_result.no_data:
                 result.no_data_requests += 1
+                logger.info(
+                    "Common feature series returned no data: source=%s series=%s " "range=%s..%s",
+                    series.source.value,
+                    series.series_id,
+                    effective_start.isoformat(),
+                    end.isoformat(),
+                )
             elif fetch_result.records:
+                logger.info(
+                    "Common feature series fetched: source=%s series=%s " "range=%s..%s records=%d",
+                    series.source.value,
+                    series.series_id,
+                    effective_start.isoformat(),
+                    end.isoformat(),
+                    len(fetch_result.records),
+                )
                 observations = [
                     _with_service_availability(
                         series=series,
@@ -211,6 +258,13 @@ def sync_common_features(
                 result.upsert.updated += upsert.updated
                 result.upsert.errors += upsert.errors
                 result.rows_upserted += upsert.updated
+                logger.info(
+                    "Common feature series upserted: source=%s series=%s rows=%d errors=%d",
+                    series.source.value,
+                    series.series_id,
+                    upsert.updated,
+                    upsert.errors,
+                )
 
             sleep_with_jitter(rate_limit_seconds, jitter_ratio=0.2)
 
@@ -258,6 +312,137 @@ def _default_krx_trading_days() -> KrxTradingDayProvider:
         return get_trading_days(start, end, holidays=holidays)
 
     return calendar
+
+
+def _is_krx_market_breadth_series(series: CommonFeatureSeries) -> bool:
+    return (
+        series.source == Source.KRX
+        and str(series.endpoint_params.get("kind") or "").strip() == _MARKET_BREADTH_KIND
+    )
+
+
+def _sync_market_breadth_series_by_day(
+    *,
+    provider: CommonFeatureProvider,
+    storage: Storage,
+    series: CommonFeatureSeries,
+    start: date,
+    end: date,
+    force: bool,
+    rate_limit_seconds: float,
+    krx_trading_days: KrxTradingDayProvider,
+    result: CommonFeatureSyncResult,
+) -> None:
+    trading_days = list(krx_trading_days(start, end))
+    if not trading_days:
+        result.requests_skipped += 1
+        logger.info(
+            "Skipping KRX market breadth series with no trading days: series=%s range=%s..%s",
+            series.series_id,
+            start.isoformat(),
+            end.isoformat(),
+        )
+        return
+
+    existing_dates = (
+        set()
+        if force
+        else storage.get_common_feature_observation_dates(
+            source=series.source,
+            series_id=series.series_id,
+            start=start,
+            end=end,
+        )
+    )
+    pending_days = [trade_date for trade_date in trading_days if trade_date not in existing_dates]
+    result.requests_skipped += len(existing_dates.intersection(trading_days))
+
+    logger.info(
+        "KRX market breadth daily sync starting: series=%s range=%s..%s "
+        "trading_days=%d existing=%d pending=%d force=%s",
+        series.series_id,
+        start.isoformat(),
+        end.isoformat(),
+        len(trading_days),
+        len(existing_dates.intersection(trading_days)),
+        len(pending_days),
+        force,
+    )
+
+    if not pending_days:
+        logger.info(
+            "Skipping KRX market breadth series with complete stored coverage: "
+            "series=%s range=%s..%s",
+            series.series_id,
+            start.isoformat(),
+            end.isoformat(),
+        )
+        return
+
+    started_at = time.monotonic()
+    rows_before = result.rows_upserted
+    errors_before = len(result.errors)
+    no_data_before = result.no_data_requests
+
+    for index, trade_date in enumerate(pending_days, start=1):
+        result.requests_attempted += 1
+        request_key = f"{series.source.value}:{series.series_id}:{trade_date.isoformat()}"
+        fetch_result = call_with_retry(
+            lambda trade_date=trade_date: provider.fetch_series(
+                series=series,
+                start=trade_date,
+                end=trade_date,
+            ),
+            request_label=request_key,
+            logger_instance=logger,
+            should_retry_result=lambda item: item.retryable,
+        )
+
+        if fetch_result.error:
+            logger.warning(
+                "KRX market breadth daily sync failed for %s: %s",
+                request_key,
+                fetch_result.error,
+            )
+            result.errors[request_key] = fetch_result.error
+        elif fetch_result.no_data:
+            result.no_data_requests += 1
+        elif fetch_result.records:
+            observations = [
+                _with_service_availability(
+                    series=series,
+                    observation=observation,
+                    krx_trading_days=krx_trading_days,
+                )
+                for observation in fetch_result.records
+            ]
+            upsert = storage.upsert_common_feature_observations(observations)
+            result.upsert.updated += upsert.updated
+            result.upsert.errors += upsert.errors
+            result.rows_upserted += upsert.updated
+            logger.info(
+                "KRX market breadth daily row upserted: series=%s date=%s rows=%d errors=%d",
+                series.series_id,
+                trade_date.isoformat(),
+                upsert.updated,
+                upsert.errors,
+            )
+
+        if index % _MARKET_BREADTH_PROGRESS_INTERVAL == 0 or index == len(pending_days):
+            logger.info(
+                "KRX market breadth daily progress: series=%s processed=%d/%d "
+                "last_trade_date=%s rows_upserted=%d no_data=%d errors=%d elapsed=%.1fs",
+                series.series_id,
+                index,
+                len(pending_days),
+                trade_date.isoformat(),
+                result.rows_upserted - rows_before,
+                result.no_data_requests - no_data_before,
+                len(result.errors) - errors_before,
+                time.monotonic() - started_at,
+            )
+
+        sleep_with_jitter(rate_limit_seconds, jitter_ratio=0.2)
 
 
 def _effective_start(start: date, series: CommonFeatureSeries) -> date:
