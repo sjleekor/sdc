@@ -10,6 +10,7 @@ import logging
 from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import psycopg2.extras
 
@@ -45,6 +46,33 @@ from krx_collector.infra.calendar.trading_days import get_trading_days
 from krx_collector.infra.db_postgres.connection import get_connection
 
 logger = logging.getLogger(__name__)
+
+
+def _execute_values_counted(
+    cur: Any,
+    statement: str,
+    args: list,
+    *,
+    page_size: int = 1000,
+    template: str | None = None,
+) -> int:
+    """``execute_values`` whose returned count is the total, not the last page.
+
+    psycopg2 issues one statement per page, so ``cur.rowcount`` afterwards
+    reports only the FINAL page: a 1,704-row batch at ``page_size=1000`` comes
+    back as 704.  Callers compare that number against what they fetched to
+    decide whether a write landed, so the undercount is not cosmetic — it fails
+    every slice larger than a page.  Found 2026-08-15 when the market-cap
+    reconciliation check reported "fetched 1702, stored 702" for every KOSDAQ
+    slice.
+    """
+    total = 0
+    for offset in range(0, len(args), page_size):
+        page = args[offset : offset + page_size]
+        extra = {} if template is None else {"template": template}
+        psycopg2.extras.execute_values(cur, statement, page, page_size=len(page), **extra)
+        total += cur.rowcount
+    return total
 
 
 class PostgresStorage:
@@ -122,7 +150,7 @@ class PostgresStorage:
                     )
                     for s in snapshot.records
                 ]
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO stock_master_snapshot_items (
@@ -250,29 +278,74 @@ class PostgresStorage:
                     )
                     for s in snapshot.records
                 ]
-                page_size = 1000
-                for offset in range(0, len(items), page_size):
-                    page = items[offset : offset + page_size]
-                    psycopg2.extras.execute_values(
-                        cur,
-                        """
-                        INSERT INTO stock_master_snapshot_items (
-                            snapshot_id,
-                            ticker,
-                            market,
-                            name,
-                            status,
-                            listing_date
-                        )
-                        VALUES %s
-                        ON CONFLICT (snapshot_id, ticker, market) DO NOTHING
-                        """,
-                        page,
-                        page_size=len(page),
+                result.inserted = _execute_values_counted(
+                    cur,
+                    """
+                    INSERT INTO stock_master_snapshot_items (
+                        snapshot_id,
+                        ticker,
+                        market,
+                        name,
+                        status,
+                        listing_date
                     )
-                    result.inserted += cur.rowcount
+                    VALUES %s
+                    ON CONFLICT (snapshot_id, ticker, market) DO NOTHING
+                    """,
+                    items,
+                )
 
         return result
+
+    def get_universe_as_of(
+        self,
+        as_of: date,
+        market: Market | None = None,
+    ) -> tuple[date, set[str]] | None:
+        """Return the universe listed on or before ``as_of``, from snapshots."""
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT snapshot_id, as_of_date
+                    FROM stock_master_snapshot
+                    WHERE as_of_date <= %s
+                    ORDER BY as_of_date DESC, fetched_at DESC
+                    LIMIT 1
+                    """,
+                    (as_of,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                snapshot_id, snapshot_date = row
+
+                query = "SELECT ticker FROM stock_master_snapshot_items WHERE snapshot_id = %s"
+                params: list[object] = [snapshot_id]
+                if market is not None:
+                    query += " AND market = %s"
+                    params.append(market.value)
+
+                cur.execute(query, params)
+                return snapshot_date, {r[0] for r in cur.fetchall()}
+
+    def get_snapshot_record_counts(
+        self,
+        limit: int = 24,
+    ) -> list[tuple[date, Source, int]]:
+        """Return recent snapshot sizes, newest first."""
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT as_of_date, source, record_count
+                    FROM stock_master_snapshot
+                    ORDER BY as_of_date DESC, fetched_at DESC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+                return [(r[0], Source(r[1]), r[2]) for r in cur.fetchall()]
 
     def get_existing_snapshot_dates(self, source: Source) -> set[date]:
         """Return ``as_of_date`` values already captured for *source*."""
@@ -409,7 +482,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
         return result
 
@@ -473,7 +545,6 @@ class PostgresStorage:
             return UpsertResult()
 
         result = UpsertResult()
-        page_size = 1000
 
         with get_connection(self._dsn) as conn:
             with conn.cursor() as cur:
@@ -490,30 +561,26 @@ class PostgresStorage:
                     for p in profiles
                 ]
 
-                for offset in range(0, len(args), page_size):
-                    page = args[offset : offset + page_size]
-                    psycopg2.extras.execute_values(
-                        cur,
-                        """
-                        UPDATE dart_corp_master AS m SET
-                            induty_code        = v.induty_code,
-                            corp_cls           = v.corp_cls,
-                            est_dt             = v.est_dt,
-                            acc_mt             = v.acc_mt,
-                            profile_raw        = v.profile_raw,
-                            profile_fetched_at = v.profile_fetched_at,
-                            updated_at         = now()
-                        FROM (VALUES %s) AS v (
-                            corp_code, induty_code, corp_cls, est_dt, acc_mt,
-                            profile_raw, profile_fetched_at
-                        )
-                        WHERE m.corp_code = v.corp_code
-                        """,
-                        page,
-                        template=("(%s, %s, %s, %s::date, %s, %s::jsonb, %s::timestamptz)"),
-                        page_size=len(page),
+                result.updated = _execute_values_counted(
+                    cur,
+                    """
+                    UPDATE dart_corp_master AS m SET
+                        induty_code        = v.induty_code,
+                        corp_cls           = v.corp_cls,
+                        est_dt             = v.est_dt,
+                        acc_mt             = v.acc_mt,
+                        profile_raw        = v.profile_raw,
+                        profile_fetched_at = v.profile_fetched_at,
+                        updated_at         = now()
+                    FROM (VALUES %s) AS v (
+                        corp_code, induty_code, corp_cls, est_dt, acc_mt,
+                        profile_raw, profile_fetched_at
                     )
-                    result.updated += cur.rowcount
+                    WHERE m.corp_code = v.corp_code
+                    """,
+                    args,
+                    template="(%s, %s, %s, %s::date, %s, %s::jsonb, %s::timestamptz)",
+                )
 
         return result
 
@@ -771,7 +838,7 @@ class PostgresStorage:
                     for record in deduped_records.values()
                 ]
 
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO dart_financial_statement_raw (
@@ -837,7 +904,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
         return result
 
@@ -889,7 +955,7 @@ class PostgresStorage:
                     for record in deduped_records.values()
                 ]
 
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO dart_share_count_raw (
@@ -938,7 +1004,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
         return result
 
@@ -995,7 +1060,7 @@ class PostgresStorage:
                     for record in deduped_records.values()
                 ]
 
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO dart_shareholder_return_raw (
@@ -1048,7 +1113,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
         return result
 
@@ -1097,7 +1161,7 @@ class PostgresStorage:
                     for record in deduped_records.values()
                 ]
 
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO dart_capital_change_raw (
@@ -1137,7 +1201,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
         return result
 
@@ -1172,7 +1235,7 @@ class PostgresStorage:
                     for record in deduped_records.values()
                 ]
 
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO dart_filing_receipt_raw (
@@ -1208,7 +1271,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
         return result
 
@@ -1244,7 +1306,7 @@ class PostgresStorage:
                     for record in deduped_records.values()
                 ]
 
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO dart_xbrl_document (
@@ -1274,7 +1336,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
         return result
 
@@ -1330,7 +1391,7 @@ class PostgresStorage:
                     for record in deduped_records.values()
                 ]
 
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO dart_xbrl_fact_raw (
@@ -1384,7 +1445,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
         return result
 
@@ -1425,7 +1485,7 @@ class PostgresStorage:
                     for record in deduped_records.values()
                 ]
 
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO krx_security_flow_raw (
@@ -1452,7 +1512,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
         return result
 
@@ -1567,7 +1626,7 @@ class PostgresStorage:
                     for record in deduped_records.values()
                 ]
 
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO operating_source_document (
@@ -1606,7 +1665,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
         return result
 
@@ -1651,7 +1709,7 @@ class PostgresStorage:
                     for record in deduped_records.values()
                 ]
 
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO operating_metric_fact (
@@ -1687,7 +1745,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
         return result
 
@@ -1710,7 +1767,7 @@ class PostgresStorage:
                     )
                     for record in records
                 ]
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO metric_catalog (
@@ -1728,7 +1785,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
         return result
 
     def replace_metric_mapping_rules(self, records: list[MetricMappingRule]) -> UpsertResult:
@@ -1762,7 +1818,7 @@ class PostgresStorage:
                     )
                     for record in records
                 ]
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO metric_mapping_rule (
@@ -1807,7 +1863,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
         return result
 
     def get_metric_mapping_rules(self) -> list[MetricMappingRule]:
@@ -2420,7 +2475,7 @@ class PostgresStorage:
                     )
                     for record in deduped_records.values()
                 ]
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO stock_metric_fact (
@@ -2461,7 +2516,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
         return result
 
     def delete_stock_metric_facts_for_inactive_rules(
@@ -2635,7 +2689,7 @@ class PostgresStorage:
                     )
                     for record in deduped_records.values()
                 ]
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO common_feature_series (
@@ -2684,7 +2738,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
         return result
 
     def get_common_feature_series(
@@ -2783,7 +2836,7 @@ class PostgresStorage:
                     )
                     for record in deduped_records.values()
                 ]
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO common_feature_observation_raw (
@@ -2817,7 +2870,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
         return result
 
     def count_common_feature_observations(
@@ -2985,7 +3037,7 @@ class PostgresStorage:
                     )
                     for record in deduped_records.values()
                 ]
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO common_feature_catalog (
@@ -3012,7 +3064,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
                 feature_codes = list(deduped_records)
                 cur.execute(
@@ -3123,7 +3174,7 @@ class PostgresStorage:
                     )
                     for record in deduped_records.values()
                 ]
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO common_feature_daily_fact (
@@ -3154,7 +3205,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
         return result
 
     def get_common_feature_daily_facts(
@@ -3269,7 +3319,7 @@ class PostgresStorage:
                     for b in bars
                 ]
 
-                psycopg2.extras.execute_values(
+                result.updated = _execute_values_counted(
                     cur,
                     """
                     INSERT INTO daily_ohlcv (
@@ -3297,7 +3347,6 @@ class PostgresStorage:
                     args,
                     page_size=1000,
                 )
-                result.updated = cur.rowcount
 
         return result
 
@@ -3367,10 +3416,7 @@ class PostgresStorage:
                 # so an under-count is not cosmetic here: it would fail every
                 # slice over 1,000 rows.  (``upsert_daily_bars`` has the same
                 # pattern; there the count is only reported, not acted on.)
-                for offset in range(0, len(args), page_size):
-                    page = args[offset : offset + page_size]
-                    psycopg2.extras.execute_values(cur, statement, page, page_size=len(page))
-                    result.updated += cur.rowcount
+                result.updated = _execute_values_counted(cur, statement, args, page_size=page_size)
 
         return result
 

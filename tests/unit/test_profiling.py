@@ -597,3 +597,58 @@ def test_markdown_renderer_splits_drilldown(tmp_path):
     assert "code_beta_slash.md" in names
     table_md = (tmp_path / "tables" / "t.md").read_text()
     assert "Drilldown" in table_md and "code_alpha.md" in table_md
+
+
+# ---------------------------------------------------------------------------
+# Observability checks added 2026-08-15 (O group)
+#
+# Every defect found that day was cheaply detectable and nothing was looking:
+# spurious split returns had been accruing for four months, and survivorship
+# coverage had never been measured at all. These assertions pin the checks to
+# the tables where the defects actually live, so removing one is deliberate.
+# ---------------------------------------------------------------------------
+
+
+def test_impossible_return_check_is_wired_to_the_price_table():
+    spec = catalog.get_spec("daily_ohlcv")
+    assert "impossible_daily_return" in spec.domain_checks
+
+
+def test_pit_universe_coverage_covers_every_ticker_day_table():
+    # Survivorship is not specific to prices: any table keyed by
+    # (ticker, trade_date) inherits it from the same active-only target rule.
+    for table in ("daily_ohlcv", "daily_market_cap", "krx_security_flow_raw"):
+        spec = catalog.get_spec(table)
+        assert "pit_universe_coverage" in spec.domain_checks, table
+
+
+def test_zero_yield_check_is_wired_to_the_audit_table():
+    spec = catalog.get_spec("ingestion_runs")
+    assert "run_zero_yield" in spec.domain_checks
+
+
+def test_capital_change_direction_balance_is_wired():
+    # Known issue I3: the decrease side of the isu_dcrs_stle catalogue never
+    # matched, which is indistinguishable from "decreases never happen".
+    spec = catalog.get_spec("dart_capital_change_raw")
+    assert "capital_change_direction_balance" in spec.domain_checks
+
+
+def test_new_checks_declare_a_note_explaining_how_to_read_them():
+    # A count with no interpretation gets ignored. Each of these reports a
+    # number that is not self-explanatory (a residual is expected for
+    # impossible returns; missing_pct is bias rather than sparsity), so the
+    # builder must carry that context.
+    import inspect
+
+    from krx_collector.infra.db_postgres import profiling_domain_checks as dc
+
+    for check_id in (
+        "impossible_daily_return",
+        "pit_universe_coverage",
+        "run_zero_yield",
+        "capital_change_direction_balance",
+    ):
+        builder = dc.DOMAIN_CHECK_BUILDERS[check_id]
+        source = inspect.getsource(builder)
+        assert "note=" in source, check_id

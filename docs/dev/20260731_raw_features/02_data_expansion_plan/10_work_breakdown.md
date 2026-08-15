@@ -388,6 +388,34 @@ ledger ────────────→ N6 (16만 호출 재개)
 
 ---
 
+## O 묶음 — 탐지 (신규 축, 2026-08-15)
+
+이번 세션 결함이 **전부 값싸게 탐지 가능한데 아무도 안 보고 있었다.** 개별 결함을 고치는
+것보다 근본적인 건 11번째 결함이 사람이 우연히 보지 않아도 드러나게 하는 것이다.
+
+- [x] **O-1 `impossible_daily_return`** — 가격제한폭 ±30% 초과. `daily_ohlcv`에 등록.
+      실행 확인: 2016 구간 1건 검출
+- [x] **O-2 `pit_universe_coverage`** — as-of 스냅샷 대비 커버리지.
+      `daily_ohlcv`·`daily_market_cap`·`krx_security_flow_raw`에 등록.
+      **손으로 잰 14.216%~13.911%를 정확히 재현**
+- [x] **O-3 `validate`를 as-of 유니버스 기준으로** — `get_universe_as_of()` 추가.
+      오늘 날짜는 as-of가 오늘일 뿐인 특수 케이스가 됐고, 스냅샷이 없으면 active로 폴백.
+      **실행 확인: 2016-06-30에 286/2,056 검출** (이전 코드는 0을 보고했다)
+  - [x] `universe_size`와 `universe_source`를 counts/params에 기록 —
+        없으면 `missing=0`이 "완전"인지 "빈 유니버스"인지 구분이 안 된다
+- [x] **O-4 universe count drift** — `validate.py`의 `# TODO` 구현.
+      **source별로 비교**한다(백필 스냅샷과 라이브는 수집 경로가 다르다). `--universe-drift-pct`
+- [x] **O-5 `run_zero_yield`** — `success`인데 rows 0인 run 비율. `ingestion_runs`에 등록.
+      요청을 시도한 run만 센다(idle skip 제외)
+- [x] **O-6 `_execute_values_counted`** — `execute_values(page_size)` 뒤 `cur.rowcount`가
+      **마지막 페이지만** 반환하는 버그. **19개 호출 지점 + 손으로 페이징하던 3곳**을
+      공용 헬퍼로 교체. 헬퍼 불변식 테스트 4건
+- [x] **O-7 `capital_change_direction_balance`** — I3 부류.
+      "카탈로그가 조용히 매칭 실패"와 "그 범주가 실제로 없음"이 구분되게
+- [ ] **O-8 `profile`을 정기 스케줄에 편입** — 지금 수동 wrapper뿐. **D 그룹 의존**
+
+---
+
 ## S 묶음 — 생존편향 (신규 축, 2026-08-15 발견)
 
 N6 대상 집합을 확인하다 나왔다. 측정: [`poc/survivorship_gap.md`](poc/survivorship_gap.md)

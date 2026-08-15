@@ -619,6 +619,50 @@ class Storage(Protocol):
         """
         ...
 
+    def get_universe_as_of(
+        self,
+        as_of: date,
+        market: Market | None = None,
+    ) -> tuple[date, set[str]] | None:
+        """Return the universe that was listed on or before ``as_of``.
+
+        The point-in-time counterpart to :meth:`get_active_stocks`.  Validating
+        a past date against today's active set cannot see a gap, because the
+        tickers that are missing are exactly the ones that have since delisted
+        and therefore left the active set too — the same blind spot that leaves
+        13.9% of the 2016 cross-section uncollected
+        (`poc/survivorship_gap.md`).
+
+        Args:
+            as_of: Reference date.
+            market: Optional market filter.
+
+        Returns:
+            ``(snapshot_as_of_date, tickers)`` for the newest snapshot at or
+            before ``as_of``, or ``None`` when no snapshot covers that date.
+            The snapshot's own date is returned so the caller can report how
+            stale the comparison basis is.
+        """
+        ...
+
+    def get_snapshot_record_counts(
+        self,
+        limit: int = 24,
+    ) -> list[tuple[date, Source, int]]:
+        """Return recent snapshot sizes, newest first.
+
+        Feeds the universe-drift check: a sudden change in how many tickers a
+        snapshot holds is a collection failure long before it is a market
+        event.
+
+        Args:
+            limit: Maximum snapshots to return.
+
+        Returns:
+            ``(as_of_date, source, record_count)`` newest first.
+        """
+        ...
+
     def get_existing_snapshot_dates(self, source: Source) -> set[date]:
         """Return ``as_of_date`` values that already have a snapshot from *source*.
 

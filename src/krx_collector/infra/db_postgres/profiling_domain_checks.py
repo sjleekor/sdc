@@ -68,6 +68,144 @@ def _ohlc_identity(
     )
 
 
+def _impossible_daily_return(
+    runner: PostgresProfileQueryRunner, spec: TableProfileSpec, title: str
+) -> CheckResult:
+    """daily_ohlcv: per-year count of one-day returns that cannot happen.
+
+    KRX caps a session's move at +/-30%, so a stored one-day ratio outside
+    [2/3, 3/2] is not a market event.  In practice it means the adjusted series
+    was restated upstream (naver re-adjusts the whole history on a split) while
+    the stored rows were not, leaving a discontinuity at the corporate-action
+    date.  Incremental collection cannot see this: it only appends after
+    ``MAX(trade_date)``.
+
+    Measured 2026-08-15: 354 rows overall, 279 of them after the 2026-04-10
+    backfill, with ratios clustering on exactly 5.0 / 10.0 / 2.0.  The defect
+    had been accruing for four months with nothing looking for it, which is why
+    this check exists (``poc/n1_adjusted_price_vintage.md``).
+
+    A residual is expected and is not the same defect: reverse splits and
+    capital reductions are legitimately unadjusted by the upstream source.
+    Read the trend, not a zero.
+    """
+    needed = ("ticker", "market", "trade_date", "close")
+    if any(not runner._has_column(spec.table, c) for c in needed):
+        return CheckResult(
+            kind=CheckKind.PIT_VALIDITY,
+            title=title,
+            warning="ticker/market/trade_date/close absent from schema",
+        )
+    query = sql.SQL(
+        "WITH stepped AS ("
+        "  SELECT {trade_date} AS trade_date, {close} AS close, "
+        "         LAG({close}) OVER (PARTITION BY {ticker}, {market} "
+        "                            ORDER BY {trade_date}) AS prev_close "
+        "  FROM {tbl}"
+        "), jumps AS ("
+        "  SELECT trade_date, close::float8 / prev_close AS ratio "
+        "  FROM stepped WHERE prev_close > 0"
+        ") "
+        "SELECT EXTRACT(YEAR FROM trade_date)::int AS year, "
+        "COUNT(*) FILTER (WHERE ratio > 1.5 OR ratio < 0.6667) AS impossible_moves, "
+        "COUNT(*) FILTER (WHERE ratio > 1.5) AS up_moves, "
+        "COUNT(*) FILTER (WHERE ratio < 0.6667) AS down_moves, "
+        "COUNT(*) AS observed_returns "
+        "FROM jumps GROUP BY 1 "
+        "HAVING COUNT(*) FILTER (WHERE ratio > 1.5 OR ratio < 0.6667) > 0 "
+        "ORDER BY 1"
+    ).format(
+        trade_date=sql.Identifier("trade_date"),
+        close=sql.Identifier("close"),
+        ticker=sql.Identifier("ticker"),
+        market=sql.Identifier("market"),
+        tbl=sql.Identifier(spec.table),
+    )
+    rows, rendered = runner._run_sql(query)
+    return CheckResult(
+        kind=CheckKind.PIT_VALIDITY,
+        title=title,
+        rows=rows,
+        sql=rendered,
+        note=(
+            "KRX daily limit is +/-30%, so these are data artefacts, not market "
+            "moves. up_moves are usually reverse splits / capital reductions, "
+            "which the upstream adjusted series may legitimately leave alone; "
+            "down_moves are usually a stale adjustment and are repairable with "
+            "`prices backfill --refetch`."
+        ),
+    )
+
+
+def _pit_universe_coverage(
+    runner: PostgresProfileQueryRunner, spec: TableProfileSpec, title: str
+) -> CheckResult:
+    """Coverage against the universe that was actually listed on each date.
+
+    ``get_active_stocks()`` answers "who is listed now", and every collector —
+    including ``validate`` — resolves its targets that way.  So a company that
+    delists disappears from the target set and its earlier rows are never
+    collected, while nothing in the pipeline reports a gap: the row count keeps
+    rising and the active-ticker coverage stays at 100%.
+
+    This check asks the only question that exposes it — of the tickers that
+    were listed on a past date, how many have a row?  Measured 2026-08-15
+    against backfilled month-end snapshots: 2,056 listed on 2016-06-30, 286
+    (13.9%) with no price row, and all 286 delisted names
+    (``poc/survivorship_gap.md``).
+
+    Requires ``universe snapshot backfill`` to have run; without historical
+    snapshots there is nothing to compare against and the check skips.
+    """
+    needed = ("ticker", "trade_date")
+    if any(not runner._has_column(spec.table, c) for c in needed):
+        return CheckResult(
+            kind=CheckKind.FK_INTEGRITY,
+            title=title,
+            warning="ticker/trade_date absent from schema",
+        )
+    if not runner.describe_schema("stock_master_snapshot_items"):
+        return CheckResult(
+            kind=CheckKind.FK_INTEGRITY,
+            title=title,
+            warning="stock_master_snapshot_items table absent",
+        )
+    query = sql.SQL(
+        "WITH universe AS ("
+        "  SELECT s.as_of_date, i.ticker "
+        "  FROM stock_master_snapshot_items i "
+        "  JOIN stock_master_snapshot s ON s.snapshot_id = i.snapshot_id"
+        ") "
+        "SELECT u.as_of_date, "
+        "COUNT(*) AS listed_tickers, "
+        "COUNT(*) FILTER (WHERE t.ticker IS NOT NULL) AS covered_tickers, "
+        "COUNT(*) FILTER (WHERE t.ticker IS NULL) AS missing_tickers, "
+        "ROUND(100.0 * COUNT(*) FILTER (WHERE t.ticker IS NULL) "
+        "/ NULLIF(COUNT(*), 0), 3) AS missing_pct "
+        "FROM universe u "
+        "LEFT JOIN (SELECT DISTINCT {trade_date} AS d, {ticker} AS ticker FROM {tbl}) t "
+        "  ON t.d = u.as_of_date AND t.ticker = u.ticker "
+        "GROUP BY 1 ORDER BY 1"
+    ).format(
+        trade_date=sql.Identifier("trade_date"),
+        ticker=sql.Identifier("ticker"),
+        tbl=sql.Identifier(spec.table),
+    )
+    rows, rendered = runner._run_sql(query)
+    return CheckResult(
+        kind=CheckKind.FK_INTEGRITY,
+        title=title,
+        rows=rows,
+        sql=rendered,
+        note=(
+            "missing_pct is survivorship, not sparsity: the absent tickers were "
+            "listed on that date and are absent because targets are resolved "
+            "from the CURRENT universe. Cross-sectional z-scores and decile "
+            "boundaries are computed without them."
+        ),
+    )
+
+
 def _halted_zero_ratio(
     runner: PostgresProfileQueryRunner, spec: TableProfileSpec, title: str
 ) -> CheckResult:
@@ -527,11 +665,108 @@ def _ingest_run_status(
     return CheckResult(kind=CheckKind.CATEGORY_DISTRIBUTION, title=title, rows=rows, sql=rendered)
 
 
+def _run_zero_yield(
+    runner: PostgresProfileQueryRunner, spec: TableProfileSpec, title: str
+) -> CheckResult:
+    """Runs that finished ``success`` while writing nothing.
+
+    A run that fetched no rows and reported success is indistinguishable from a
+    genuinely idle run in a scheduler's exit code, so the failure mode is
+    silent.  ``backfill_daily_prices`` did exactly this until 2026-08-15: a
+    validation error was recorded as ``failed`` in ``ingestion_runs`` while the
+    CLI printed a success line and exited 0.
+
+    Some run types are legitimately zero-yield once caught up (an incremental
+    price sync on a quiet day), so this reports a rate per run type rather than
+    flagging individual runs — a rate that climbs is the signal.
+    """
+    tbl = sql.Identifier(spec.table)
+    # counts is JSONB; the row-writing key differs per run type, so sum the
+    # ones actually in use rather than guessing a single name.
+    query = sql.SQL(
+        "WITH yields AS ("
+        "  SELECT run_type, status, "
+        "         COALESCE((counts->>'rows_upserted')::bigint, 0) "
+        "       + COALESCE((counts->>'bars_upserted')::bigint, 0) "
+        "       + COALESCE((counts->>'items_written')::bigint, 0) "
+        "       + COALESCE((counts->>'observations_upserted')::bigint, 0) AS rows_written, "
+        "         COALESCE((counts->>'requests_attempted')::bigint, 0) "
+        "       + COALESCE((counts->>'slices_attempted')::bigint, 0) AS attempted "
+        "  FROM {tbl} WHERE status = 'success'"
+        ") "
+        "SELECT run_type, COUNT(*) AS success_runs, "
+        "COUNT(*) FILTER (WHERE rows_written = 0 AND attempted > 0) AS zero_yield_runs, "
+        "ROUND(100.0 * COUNT(*) FILTER (WHERE rows_written = 0 AND attempted > 0) "
+        "/ NULLIF(COUNT(*), 0), 3) AS zero_yield_pct "
+        "FROM yields GROUP BY 1 "
+        "HAVING COUNT(*) FILTER (WHERE rows_written = 0 AND attempted > 0) > 0 "
+        "ORDER BY 3 DESC"
+    ).format(tbl=tbl)
+    rows, rendered = runner._run_sql(query)
+    return CheckResult(
+        kind=CheckKind.CATEGORY_DISTRIBUTION,
+        title=title,
+        rows=rows,
+        sql=rendered,
+        note=(
+            "Only runs that attempted requests and wrote nothing are counted, so "
+            "an idle skip-everything run is excluded. A rising rate means calls "
+            "are being made and discarded."
+        ),
+    )
+
+
+def _capital_change_direction_balance(
+    runner: PostgresProfileQueryRunner, spec: TableProfileSpec, title: str
+) -> CheckResult:
+    """Increase/decrease mix of capital-change categories.
+
+    ``ev_net_share_issuance_yoy`` classifies events by matching
+    ``isu_dcrs_stle`` strings.  Known issue I3: the decrease side never matched,
+    so a feature meant to measure NET issuance was measuring GROSS.  A string
+    catalogue that silently matches nothing looks exactly like a category that
+    never occurs, and nothing distinguished the two.
+
+    Reporting the per-category counts makes the failure visible: real
+    corporate-action data is not one-sided, so a category set with zero
+    decreases is a mapping defect, not a market fact.
+    """
+    if not runner._has_column(spec.table, "isu_dcrs_stle"):
+        return CheckResult(
+            kind=CheckKind.CATEGORY_TOP_N,
+            title=title,
+            warning="isu_dcrs_stle absent from schema",
+        )
+    query = sql.SQL(
+        "SELECT {stle} AS isu_dcrs_stle, COUNT(*) AS rows, "
+        "COUNT(DISTINCT corp_code) AS corps, "
+        "MIN(bsns_year) AS first_year, MAX(bsns_year) AS last_year "
+        "FROM {tbl} GROUP BY 1 ORDER BY 2 DESC"
+    ).format(stle=sql.Identifier("isu_dcrs_stle"), tbl=sql.Identifier(spec.table))
+    rows, rendered = runner._run_sql(query)
+    return CheckResult(
+        kind=CheckKind.CATEGORY_TOP_N,
+        title=title,
+        rows=rows,
+        sql=rendered,
+        note=(
+            "Compare against the mapping catalogue in definitions/: a category "
+            "present here but unmatched there is silently dropped, and a "
+            "direction with no rows at all is a mapping defect (I3)."
+        ),
+    )
+
+
 DOMAIN_CHECK_BUILDERS: dict[str, DomainCheckBuilder] = {
     # daily_ohlcv
     "ohlc_identity": _ohlc_identity,
     "halted_zero_ratio": _halted_zero_ratio,
     "listing_span": _listing_span,
+    "impossible_daily_return": _impossible_daily_return,
+    # any table with (ticker, trade_date) — survivorship coverage
+    "pit_universe_coverage": _pit_universe_coverage,
+    # dart_capital_change_raw
+    "capital_change_direction_balance": _capital_change_direction_balance,
     # krx_security_flow_raw
     "flow_source_dedupe": _flow_source_dedupe,
     "flow_pit_join_coverage": _flow_pit_join_coverage,
@@ -553,4 +788,5 @@ DOMAIN_CHECK_BUILDERS: dict[str, DomainCheckBuilder] = {
     "corp_master_listing": _corp_master_listing,
     # ingestion_runs
     "ingest_run_status": _ingest_run_status,
+    "run_zero_yield": _run_zero_yield,
 }

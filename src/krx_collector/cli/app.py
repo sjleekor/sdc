@@ -1750,7 +1750,10 @@ def _handle_prices_market_cap_backfill(args: argparse.Namespace) -> None:
 def _handle_validate(args: argparse.Namespace) -> None:
     """Handle ``krx-collector validate``."""
     settings = get_settings()
-    print(f"→ validate: date={args.date}, market={args.market}")
+    print(
+        f"→ validate: date={args.date}, market={args.market}, "
+        f"universe_drift_pct={args.universe_drift_pct}"
+    )
 
     from krx_collector.domain.enums import Market
 
@@ -1772,7 +1775,12 @@ def _handle_validate(args: argparse.Namespace) -> None:
     from krx_collector.service.validate import validate
 
     try:
-        validate(storage=storage, market=market_filter, target_date=args.date)
+        validate(
+            storage=storage,
+            market=market_filter,
+            target_date=args.date,
+            universe_drift_pct=args.universe_drift_pct,
+        )
         print("✅ Validation completed. Check logs for details.")
     except Exception as exc:
         print(f"❌ Validation failed: {exc}", file=sys.stderr)
@@ -3194,6 +3202,15 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["kospi", "kosdaq", "all"],
         default="all",
         help="Market filter (default: all).",
+    )
+    validate_parser.add_argument(
+        "--universe-drift-pct",
+        type=float,
+        default=5.0,
+        help=(
+            "Alert when consecutive snapshot sizes change by more than this "
+            "percentage, within a source. 0 disables the check."
+        ),
     )
     validate_parser.set_defaults(handler=_handle_validate)
 

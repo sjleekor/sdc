@@ -47,6 +47,10 @@ DAILY_OHLCV = TableProfileSpec(
         "ohlc_identity",
         "halted_zero_ratio",
         "listing_span",
+        # Nothing was watching for either of these; both were found by hand on
+        # 2026-08-15 after the defects had been accruing for months.
+        "impossible_daily_return",
+        "pit_universe_coverage",
     ),
 )
 
@@ -85,7 +89,7 @@ DAILY_MARKET_CAP = TableProfileSpec(
     ),
     cost_class=CostClass.EXPENSIVE,
     sampling=SamplingPolicy(sample_pct=1.0, large_row_threshold=5_000_000),
-    domain_checks=(),
+    domain_checks=("pit_universe_coverage",),
 )
 
 
@@ -119,7 +123,7 @@ KRX_SECURITY_FLOW_RAW = TableProfileSpec(
     ),
     cost_class=CostClass.EXPENSIVE,
     sampling=SamplingPolicy(sample_pct=1.0, large_row_threshold=5_000_000),
-    domain_checks=("flow_source_dedupe", "flow_pit_join_coverage"),
+    domain_checks=("flow_source_dedupe", "flow_pit_join_coverage", "pit_universe_coverage"),
 )
 
 DART_XBRL_FACT_RAW = TableProfileSpec(
@@ -301,7 +305,7 @@ DART_CAPITAL_CHANGE_RAW = TableProfileSpec(
     ingest_col="fetched_at",
     cost_class=CostClass.CHEAP,
     sampling=SamplingPolicy(sample_pct=None),
-    domain_checks=(),
+    domain_checks=("capital_change_direction_balance",),
 )
 
 DART_FILING_RECEIPT_RAW = TableProfileSpec(
@@ -413,7 +417,7 @@ INGESTION_RUNS = TableProfileSpec(
     ingest_col="started_at",
     cost_class=CostClass.CHEAP,
     sampling=SamplingPolicy(sample_pct=None),
-    domain_checks=("ingest_run_status",),
+    domain_checks=("ingest_run_status", "run_zero_yield"),
 )
 
 SYNC_CHECKPOINTS = TableProfileSpec(
