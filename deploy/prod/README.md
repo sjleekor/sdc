@@ -26,6 +26,25 @@
 
 이 스크립트는 `deploy/prod/compose.yaml`과 `deploy/prod/bin/`을 `sj2-server:/home/whi/apps/sdc`로 `rsync --delete`한다.
 
+> ### ⚠ 배포 전에 이미지 태그를 반드시 맞춘다
+>
+> **릴리즈 스크립트(`sdc-release`)는 원격 `compose.yaml`만 갱신하고 이 저장소의 파일은
+> 건드리지 않았다.** 그래서 릴리즈를 할수록 둘이 벌어지고, **문서대로
+> `deploy_to_sj2.sh`를 돌리면 prod가 조용히 롤백된다** — 에러도 안 난다.
+>
+> 실제로 v0.9.3 릴리즈 시점에 원격은 `v0.9.3`, 저장소는 `v0.8.16`이었다.
+> **네 개 릴리즈만큼 뒤처져 있었고 아무것도 그 사실을 보고하지 않았다.**
+>
+> ```bash
+> # 배포 전 확인 — 두 값이 같아야 한다
+> grep 'image: ghcr' deploy/prod/compose.yaml
+> ssh whi@sj2-server 'grep "image: ghcr" /home/whi/apps/sdc/compose.yaml'
+> ```
+>
+> 로컬 스킬 스크립트에는 저장소 파일도 같이 갱신하도록 고쳐뒀지만, `.agents/`와
+> `.claude/`가 `.gitignore`에 있어 **그 수정은 공유되지 않는다.**
+> 다른 사람의 환경에서는 여전히 원격만 갱신되므로 위 확인을 거른 채 배포하면 안 된다.
+
 ## Cronicle event chain
 
 현재 배포된 Cronicle event는 raw 수집 12개이며 모두 `enabled=1`, `plugin=shellplug`, `category=general`, `target=maingrp`, `timezone=Asia/Seoul`, `max_children=1`, `multiplex=0`, `catch_up=0`이다. `chain_error`는 모두 비어 있으므로 실패 시 별도 실패 분기로 가지 않고 그 지점에서 chain이 멈춘다.
