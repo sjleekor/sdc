@@ -154,3 +154,40 @@ def test_refresh_without_credentials_reports_failure(monkeypatch) -> None:
     monkeypatch.setattr(pykrx_auth, "configure_krx_credentials_from_settings", lambda: None)
 
     assert pykrx_auth.refresh_pykrx_session() is False
+
+
+def test_a_failed_krx_login_is_reported_as_such_not_as_a_json_error(monkeypatch) -> None:
+    """The import-time login failure has to name itself.
+
+    `pykrx.website.comm.webio` logs into KRX at import time, so when KRX answers
+    the login endpoint with an HTML page the whole library becomes unimportable.
+    Raw, that surfaced as forty lines of traceback ending in "Expecting value:
+    line 13 column 1", repeated once per target date, with nothing anywhere
+    naming the cause. It took reading pykrx's source to work out that the
+    collectors were fine and the login was down.
+    """
+    import builtins
+    import json
+
+    get_pykrx_stock_module = pykrx_auth.get_pykrx_stock_module
+    get_pykrx_stock_module.cache_clear()
+    monkeypatch.setattr(pykrx_auth, "configure_krx_credentials_from_settings", lambda: None)
+
+    real_import = builtins.__import__
+
+    def _import(name, *args, **kwargs):
+        if name == "pykrx":
+            raise json.JSONDecodeError("Expecting value", "<html>", 25)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _import)
+
+    with pytest.raises(pykrx_auth.KrxLoginUnavailableError) as excinfo:
+        get_pykrx_stock_module()
+
+    message = str(excinfo.value)
+    assert "KRX login returned a non-JSON response" in message
+    assert "not a credential problem" in message
+    assert isinstance(excinfo.value.__cause__, json.JSONDecodeError)
+
+    get_pykrx_stock_module.cache_clear()

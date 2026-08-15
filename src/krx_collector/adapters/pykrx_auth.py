@@ -35,13 +35,41 @@ from krx_collector.infra.config.settings import configure_krx_credentials_from_s
 logger = logging.getLogger(__name__)
 
 
+class KrxLoginUnavailableError(RuntimeError):
+    """KRX's login endpoint did not answer with JSON, so pykrx cannot be used."""
+
+
 @lru_cache(maxsize=1)
 def get_pykrx_stock_module() -> ModuleType:
-    """Import pykrx.stock after loading KRX credentials, suppressing auth chatter."""
+    """Import pykrx.stock after loading KRX credentials, suppressing auth chatter.
+
+    Raises:
+        KrxLoginUnavailableError: KRX's login endpoint returned something other
+            than JSON. ``pykrx.website.comm.webio`` logs in at *import* time, so
+            this takes the whole library down, not one call.
+    """
     configure_krx_credentials_from_settings()
     captured_output = io.StringIO()
-    with contextlib.redirect_stdout(captured_output), contextlib.redirect_stderr(captured_output):
-        from pykrx import stock
+    try:
+        with (
+            contextlib.redirect_stdout(captured_output),
+            contextlib.redirect_stderr(captured_output),
+        ):
+            from pykrx import stock
+    except ValueError as exc:
+        # requests raises JSONDecodeError, a ValueError subclass, from
+        # `resp.json()` inside login_krx. Unwrapped, this surfaces as forty
+        # lines of traceback ending in "Expecting value: line 13 column 1",
+        # repeated once per target, with nothing naming the actual cause —
+        # which is what a KRX maintenance window looks like from in here.
+        # Observed 2026-08-16 from roughly 23:54 KST onward.
+        raise KrxLoginUnavailableError(
+            "KRX login returned a non-JSON response, so `import pykrx` fails and "
+            "every pykrx collector is blocked. This is an upstream condition "
+            "(maintenance window or a block), not a credential problem — verify "
+            "with a KRX MDC collector, which authenticates separately. Re-run "
+            f"when KRX answers again. Underlying error: {exc}"
+        ) from exc
 
     output = captured_output.getvalue()
     if "KRX 로그인 실패" in output:
