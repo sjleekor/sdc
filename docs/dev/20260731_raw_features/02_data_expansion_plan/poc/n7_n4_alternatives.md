@@ -128,8 +128,11 @@ LEAST(GREATEST(NULL, 0.1), 0.9)  →  0.1        -- NULL이 아니다
 
 | | 내용 | 축소안에서 |
 |---|---|---|
-| **C4** | KRX `DIV` vs 우리 `payout yield` | **공식 KIS 현재가 응답에 `DIV`가 없다** |
+| **C4** | KRX `DIV` vs 우리 `payout yield` | **수행 불가 확정** — 실호출로 80필드를 확인했고 `DIV`가 없다 |
 | **C5** | KRX-PBR 기반 value z와 `fin_value_z`의 **IC 비교** | **현재값 횡단면만으로는 미래수익률 IC를 못 낸다** |
+
+C4는 2026-08-16 실호출로 확정됐다
+([`flows_alternatives.md`](flows_alternatives.md) §5b.3).
 
 **호출을 줄인 게 아니라 완료 기준 일부를 수행 불가능하게 만든 것이다.**
 문서상으로는 여전히 C1~C5를 다 할 수 있는 것처럼 보인다.
