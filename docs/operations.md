@@ -580,6 +580,31 @@ KRX 안내문이 제시한 공식 경로는 셋이다 — **Open API**, 화면 �
 `flows`는 하루 38요청이고 차단은 백필 6,000요청에서 났다.
 → [`poc/flows_alternatives.md`](dev/20260731_raw_features/02_data_expansion_plan/poc/flows_alternatives.md)
 
+### KIS 자격증명 (2026-08-16 발급)
+
+`.env`에 있다. 시크릿 디렉터리가 아니다 — 거기는 접속 메타데이터(`db_info`·`cronicle_info`)용이고
+**API 키는 항상 `.env`**다.
+
+| 변수 | 용도 |
+|---|---|
+| `KIS_APP_KEY` / `KIS_APP_SECRET` | 앱키·시크릿 |
+| `KIS_BASE_URL` | 실전 `openapi.koreainvestment.com:9443` · 모의 `openapivts…:29443` |
+| `KIS_TIMEOUT_SECONDS` | 기본 20.0 |
+
+**현재 상태: 로컬 `.env`에만 있다.** prod(`/home/whi/apps/sdc/.env`)에는 아직 없고,
+**읽는 코드도 아직 없다.** 어댑터(K-4/K-6)가 붙을 때 둘 다 처리한다.
+prod compose의 `collector`는 `env_file: - .env`라 **키만 넣으면 컨테이너로 들어간다.**
+
+시세조회에는 **계좌번호가 필요 없다.** 앱키·시크릿·토큰만 쓴다(계좌번호는 주문·잔고용).
+유량 제한은 **실전 초당 20건 / 계좌당**, 모의 초당 2~5건이다.
+
+> **토큰 캐시를 반드시 호스트에 둬야 한다.**
+> access token은 유효기간 1일이고, 6시간 이내 재발급은 같은 값을 주지만
+> **발급할 때마다 알림톡이 발송된다.** 수집기는 매번 `docker compose run --rm`으로
+> 새 컨테이너를 띄우므로 컨테이너 안에 캐시하면 **매 실행이 재발급 + 알림톡**이 된다.
+> 지금 `collector` 서비스에는 볼륨 마운트가 하나도 없다 —
+> `KIS_TOKEN_CACHE_PATH`와 `./state:/state` 마운트를 어댑터와 함께 넣는다.
+
 조사 결과와 진행 상태:
 [`docs/dev/20260731_raw_features/02_data_expansion_plan/poc/krx_open_api.md`](dev/20260731_raw_features/02_data_expansion_plan/poc/krx_open_api.md) ·
 [`10_work_breakdown.md` K 묶음](dev/20260731_raw_features/02_data_expansion_plan/10_work_breakdown.md)

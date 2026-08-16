@@ -36,6 +36,7 @@ cp .env.example .env
 # .env 파일을 열어 데이터베이스 계정 정보 및 설정을 수정하세요
 # `dart` 계열 명령은 OPENDART_API_KEY 또는 OPENDART_API_KEYS가 반드시 설정되어야 동작합니다
 # `common sync --sources ecos/fred`는 ECOS_API_KEY / FRED_API_KEY가 필요합니다
+# KIS_APP_KEY / KIS_APP_SECRET은 KRX 스크래핑 경로 대체용으로 예약돼 있습니다 (아직 사용 코드 없음)
 
 # 3. 데이터베이스 스키마 초기화
 uv run krx-collector db init

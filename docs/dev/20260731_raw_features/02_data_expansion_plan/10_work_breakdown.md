@@ -609,7 +609,22 @@ KRX 안내문이 이유를 명시한다 — **약관 제10조 제2호는 자동�
     - [ ] KIS 이력 깊이 — 문서에 없다
     - [ ] KRX 데이터 상품 가격·조건 — **판매 페이지가 500 에러다.** 전화 문의(1577-0088)
   - [ ] **K-6c KIS 약관 확인** — 증권사 오픈API는 일반적으로 **본인 이용 범위**다.
-        연구용 저장은 대체로 그 안이지만 **재배포는 아니다.** 실계좌 개설도 선행된다
+        연구용 저장은 대체로 그 안이지만 **재배포는 아니다**
+    - [x] **자격증명 발급 완료** (2026-08-16) — `KIS_APP_KEY`·`KIS_APP_SECRET`·
+          `KIS_BASE_URL`·`KIS_TIMEOUT_SECONDS`가 **로컬 `.env`에 있다.**
+          `.env.example`·`CLAUDE.md`·`docs/operations.md`에 기록.
+          **prod `.env`에는 아직 없고 읽는 코드도 없다**
+    - [ ] 약관 본문 확인
+- [ ] **K-6f KIS 어댑터 구현** — K-6b 필드 확정 후
+  - [ ] **토큰 캐시가 먼저다.** access token은 유효기간 1일이고
+        **발급할 때마다 알림톡이 발송된다.** 수집기는 매번 `docker compose run --rm`으로
+        새 컨테이너를 띄우므로 컨테이너 안에 캐시하면 **매 실행이 재발급 + 알림톡**이 된다.
+        `collector` 서비스에 **현재 볼륨 마운트가 하나도 없다** →
+        `KIS_TOKEN_CACHE_PATH` + `./state:/state`를 같이 넣는다
+  - [ ] `settings.py`에 `kis_*` 필드 추가 (pydantic-settings가 `KIS_*`로 자동 매핑)
+  - [ ] prod `.env`에 키 반영 — compose가 `env_file: - .env`라 **넣으면 컨테이너로 들어간다**
+  - [ ] 유량 제한 **초당 20건 / 계좌당**을 `HumanThrottle`이 아니라 **토큰 버킷**으로.
+        KRX와 성격이 다르다 — 여기는 공식 한도지 탐지 회피가 아니다
   - [x] **K-6d N7 · N4 조사 완료** (2026-08-16) →
         [`poc/n7_n4_alternatives.md`](poc/n7_n4_alternatives.md).
         **둘 다 폐기가 아니라 축소다**

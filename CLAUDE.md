@@ -87,6 +87,8 @@ Strict **ports & adapters (hexagonal)**. The dependency rule is the key invarian
 
 Settings load from `.env` (template: `.env.example`) via pydantic-settings. DB via `DB_DSN` or `DB_HOST/PORT/NAME/USER/PASSWORD`. OpenDART keys as above. KRX MDC login fallback uses `KRX_ID`/`KRX_PW`. `db sync-remote` reads remote DB creds from `/Users/whishaw/wss_p/stock_data_collector_secrets/db_info` by default.
 
+`KIS_APP_KEY`/`KIS_APP_SECRET` (한국투자증권 오픈API) are provisioned in the **local `.env` only** as of 2026-08-16 — prod does not have them yet, and no code reads them yet. They exist for the KRX-replacement work (K 묶음): KRX restricted this host's IP on 2026-08-16 for a ToS violation, so the scraping path is being replaced by KRX Open API (N1/N3) plus KIS (`flows`). See `docs/operations.md` "KRX 접근 제한". Note the secrets directory holds **connection metadata** (`db_info`, `cronicle_info`) — API keys always go in `.env`, not there.
+
 ## Docs & deploy
 
 - `docs/architecture.md`, `docs/database.md`, `docs/operations.md` (cron schedule, runbook, partial-run recovery). `docs/dev/` holds dated design/implementation plans.
