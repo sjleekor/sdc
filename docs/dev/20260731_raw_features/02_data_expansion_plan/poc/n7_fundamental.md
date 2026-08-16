@@ -1,5 +1,14 @@
 # PoC — N7 KRX 공식 밸류에이션
 
+> ## ⚠ SUPERSEDED (2026-08-16)
+>
+> **이 PoC의 결론("계획대로 6,000 호출 진행")은 더 이상 유효하지 않다.**
+> pykrx 경로가 KRX 약관 위반으로 막혔고, N7은 **축소 판정**을 받았다.
+> 현재 계획: [`n7_n4_alternatives.md`](n7_n4_alternatives.md) §1
+>
+> 아래 측정 결과 자체(컬럼 6개, `PER == 0` 314건이 전부 EPS ≤ 0 등)는 유효하다.
+> **실행 계획 부분만 폐기된 것이다.**
+
 - 실행일: 2026-08-15
 - 상위 문서: [`../08_w3_valuation_and_macro.md`](../08_w3_valuation_and_macro.md) 파트 A
 

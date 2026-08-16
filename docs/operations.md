@@ -544,24 +544,34 @@ bin/parquet-compute-all.sh --from-step reports --required-coverage-ratio 0.0
 **0.32 req/s**(직전의 1/3)로 다시 돌렸는데 **95요청 만에 재차단**됐다.
 1차 차단은 9시간 만에 풀렸으나 재차단은 5분 만에 왔다. 약관에 속도 조건이 없다.
 
-### 지금 상태 — KRX를 치는 경로는 5개다
+### 지금 상태 — 매일 KRX를 치는 것은 **넷**이다
 
-| 경로 | 문 | 일 요청 | 상태 |
-|---|---|---:|---|
-| `universe sync --source fdr` | **익명** (FDR 라이브러리 내부) | ~4 | 매일 18:30 |
-| `flows sync` | MDC 로그인 | 38 | 매일 (체인). 대체는 §아래 |
-| `common sync --sources krx` | MDC 로그인 | 11 | 매일 (체인) |
-| `prices market-cap-backfill` (N1) | pykrx 로그인 | ~6,000 | **중단** |
-| `universe backfill-snapshots` (N3) | pykrx 로그인 | ~290 | **중단** — 60/152 |
+| 경로 | 문 | 상태 |
+|---|---|---|
+| `universe sync --source fdr` | **익명** (+ 실패 시 pykrx 폴백) | 매일 18:30 |
+| **`prices backfill`** | **pykrx 로그인** (import side effect) | **매일** |
+| `flows sync` | MDC 로그인 | 매일 (체인) |
+| `common sync --sources krx` | MDC 로그인 | 매일 (체인) |
+| `prices market-cap-backfill` (N1) | pykrx 로그인 | **중단** |
+| `universe backfill-snapshots` (N3) | pykrx 로그인 | **중단** — 60/152 |
 
-**`prices backfill`은 KRX가 아니다.** `adjusted=True`라 pykrx가 naver로 보낸다.
-매일 도는 것 중 가장 크지만(2,763종목) 차단과 무관하다.
+**`prices backfill`은 데이터만 naver다.** `adjusted=True`라 시세는 naver에서 오지만,
+`get_pykrx_stock_module()`이 pykrx를 import하는 순간 `build_krx_session()`이 돌아
+**실행당 로그인 3~4요청이 `data.krx.co.kr`로 나간다.** 종목 수와 무관하게 한 번이다.
 
-**`universe sync`가 KRX 수집기라는 점에 주의한다.** FDR이 라이브러리 안에서
-`data.krx.co.kr/comm/bldAttendant/getJsonData.cmd` — 우리 MDC client와 같은 주소 — 를 친다.
-로그인하지 않고, **우리 `HumanThrottle`도 걸리지 않는다.**
-같은 호스트에 문이 셋(MDC 로그인 / pykrx 로그인 / FDR 익명)이라
-하나를 막아도 나머지가 남는다.
+**`universe sync`도 KRX 수집기다.** FDR이 라이브러리 안에서
+`data.krx.co.kr/comm/bldAttendant/executeForResourceBundle.cmd`를 친다(최근 거래일 조회용,
+실제 데이터는 GitHub CSV 캐시). 로그인하지 않고 **우리 `HumanThrottle`도 안 걸린다.**
+그리고 **FDR이 실패하면 pykrx로 자동 폴백한다** — 차단 상황에서 가장 나쁜 실패 방식이다.
+
+문이 셋(MDC 로그인 / pykrx 로그인 / FDR 익명)이라 하나를 막아도 나머지가 남는다.
+조건부·수동 경로(`universe sync --source pykrx`, `common-sync-pykrx.sh`,
+opt-in live test)도 남아 있다.
+
+> **운영 지속은 미결이다.** 이전 판은 "하루 53요청이라 규모가 아니다"를 근거로 지속을
+> 허용했는데, **약관 제10조 제2호에 속도 조건이 없어 그 논리는 성립하지 않는다.**
+> 그리고 53은 HTTP 수가 아니라 **논리 작업 수**다(투자자 bulk 1건 = 4 엔드포인트).
+> 계속 돌린다면 근거는 **"데이터 공백을 감수하기로 한 선택"**이어야 한다. → K-0b
 
 전체 인벤토리:
 [`poc/krx_access_inventory.md`](dev/20260731_raw_features/02_data_expansion_plan/poc/krx_access_inventory.md)
