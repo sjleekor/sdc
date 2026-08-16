@@ -549,7 +549,7 @@ bin/parquet-compute-all.sh --from-step reports --required-coverage-ratio 0.0
 | 경로 | 문 | 일 요청 | 상태 |
 |---|---|---:|---|
 | `universe sync --source fdr` | **익명** (FDR 라이브러리 내부) | ~4 | 매일 18:30 |
-| `flows sync` | MDC 로그인 | 38 | 매일 (체인). **대체 경로 미정** |
+| `flows sync` | MDC 로그인 | 38 | 매일 (체인). 대체는 §아래 |
 | `common sync --sources krx` | MDC 로그인 | 11 | 매일 (체인) |
 | `prices market-cap-backfill` (N1) | pykrx 로그인 | ~6,000 | **중단** |
 | `universe backfill-snapshots` (N3) | pykrx 로그인 | ~290 | **중단** — 60/152 |
@@ -573,6 +573,12 @@ KRX 안내문이 제시한 공식 경로는 셋이다 — **Open API**, 화면 �
 **Open API(`openapi.krx.co.kr`)가 주 경로다.** 일별매매정보·종목기본정보·지수 시세를 준다.
 하루 10,000회, 무료. **투자자별 거래실적·공매도·PER/PBR·지수 구성종목은 없다** —
 `flows`와 N4·N7이 여기 걸린다.
+
+**`flows`는 KIS Developers로 5/7이 대체된다.** 개인·외국인·기관 순매수와
+공매도 거래량·거래대금은 옮길 수 있고, **외국인 보유주식수와 공매도 잔고는 갈 곳이 없다.**
+다만 2007년부터의 이력을 이미 갖고 있어 급한 사안은 아니다 —
+`flows`는 하루 38요청이고 차단은 백필 6,000요청에서 났다.
+→ [`poc/flows_alternatives.md`](dev/20260731_raw_features/02_data_expansion_plan/poc/flows_alternatives.md)
 
 조사 결과와 진행 상태:
 [`docs/dev/20260731_raw_features/02_data_expansion_plan/poc/krx_open_api.md`](dev/20260731_raw_features/02_data_expansion_plan/poc/krx_open_api.md) ·
