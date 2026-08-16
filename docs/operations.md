@@ -187,11 +187,15 @@ uv run krx-collector validate --date 2016-06-30 --universe-drift-pct 5
 
 ### 신규 수집 명령 (2026-08 추가)
 
+> **N1·N3는 2026-08-16부터 실행하지 않는다.** 두 명령 모두 KRX를 직접 치는데
+> 그 경로가 약관 위반으로 차단됐다. 아래 "KRX 접근 제한" 절 참고.
+> Open API 어댑터(K-4)로 교체한 뒤 재개한다. N2는 OpenDART라 해당 없다.
+
 ```bash
-# N1 — 일별 KRX 시가총액 · 거래대금 · 상장주식수
+# N1 — 일별 KRX 시가총액 · 거래대금 · 상장주식수  ※ 중단됨
 uv run krx-collector prices market-cap-backfill --start 2014-06-02 --end 2026-08-15
 
-# N3 — 월말 역사적 유니버스 스냅샷 (생존편향 감사)
+# N3 — 월말 역사적 유니버스 스냅샷 (생존편향 감사)  ※ 중단됨, 60/152
 uv run krx-collector universe backfill-snapshots --start 2014-06-01 --end 2026-08-15
 
 # N2 — OpenDART 기업개황 (업종코드 · 설립일 · 결산월)
@@ -528,15 +532,58 @@ bin/parquet-compute-all.sh --from-step reports --required-coverage-ratio 0.0
 확인하고, readiness 실패면 해당 feature의 커버리지/누락/PIT 위반 내역을 보고 재수집 또는
 스냅샷/임계값을 조정해 재실행하세요.
 
+## KRX 접근 제한 (2026-08-16~)
+
+**결론부터. 스크래핑 경로로 KRX를 치는 작업은 하지 않는다.**
+
+2026-08-16, sj2-server IP가 KRX Data Marketplace에서 차단됐다. 안내문이 사유를 명시했다 —
+**약관 제10조 제2호(자동화 수단을 이용한 정보 무단 수집 금지) 위반**이고,
+제6조 제2항에 따라 이용이 제한된다. 탐지일로부터 **1일**.
+
+**속도로 푸는 문제가 아니다.** 차단 후 스로틀을 MDC와 같은 1.5~4.0초로 통일하고
+**0.32 req/s**(직전의 1/3)로 다시 돌렸는데 **95요청 만에 재차단**됐다.
+1차 차단은 9시간 만에 풀렸으나 재차단은 5분 만에 왔다. 약관에 속도 조건이 없다.
+
+### 지금 상태
+
+| 경로 | KRX 직접 | 상태 |
+|---|---|---|
+| `prices backfill` | **아니다** — `adjusted=True`라 naver로 간다 | 정상 |
+| `prices market-cap-backfill` (N1) | 그렇다 | **중단** |
+| `universe backfill-snapshots` (N3) | 그렇다 | **중단** — 60/152에서 정지 |
+| `flows sync` | 그렇다 (MDC) | **매일 돌고 있다.** 대체 경로 미정 |
+| `common sync --sources krx` | 그렇다 (MDC) | 돌고 있다 |
+
+### 해결 방향
+
+KRX 안내문이 제시한 공식 경로는 셋이다 — **Open API**, 화면 다운로드, 데이터 상품 구입.
+
+**Open API(`openapi.krx.co.kr`)가 주 경로다.** 일별매매정보·종목기본정보·지수 시세를 준다.
+하루 10,000회, 무료. **투자자별 거래실적·공매도·PER/PBR·지수 구성종목은 없다** —
+`flows`와 N4·N7이 여기 걸린다.
+
+조사 결과와 진행 상태:
+[`docs/dev/20260731_raw_features/02_data_expansion_plan/poc/krx_open_api.md`](dev/20260731_raw_features/02_data_expansion_plan/poc/krx_open_api.md) ·
+[`10_work_breakdown.md` K 묶음](dev/20260731_raw_features/02_data_expansion_plan/10_work_breakdown.md)
+
+### 차단됐을 때 운영자가 할 것
+
+1. **재시도하지 않는다.** 차단 중 로그인을 두드리는 것이 탐지가 가장 민감하게 보는 행동이다.
+   v0.9.10의 로그인 실패 쿨다운(60s→300s→900s→3600s)이 이걸 억제하지만, 수동 재실행은 그 밖이다
+2. 해당 Cronicle 이벤트를 disable한다 — 청크 루프는 첫 실패에서 멈추지만(O-15) 스케줄은 다시 돈다
+3. 1일 경과 후 자동 해제. **해제됐다고 같은 작업을 다시 돌리지 않는다** — 같은 결과가 나온다
+
+---
+
 ## 트러블슈팅
 
 | 증상 (Symptom) | 예상 원인 | 해결 방법 |
 |---------|-------------|-----|
 | 어떤 명령어를 쳤는데 `NotImplementedError`가 남 | 어댑터(Adapter) 코드가 아직 껍데기(Stub) 상태임 | TODO 주석을 참고하여 어댑터 구현을 완료하세요. |
 | DB `Connection refused` 발생 | PostgreSQL이 꺼져있거나 DSN 정보가 틀림 | `.env` 파일의 DB 설정 확인 및 `pg_isready`로 DB 상태 점검 |
-| KRX 접근 차단 (Rate-limited) | 너무 빠른 속도로 많은 요청을 보냄 | `.env`에서 `RATE_LIMIT_SECONDS` 값을 더 높게 설정 |
+| KRX 접근 차단 (`blockError_01.jsp` / KDM 이용 제한 안내) | **약관 위반이다. 속도 문제가 아니다.** KRX Data Marketplace 약관 제10조 제2호가 자동화 수단에 의한 수집 자체를 금지한다 | **스로틀을 더 늦춰도 풀리지 않는다.** 아래 "KRX 접근 제한" 절 참고 |
 | 검증 시 휴장일이 정상 거래일로 인식됨 | `docs/holidays_krx.csv` 파일이 비어있음 | CSV 파일에 KRX 휴장일 날짜를 추가 |
-| 수집 중 `JSONDecodeError` 발생 | KRX 웹사이트가 개편되었거나 IP가 차단됨 | 프록시를 사용하거나 KRX MDC client/parser를 최신 응답 형식에 맞게 수정 |
+| 수집 중 `JSONDecodeError` 발생 | KRX가 JSON 대신 HTML을 준다 — 차단 페이지이거나 사이트 개편 | 응답 본문을 먼저 확인. 차단 페이지면 위 항목으로, 아니면 MDC client/parser를 최신 응답 형식에 맞게 수정 |
 | `ingestion_runs.status = 'partial'` 발생 | 외부 API 일부 요청 실패, 타임아웃, 개별 종목 no-response | 같은 파라미터로 재실행하고 `error_summary`, `counts.error_count` 및 샘플 request key를 확인 |
 | `flows sync`에서 KRX MDC timeout 반복 | KRX MDC 응답 정체 또는 차단 | `.env`의 `KRX_MDC_TIMEOUT_SECONDS` 또는 `flows sync --timeout-seconds`를 조정하고, 종목 수/기간을 줄여 재실행. 계속 실패하면 KRX 응답 상태를 점검 |
 | `flows sync`가 `KrxMdcAuthenticationError` 또는 `LOGOUT` 메시지로 실패 | KRX MDC 세션 만료 또는 자격증명 누락 | `.env`에 `KRX_ID` / `KRX_PW`를 설정하면 client가 자동 로그인 후 재시도합니다. 자격증명이 이미 설정되어 있는데도 반복 실패한다면 KRX 계정 상태(중복 로그인/잠금)를 확인 |

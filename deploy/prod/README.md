@@ -151,6 +151,20 @@ source lock은 `/tmp/sdc-locks/<domain>.lock`에 `flock`을 걸고, lock 획득 
 
 > `prices backfill`은 해당 없다. `adjusted=True`라 pykrx가 KRX가 아니라 **naver**로 간다.
 
+#### 그런데 이걸로 풀리지 않았다 (같은 날 확인)
+
+페이스를 통일한 뒤 **0.32 req/s**(직전의 1/3)로 재개했는데 **95요청 만에 다시 차단**됐다.
+1차 차단은 9시간 만에 풀렸으나 재차단은 5분 만에 왔다.
+
+**차단 사유가 속도가 아니다.** KRX Data Marketplace 약관 제10조 제2호는
+자동화 수단에 의한 수집 자체를 금지한다 — 속도 조건이 붙어 있지 않다.
+**위 설정은 남아 있는 KRX 수집기(`flows sync`, `common sync --sources krx`)의
+최소 예의일 뿐, 차단에 대한 해결책이 아니다.**
+
+해결은 공식 경로(KRX Open API)로 옮기는 것이다.
+`docs/operations.md` "KRX 접근 제한" 절과
+`docs/dev/20260731_raw_features/02_data_expansion_plan/poc/krx_open_api.md` 참고.
+
 주의할 점:
 
 - Cronicle event definition 자체에는 `env` 필드가 없다. event script에 직접 들어간 override는 현재 `sdc_daily_opendart_share_info`의 `DART_SHARE_INFO_MAX_ATTEMPT_TARGETS=35000`뿐이다.
