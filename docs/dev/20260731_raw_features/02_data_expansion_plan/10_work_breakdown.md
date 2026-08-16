@@ -485,7 +485,8 @@ ledger ────────────→ N6 (16만 호출 재개)
 
 ## K 묶음 — KRX 접근 경로 전환 (신규 축, 2026-08-16)
 
-조사: [`poc/krx_open_api.md`](poc/krx_open_api.md)
+조사: [`poc/krx_open_api.md`](poc/krx_open_api.md) ·
+경로 인벤토리: [`poc/krx_access_inventory.md`](poc/krx_access_inventory.md)
 
 **O-14를 정정하는 축이다.** 우리는 IP 차단을 페이싱 문제로 읽고 스로틀을 통일했다.
 그 뒤 **0.32 req/s**(어젯밤의 1/3)로 돌렸는데 **95요청 만에 다시 차단**됐다.
@@ -515,12 +516,33 @@ KRX 안내문이 이유를 명시한다 — **약관 제10조 제2호는 자동�
   - [x] **호출량이 오히려 유리하다** — 한 호출이 그날 그 시장 전종목을 주므로
         **N1과 N3가 같은 호출로 합쳐진다.** 2014-06~현재 2시장 ≈ 6,000회 =
         **하루 한도 안에서 전량 백필이 끝난다**
+- [x] **K-1b 접근 경로 인벤토리** (2026-08-16) —
+      [`poc/krx_access_inventory.md`](poc/krx_access_inventory.md).
+      **무엇을 교체해야 하는지가 먼저 있어야 한다**
+  - [x] **`universe sync`가 KRX 수집기였다 — 회계에 없던 항목이다.**
+        `fdr.StockListing('KOSPI')`가 FDR 라이브러리 안에서
+        `data.krx.co.kr/comm/bldAttendant/getJsonData.cmd`를 친다.
+        **우리 `krx_common/client.py`의 `KRX_MDC_URL`과 같은 주소다**
+  - [x] **문이 셋이다** — MDC 로그인(`flows`·`common krx`) / pykrx 로그인(N1·N3) /
+        **FDR 익명**(`universe sync`). **하나를 고쳐도 나머지가 남는다.**
+        FDR 경로는 로그인도 안 하고 **우리 `HumanThrottle`도 안 걸린다**
+  - [x] 일 요청 실측(`ingestion_runs.counts`, 2026-08-15) —
+        `flows` **38** · `common krx` **11** · `universe sync` ~4 = **약 53건/일.**
+        **차단을 부른 건 이쪽이 아니라 백필 둘**(N1 ~6,000 / N3 ~290)이다
+  - [x] **`prices backfill`은 KRX가 아니다** — pykrx 소스로 분기 확인.
+        `adjusted=True`(기본값) → `naver.get_market_ohlcv_by_date`.
+        O-14에서 한 번 틀렸던 부분이라 근거를 남겼다
+  - [x] 비활성으로 묶여 있는 KRX 요청 — pykrx 지수 폴백 3종 + 산업지수 4종.
+        **켜면 요청이 는다**는 걸 명시
 - [ ] **K-2 응답 필드 확정** — **N1의 성립 여부가 여기 달려 있다**
   - [x] 확인된 필드는 `BAS_DD`·`ISU_CD`·`ISU_NM`·`TDD_CLSPRC`뿐.
         공식 상세 페이지가 필드 표를 JS로 렌더링해 WebFetch로 안 잡히고,
         서드파티 구현체도 문서화하지 않았다
   - [ ] **`시가총액`·`상장주식수`·`거래대금`이 오는가** — MDC 전종목시세(`MDCSTAT01501`)에
         셋 다 있고 Open API는 같은 통계의 API 형태라 가능성은 높지만 **단정하지 않는다**
+  - [x] **간접 근거가 하나 늘었다** (K-1b) — FDR이 치는 `MDCSTAT01501`의 응답 키가
+        **`OutBlock_1`**이고 파싱 필드가 `MKTCAP`·`LIST_SHRS`·`ACC_TRDVAL`이다.
+        Open API 일별매매정보와 **응답 키가 같다.** 정황은 강해졌지만 여전히 정황이다
   - [ ] 확정 방법: 키 승인 후 상세 페이지 TEST 버튼 또는 개발명세서 다운로드
 - [ ] **K-3 엔드포인트 이용 신청 6건** — 인증키와 **별개 절차다**
   - [ ] 유가증권 일별매매정보 · 코스닥 일별매매정보
@@ -532,9 +554,14 @@ KRX 안내문이 이유를 명시한다 — **약관 제10조 제2호는 자동�
   - [ ] 인증키는 `.env` → `get_settings()`. `KRX_ID`/`KRX_PW`와 다른 축이다
   - [ ] 한도(10,000/일) 소진 시 종료 코드 — OpenDART의 `75` 전례를 따른다
 - [ ] **K-5 스크래핑 경로 폐기** — K-4 검증 후. 남겨두면 다시 밟는다
+  - [ ] **문이 셋이라 셋 다 닫아야 한다**(K-1b). pykrx 경로만 지우면
+        MDC 직접(`flows`·`common krx`)과 **FDR 익명(`universe sync`)이 그대로 남는다**
+  - [ ] `universe sync`는 종목기본정보(`stk_isu_base_info`)로 대체 가능성이 있다 — 필드 확인 필요.
+        **FDR을 계속 쓰면 우리 스로틀 밖의 KRX 트래픽이 남는다**
 - [ ] **K-6 빈 항목을 어떻게 덮을 것인가 — 미결.** `flows` · N7 · N4
-  - [ ] **`flows`가 가장 급하다** — 매일 MDC를 치고 있고 Open API에 대체재가 없다.
-        지금 도는 수집기 중 유일하게 약관 대상이 남는 경로다
+  - [ ] **`flows`가 가장 급하다** — 매일 **38요청**을 MDC로 보내고 있고 Open API에 대체재가 없다
+  - [ ] `common sync --sources krx` 11요청 중 지수 3건은 Open API로 옮길 수 있다.
+        **등락종목수·거래대금 8건(`MDCSTAT01501`)은 대응 여부 불명** — K-2와 같이 확인
   - [ ] 화면 다운로드 = 일회성 과거 백필에는 맞지만 **수동이라 일별 갱신 불가**
   - [ ] 데이터 상품 구입 — 비용 미확인
   - [ ] **공공데이터포털(data.go.kr) 확인** — 금융위원회가 KRX 계열을 공개한다.
@@ -795,3 +822,4 @@ N1 PoC 중에 드러난 별건이다. 측정: [`poc/n1_adjusted_price_vintage.md
 |---|---|
 | 2026-08-15 | 최초 작성. `00`~`09` 계획을 실행 체크리스트로 분해 |
 | 2026-08-16 | **K 묶음 신설.** KRX 차단이 페이싱이 아니라 약관 위반임을 확인하고(K-0), Open API 서비스 목록을 대조했다(K-1). N1·N3는 옮길 수 있고 `flows`·N4·N7은 갈 곳이 없다. N3-5b는 60/152에서 종료 판정, N4·N7에 차단 표기, S-2·V-1b에 선행 조건 갱신 |
+| 2026-08-16 | **K-1b 경로 인벤토리.** `universe sync`가 FDR 라이브러리 안에서 같은 MDC 엔드포인트를 치고 있었다 — 회계에 없던 KRX 수집기다. **문이 셋**(MDC 로그인 / pykrx 로그인 / FDR 익명)이라 K-5 폐기 범위를 넓혔다. `MDCSTAT01501` 응답 키가 `OutBlock_1`이라는 K-2 간접 근거도 기록 |

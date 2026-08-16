@@ -544,15 +544,27 @@ bin/parquet-compute-all.sh --from-step reports --required-coverage-ratio 0.0
 **0.32 req/s**(직전의 1/3)로 다시 돌렸는데 **95요청 만에 재차단**됐다.
 1차 차단은 9시간 만에 풀렸으나 재차단은 5분 만에 왔다. 약관에 속도 조건이 없다.
 
-### 지금 상태
+### 지금 상태 — KRX를 치는 경로는 5개다
 
-| 경로 | KRX 직접 | 상태 |
-|---|---|---|
-| `prices backfill` | **아니다** — `adjusted=True`라 naver로 간다 | 정상 |
-| `prices market-cap-backfill` (N1) | 그렇다 | **중단** |
-| `universe backfill-snapshots` (N3) | 그렇다 | **중단** — 60/152에서 정지 |
-| `flows sync` | 그렇다 (MDC) | **매일 돌고 있다.** 대체 경로 미정 |
-| `common sync --sources krx` | 그렇다 (MDC) | 돌고 있다 |
+| 경로 | 문 | 일 요청 | 상태 |
+|---|---|---:|---|
+| `universe sync --source fdr` | **익명** (FDR 라이브러리 내부) | ~4 | 매일 18:30 |
+| `flows sync` | MDC 로그인 | 38 | 매일 (체인). **대체 경로 미정** |
+| `common sync --sources krx` | MDC 로그인 | 11 | 매일 (체인) |
+| `prices market-cap-backfill` (N1) | pykrx 로그인 | ~6,000 | **중단** |
+| `universe backfill-snapshots` (N3) | pykrx 로그인 | ~290 | **중단** — 60/152 |
+
+**`prices backfill`은 KRX가 아니다.** `adjusted=True`라 pykrx가 naver로 보낸다.
+매일 도는 것 중 가장 크지만(2,763종목) 차단과 무관하다.
+
+**`universe sync`가 KRX 수집기라는 점에 주의한다.** FDR이 라이브러리 안에서
+`data.krx.co.kr/comm/bldAttendant/getJsonData.cmd` — 우리 MDC client와 같은 주소 — 를 친다.
+로그인하지 않고, **우리 `HumanThrottle`도 걸리지 않는다.**
+같은 호스트에 문이 셋(MDC 로그인 / pykrx 로그인 / FDR 익명)이라
+하나를 막아도 나머지가 남는다.
+
+전체 인벤토리:
+[`poc/krx_access_inventory.md`](dev/20260731_raw_features/02_data_expansion_plan/poc/krx_access_inventory.md)
 
 ### 해결 방향
 

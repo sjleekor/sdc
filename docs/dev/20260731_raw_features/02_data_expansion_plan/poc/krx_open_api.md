@@ -100,13 +100,16 @@ O-14에서 우리는 이걸 페이싱 문제로 읽고 스로틀을 통일했다
 
 ## 4. 우리 파이프라인과 맞추면
 
+경로별 현황은 [`krx_access_inventory.md`](krx_access_inventory.md)에 따로 있다.
+
 | 우리 수요 | 현재 경로 | Open API | 판정 |
 |---|---|---|---|
 | **N1** 시총·거래대금·상장주식수 | pykrx → KRX | 일별매매정보 | **필드 확인 필요** |
 | **N3** PIT 유니버스 | pykrx → KRX | 같은 호출 | ✅ 별도 호출 불필요 |
 | `daily_ohlcv` | naver 수정주가 | 같은 호출 | ✅ 단 **미수정 주가** |
-| common 지수 시세 | pykrx / MDC | 시리즈 일별시세정보 | ✅ |
-| common 시장 등락종목수 | MDC | ? | 확인 필요 |
+| `stock_master` (일 유니버스) | **FDR → KRX MDC** | 종목기본정보 | **필드 확인 필요** |
+| common 지수 시세 | MDC | 시리즈 일별시세정보 | ✅ |
+| common 등락종목수·거래대금 | MDC (`MDCSTAT01501`) | ? | 확인 필요 |
 | **`flows` 투자자 순매수** | MDC | **없음** | ❌ |
 | **`flows` 공매도** | MDC | **없음** | ❌ |
 | **N7** BPS/PER/PBR/EPS/DIV/DPS | pykrx → KRX | **없음** | ❌ |
@@ -124,6 +127,10 @@ O-14에서 우리는 이걸 페이싱 문제로 읽고 스로틀을 통일했다
 
 **가능성은 높다.** MDC의 전종목시세(`MDCSTAT01501`)에 세 필드가 다 있고
 Open API는 같은 통계의 API 형태다. 하지만 **단정하지 않는다.**
+
+**근거가 하나 늘었다** ([`krx_access_inventory.md`](krx_access_inventory.md) §7).
+FDR이 매일 치는 `MDCSTAT01501`의 응답 키가 **`OutBlock_1`** — Open API와 같다 — 이고,
+파싱 필드가 `MKTCAP`·`LIST_SHRS`·`ACC_TRDVAL`이다. 정황은 강해졌지만 여전히 정황이다.
 
 **확정 방법**: 키 승인 후 상세 페이지의 TEST 버튼 또는 개발명세서 다운로드. 한 번에 끝난다.
 
