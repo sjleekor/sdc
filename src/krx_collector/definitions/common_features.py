@@ -16,6 +16,22 @@ from krx_collector.domain.models import (
     CommonFeatureSeries,
 )
 
+#: How stale a DAILY series' newest available observation may be before the
+#: build emits NULL instead of carrying it forward.
+#:
+#: Raised from 5 on 2026-08-18. The gate's job is to catch a stalled collector,
+#: so the number has to clear every legitimate market closure and nothing more.
+#: Measured over every KRX session in the lake (2007-2026), the longest closure
+#: is **6 business days**, once: 2017-09-29 -> 2017-10-10, the Chuseok break
+#: that a temporary public holiday stretched to ten calendar days. Second
+#: longest is 5 (2025 Chuseok), which the old value survived by exactly zero
+#: margin -- and 2017 it did not, leaving nine series NULL on 2017-10-10 and
+#: failing the readiness gate on a day when the data was fine.
+#:
+#: 7 covers the observed maximum with one business day of margin, and still
+#: turns a dead collector into NULLs inside a week and a half.
+DAILY_MAX_STALE_BUSINESS_DAYS = 7
+
 
 def default_common_feature_series() -> list[CommonFeatureSeries]:
     """Return source-series seeds for the Phase 1 common feature MVP."""
@@ -35,7 +51,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="next_krx_session",
             source_timezone="Asia/Seoul",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             active=False,
             notes="pykrx index fallback retained after KRX direct validation passed.",
@@ -55,7 +71,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="next_krx_session",
             source_timezone="Asia/Seoul",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             active=False,
             notes="pykrx index fallback retained after KRX direct validation passed.",
@@ -75,7 +91,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="next_krx_session",
             source_timezone="Asia/Seoul",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             active=False,
             notes="pykrx index fallback retained after KRX direct validation passed.",
@@ -101,7 +117,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="next_krx_session",
             source_timezone="Asia/Seoul",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             notes=(
                 "KRX direct source for KOSPI close. Activated after provider "
@@ -130,7 +146,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="next_krx_session",
             source_timezone="Asia/Seoul",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             notes=(
                 "KRX direct source for KOSDAQ close. Activated after provider "
@@ -159,7 +175,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="next_krx_session",
             source_timezone="Asia/Seoul",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             notes=(
                 "KRX direct source for KOSPI200 close. Activated after provider "
@@ -188,7 +204,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="next_krx_session",
             source_timezone="Asia/Seoul",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             notes=(
                 "KRX MDCSTAT01501 market breadth source. Activated after "
@@ -216,7 +232,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="next_krx_session",
             source_timezone="Asia/Seoul",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             notes=(
                 "KRX MDCSTAT01501 market breadth source. Activated after "
@@ -244,7 +260,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="next_krx_session",
             source_timezone="Asia/Seoul",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             notes=(
                 "KRX MDCSTAT01501 market breadth source. Activated after "
@@ -272,7 +288,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="next_krx_session",
             source_timezone="Asia/Seoul",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             notes=(
                 "KRX MDCSTAT01501 aggregate liquidity source. Activated after "
@@ -300,7 +316,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="next_krx_session",
             source_timezone="Asia/Seoul",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             notes=(
                 "KRX MDCSTAT01501 market breadth source. Activated after "
@@ -328,7 +344,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="next_krx_session",
             source_timezone="Asia/Seoul",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             notes=(
                 "KRX MDCSTAT01501 market breadth source. Activated after "
@@ -356,7 +372,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="next_krx_session",
             source_timezone="Asia/Seoul",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             notes=(
                 "KRX MDCSTAT01501 market breadth source. Activated after "
@@ -384,7 +400,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="next_krx_session",
             source_timezone="Asia/Seoul",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             notes=(
                 "KRX MDCSTAT01501 aggregate liquidity source. Activated after "
@@ -412,7 +428,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="next_krx_session",
             source_timezone="Asia/Seoul",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             active=False,
             notes="Inactive KRX direct industry index candidate from finder_equidx.",
@@ -438,7 +454,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="next_krx_session",
             source_timezone="Asia/Seoul",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             active=False,
             notes="Inactive KRX direct industry index candidate from finder_equidx.",
@@ -464,7 +480,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="next_krx_session",
             source_timezone="Asia/Seoul",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             active=False,
             notes="Inactive KRX direct industry index candidate from finder_equidx.",
@@ -490,7 +506,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="next_krx_session",
             source_timezone="Asia/Seoul",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             active=False,
             notes="Inactive KRX direct industry index candidate from finder_equidx.",
@@ -510,7 +526,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="same_krx_session_morning",
             source_timezone="America/New_York",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             notes="FDR global index fallback; usable on the next KRX morning.",
         ),
@@ -529,7 +545,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="same_krx_session_morning",
             source_timezone="America/New_York",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             notes="FDR global index fallback; usable on the next KRX morning.",
         ),
@@ -548,7 +564,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="same_krx_session_morning",
             source_timezone="America/New_York",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             notes="FDR volatility index fallback; usable on the next KRX morning.",
         ),
@@ -613,7 +629,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="same_krx_session_morning",
             source_timezone="America/New_York",
             history_start_date=date(2000, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             notes="FDR commodity fallback; official provider can replace later.",
         ),
@@ -632,7 +648,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="same_krx_session_morning",
             source_timezone="America/New_York",
             history_start_date=date(1976, 6, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             notes=(
                 "FRED official source for US 2Y Treasury yield. Activated after "
@@ -654,7 +670,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="same_krx_session_morning",
             source_timezone="America/New_York",
             history_start_date=date(1962, 1, 2),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             notes=(
                 "FRED official source for US 10Y Treasury yield. Activated after "
@@ -706,7 +722,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="next_krx_session",
             source_timezone="Asia/Seoul",
             history_start_date=date(2001, 1, 1),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             notes=(
                 "ECOS official source. Activated in PR 4-J after 3M/12M "
@@ -733,7 +749,7 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             availability_policy="next_krx_session",
             source_timezone="Asia/Seoul",
             history_start_date=date(2000, 12, 18),
-            max_stale_business_days=5,
+            max_stale_business_days=DAILY_MAX_STALE_BUSINESS_DAYS,
             default_transform="level",
             notes=(
                 "ECOS official source. Activated after 3M/12M operational-range "

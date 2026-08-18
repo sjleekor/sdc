@@ -1,5 +1,6 @@
 from datetime import date
 
+from krx_collector.definitions.common_features import DAILY_MAX_STALE_BUSINESS_DAYS
 from krx_collector.domain.enums import Source
 from krx_collector.domain.models import (
     CommonFeatureCatalogEntry,
@@ -92,28 +93,34 @@ def test_default_common_feature_series_policies_match_pit_contract() -> None:
 
 def test_default_common_feature_series_declares_stale_limits() -> None:
     series_by_id = {item.series_id: item for item in default_common_feature_series()}
+    daily = (
+        "market_kospi",
+        "market_kospi_krx",
+        "market_kospi_advancers_krx",
+        "market_kospi_turnover_value_krx",
+        "market_kosdaq",
+        "market_kosdaq_krx",
+        "market_kosdaq_advancers_krx",
+        "market_kosdaq_turnover_value_krx",
+        "market_kospi200",
+        "market_kospi200_krx",
+        "global_sp500",
+        "global_nasdaq",
+        "global_vix",
+        "commodity_wti",
+        "rate_us2y",
+        "rate_us10y",
+        "rate_kr_gov3y",
+        "rate_kr_gov10y",
+    )
+    for series_id in daily:
+        limit = series_by_id[series_id].max_stale_business_days
+        assert limit == DAILY_MAX_STALE_BUSINESS_DAYS, series_id
 
-    assert series_by_id["market_kospi"].max_stale_business_days == 5
-    assert series_by_id["market_kospi_krx"].max_stale_business_days == 5
-    assert series_by_id["market_kospi_advancers_krx"].max_stale_business_days == 5
-    assert series_by_id["market_kospi_turnover_value_krx"].max_stale_business_days == 5
-    assert series_by_id["market_kosdaq"].max_stale_business_days == 5
-    assert series_by_id["market_kosdaq_krx"].max_stale_business_days == 5
-    assert series_by_id["market_kosdaq_advancers_krx"].max_stale_business_days == 5
-    assert series_by_id["market_kosdaq_turnover_value_krx"].max_stale_business_days == 5
-    assert series_by_id["market_kospi200"].max_stale_business_days == 5
-    assert series_by_id["market_kospi200_krx"].max_stale_business_days == 5
-    assert series_by_id["global_sp500"].max_stale_business_days == 5
-    assert series_by_id["global_nasdaq"].max_stale_business_days == 5
-    assert series_by_id["global_vix"].max_stale_business_days == 5
-    assert series_by_id["commodity_wti"].max_stale_business_days == 5
+    # Sources that publish on their own calendar keep their own limits.
     assert series_by_id["commodity_wti_fred"].max_stale_business_days == 10
     assert series_by_id["fx_usdkrw"].max_stale_business_days == 10
     assert series_by_id["fx_usdkrw_ecos"].max_stale_business_days == 10
-    assert series_by_id["rate_us2y"].max_stale_business_days == 5
-    assert series_by_id["rate_us10y"].max_stale_business_days == 5
-    assert series_by_id["rate_kr_gov3y"].max_stale_business_days == 5
-    assert series_by_id["rate_kr_gov10y"].max_stale_business_days == 5
     assert series_by_id["macro_cpi"].max_stale_business_days == 45
     assert series_by_id["macro_m2"].max_stale_business_days == 90
 
@@ -261,7 +268,7 @@ def test_default_common_feature_industry_index_candidates_remain_inactive() -> N
         assert series.market == market
         assert series.availability_policy == "next_krx_session"
         assert series.source_timezone == "Asia/Seoul"
-        assert series.max_stale_business_days == 5
+        assert series.max_stale_business_days == DAILY_MAX_STALE_BUSINESS_DAYS
         assert series.endpoint_params == {
             "bld": "dbms/MDC/STAT/standard/MDCSTAT00301",
             "output_key": "output",
@@ -657,3 +664,17 @@ def test_the_employment_series_use_the_same_conservative_availability_lag() -> N
         assert series.availability_policy == cpi.availability_policy
         assert series.manual_lag_days == cpi.manual_lag_days
         assert series.max_stale_business_days == cpi.max_stale_business_days
+
+
+def test_the_daily_stale_limit_clears_the_longest_krx_closure() -> None:
+    # The limit exists to catch a stalled collector, so it has to clear every
+    # legitimate closure and nothing more. Measured over every session in the
+    # lake (2007-2026), the longest is six business days — 2017-09-29 to
+    # 2017-10-10, the Chuseok break a temporary public holiday stretched to ten
+    # calendar days. At 5 it did not clear, and nine series went NULL on a day
+    # whose data was fine.
+    longest_observed_closure_business_days = 6
+
+    assert DAILY_MAX_STALE_BUSINESS_DAYS > longest_observed_closure_business_days
+    # ...and not so generous that a dead collector goes unnoticed for weeks.
+    assert DAILY_MAX_STALE_BUSINESS_DAYS <= 10

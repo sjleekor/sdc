@@ -155,6 +155,14 @@ def default_metric_catalog() -> list[MetricCatalogEntry]:
     ]
 
 
+#: Priority band for the I7 XBRL fallback rules. Statement rules sit at 10
+#: (CFS) and 20 (OFS), and these sit strictly below both so a fallback only
+#: ever fills a gap -- it never outranks a figure the financial-statement API
+#: actually reported.
+XBRL_FALLBACK_CFS_PRIORITY = 100
+XBRL_FALLBACK_OFS_PRIORITY = 200
+
+
 def _financial_rule(
     metric_code: str, account_id: str, sj_div: str, priority: int, fs_div: str
 ) -> MetricMappingRule:
@@ -167,6 +175,30 @@ def _financial_rule(
         fs_div=fs_div,
         sj_div=sj_div,
         account_id=account_id,
+    )
+
+
+def _xbrl_fallback_rule(
+    metric_code: str, concept_id: str, priority: int, fs_div: str
+) -> MetricMappingRule:
+    """An XBRL rule that fills a financial-statement metric's gaps (I7).
+
+    Different from the ``xbrl.*`` rules above in one way that matters: it names
+    a ``fs_div``. The mart reads the basis off the XBRL context's dimensions
+    (``ConsolidatedMember`` -> CFS, ``SeparateMember`` -> OFS) for such a rule,
+    and only then does the candidate land in the same winner partition as the
+    statement rule it is meant to back up. A rule without ``fs_div`` stays at
+    ``fs_basis = ''``, which is a different partition, so it cannot fill a gap
+    -- it can only add a second row.
+    """
+    return MetricMappingRule(
+        rule_code=f"xbrlfb.{metric_code}.{fs_div.lower()}.{concept_id.lower()}",
+        metric_code=metric_code,
+        source_table="dart_xbrl_fact_raw",
+        value_selector="value_numeric",
+        priority=priority,
+        fs_div=fs_div,
+        account_id=concept_id,
     )
 
 
@@ -358,6 +390,59 @@ def default_metric_mapping_rules() -> list[MetricMappingRule]:
                     account_id=concept_id,
                 )
             )
+
+    # I7 — XBRL fallback for the financial-statement metrics.
+    #
+    # The diagnosis this closes: `fin_value_z`'s sales-to-price component is
+    # filled for about 5% of rows, and `fin_gross_profitability` has coverage
+    # 0.03, because `revenue` has 8,103 canonical rows against `net_income`'s
+    # 141,011. The first reading was that the catalog mapped only the
+    # `ifrs-full_` spelling and missed `ifrs_`. Counting the 2026-08-12 lake
+    # showed something larger: the financial metrics had no XBRL rule at all.
+    # The same facts are in `dart_xbrl_fact_raw` -- `ifrs-full_Revenue` 555,934
+    # and `ifrs_Revenue` 184,846 -- and nothing was reading them.
+    #
+    # Priority sits below every statement rule (10/20 for CFS/OFS) so this only
+    # fills gaps and never outranks a figure the financial-statement API
+    # reported. Both spellings are mapped, `ifrs-full_` first.
+    xbrl_fallback_specs = [
+        ("revenue", ["ifrs-full_Revenue", "ifrs_Revenue"]),
+        ("cogs", ["ifrs-full_CostOfSales", "ifrs_CostOfSales"]),
+        ("gross_profit", ["ifrs-full_GrossProfit", "ifrs_GrossProfit"]),
+        (
+            "operating_income",
+            ["dart_OperatingIncomeLoss", "ifrs-full_ProfitLossFromOperatingActivities"],
+        ),
+        ("total_assets", ["ifrs-full_Assets", "ifrs_Assets"]),
+        ("total_liabilities", ["ifrs-full_Liabilities", "ifrs_Liabilities"]),
+        ("total_equity", ["ifrs-full_Equity", "ifrs_Equity"]),
+        ("net_income", ["ifrs-full_ProfitLoss", "ifrs_ProfitLoss"]),
+        (
+            "controlling_net_income",
+            [
+                "ifrs-full_ProfitLossAttributableToOwnersOfParent",
+                "ifrs_ProfitLossAttributableToOwnersOfParent",
+            ],
+        ),
+        (
+            "operating_cash_flow",
+            [
+                "ifrs-full_CashFlowsFromUsedInOperatingActivities",
+                "ifrs_CashFlowsFromUsedInOperatingActivities",
+            ],
+        ),
+    ]
+    for metric_code, concept_ids in xbrl_fallback_specs:
+        for priority_offset, concept_id in enumerate(concept_ids):
+            for fs_div, base_priority in (
+                ("CFS", XBRL_FALLBACK_CFS_PRIORITY),
+                ("OFS", XBRL_FALLBACK_OFS_PRIORITY),
+            ):
+                rules.append(
+                    _xbrl_fallback_rule(
+                        metric_code, concept_id, base_priority + priority_offset, fs_div
+                    )
+                )
     return rules
 
 

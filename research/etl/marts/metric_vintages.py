@@ -462,13 +462,26 @@ def build_stock_metric_vintage_fact_sql(
 
         UNION ALL
         -- dart_xbrl_fact_raw (is itself the pairing target for financial rows)
+        --
+        -- fs_basis follows the RULE, not the source table (I7). A rule with
+        -- ``fs_div = ''`` keeps the historical empty basis; the metrics sourced
+        -- that way -- weighted-average shares, depreciation -- have always
+        -- lived at ``fs_basis = ''`` and moving them would break parity well
+        -- outside I7's scope.
+        --
+        -- A rule naming CFS or OFS reads the basis off the XBRL dimensions
+        -- instead, which is what lets an XBRL fallback compete with a
+        -- financial-statement rule at all. The winner window partitions by
+        -- fs_basis, so a fallback stranded at '' never competes with a CFS
+        -- statement row -- it just adds a second row for the same metric and
+        -- period. That is what happened on the first attempt.
         SELECT
             c.ticker, c.market, c.corp_code,
             r.metric_code,
             {period_type_xf} AS period_type,
             pe.period_end AS statement_period_end,
             x.bsns_year, x.reprt_code,
-            '' AS fs_basis,
+            CASE WHEN r.fs_div = '' THEN '' ELSE COALESCE(x.xbrl_fs_basis, '') END AS fs_basis,
             x.rcept_no,
             CAST(x.value_numeric AS DECIMAL(30,4)) AS value_numeric,
             r.unit,
@@ -492,6 +505,7 @@ def build_stock_metric_vintage_fact_sql(
         JOIN corp c ON c.ticker = x.ticker
         JOIN rule_rel r
           ON r.source_table = 'dart_xbrl_fact_raw'
+         AND (r.fs_div = '' OR x.xbrl_fs_basis = r.fs_div)
          AND (r.account_id = '' OR x.concept_id = r.account_id)
          AND (r.account_nm = ''
               OR x.label_ko = r.account_nm

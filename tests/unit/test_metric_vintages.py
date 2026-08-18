@@ -629,3 +629,147 @@ def test_pairing_is_unlinked_when_no_context_matches_the_basis() -> None:
     # Not "value_mismatch": the two numbers were never comparable, and calling
     # that a mismatch is what made the frozen tolerance unusable as a gate.
     assert _revenue_row(con, "OFS")[1] == "unlinked_receipt"
+
+
+# --------------------------------------------------------------------------
+# I7 — the XBRL fallback for financial-statement metrics
+# --------------------------------------------------------------------------
+
+
+def _xbrl_row(concept: str, dims: str, value: float, rcept: str = "20260310000001") -> str:
+    return (
+        "INSERT INTO dart_xbrl_fact_raw VALUES "
+        f"('00126380','005930',2025,'11011','{rcept}','{concept}','x',"
+        f"'ctx_{concept}_{dims[-14:-2]}','duration',DATE '2025-01-01',DATE '2025-12-31',NULL,'"
+        + dims
+        + f"',{value},'x')"
+    )
+
+
+def _statement_row(account_id: str, fs_div: str, value: float) -> str:
+    return (
+        "INSERT INTO dart_financial_statement_raw "
+        "(corp_code, ticker, bsns_year, reprt_code, fs_div, sj_div, account_id, "
+        "account_nm, ord, thstrm_amount, currency, rcept_no) VALUES "
+        f"('00126380','005930',2025,'11011','{fs_div}','IS','{account_id}','x',1,"
+        f"{value},'KRW','20260310000001')"
+    )
+
+
+def test_the_fallback_fills_a_metric_the_statement_api_never_reported() -> None:
+    # The whole point of I7. `revenue` had 8,103 canonical rows against
+    # `net_income`'s 141,011, because the financial-statement API simply does
+    # not carry it for most filers — while dart_xbrl_fact_raw does.
+    con = _base_con()
+    con.execute(_xbrl_row("ifrs-full_Revenue", _DIM_CFS, 1000.0))
+    _register(con)
+
+    rows = con.execute(
+        f"SELECT fs_basis, value_numeric, source_table FROM {SMVF_TABLE} "
+        "WHERE metric_code = 'revenue'"
+    ).fetchall()
+
+    assert rows == [("CFS", 1000, "dart_xbrl_fact_raw")]
+
+
+def test_the_fallback_lands_in_the_same_partition_as_the_statement_rule() -> None:
+    # The defect the first attempt hit: the XBRL branch hardcoded fs_basis to
+    # '', the winner window partitions by fs_basis, and so a fallback never
+    # competed with a CFS statement row — it added a second row for the same
+    # metric and period instead of filling a gap.
+    con = _base_con()
+    con.execute(_statement_row("ifrs-full_Revenue", "CFS", 1000.0))
+    con.execute(_xbrl_row("ifrs-full_Revenue", _DIM_CFS, 1000.0))
+    _register(con)
+
+    rows = con.execute(
+        f"SELECT fs_basis, source_table FROM {SMVF_TABLE} WHERE metric_code = 'revenue'"
+    ).fetchall()
+
+    assert len(rows) == 1
+    assert rows[0] == ("CFS", "dart_financial_statement_raw")
+
+
+def test_a_reported_figure_always_outranks_the_fallback() -> None:
+    # Priority 100/200 sits below the statement rules' 10/20, so the fallback
+    # only ever fills a gap. If it could win, an XBRL context would silently
+    # replace the number OpenDART actually reported.
+    con = _base_con()
+    con.execute(_statement_row("ifrs-full_Revenue", "CFS", 1000.0))
+    con.execute(_xbrl_row("ifrs-full_Revenue", _DIM_CFS, 9999.0))
+    _register(con)
+
+    value = con.execute(
+        f"SELECT value_numeric FROM {SMVF_TABLE} WHERE metric_code = 'revenue'"
+    ).fetchone()[0]
+
+    assert value == 1000
+
+
+def test_the_basis_comes_from_the_xbrl_dimensions() -> None:
+    # ConsolidatedMember -> CFS, SeparateMember -> OFS. Without this the two
+    # bases would collapse onto one row and one of them would be lost.
+    con = _base_con()
+    con.execute(_xbrl_row("ifrs-full_Revenue", _DIM_CFS, 1000.0))
+    con.execute(_xbrl_row("ifrs-full_Revenue", _DIM_OFS, 700.0))
+    _register(con)
+
+    rows = con.execute(
+        f"SELECT fs_basis, value_numeric FROM {SMVF_TABLE} "
+        "WHERE metric_code = 'revenue' ORDER BY fs_basis"
+    ).fetchall()
+
+    assert rows == [("CFS", 1000), ("OFS", 700)]
+
+
+def test_a_fact_with_no_basis_dimension_is_not_used_as_a_fallback() -> None:
+    # A context that names no consolidation axis cannot be assigned to CFS or
+    # OFS, and guessing would put a separate-basis figure in the consolidated
+    # row. Every real filing marks the axis (all 2,545 FY2024 annuals do).
+    con = _base_con()
+    con.execute(_xbrl_row("ifrs-full_Revenue", "[]", 1000.0))
+    _register(con)
+
+    rows = con.execute(
+        f"SELECT count(*) FROM {SMVF_TABLE} WHERE metric_code = 'revenue'"
+    ).fetchone()
+
+    assert rows[0] == 0
+
+
+def test_the_legacy_xbrl_metrics_keep_their_empty_basis() -> None:
+    # weighted_avg_shares and friends have always lived at fs_basis = ''.
+    # Moving them would break parity well outside I7's scope, which is why the
+    # basis follows the RULE rather than the source table.
+    con = _base_con()
+    con.execute(_xbrl_row("ifrs-full_WeightedAverageShares", _DIM_CFS, 500.0))
+    _register(con)
+
+    rows = con.execute(
+        f"SELECT fs_basis FROM {SMVF_TABLE} WHERE metric_code = 'weighted_avg_shares'"
+    ).fetchall()
+
+    assert rows == [("",)]
+
+
+def test_both_ifrs_spellings_are_mapped() -> None:
+    # `ifrs_Revenue` carries 184,846 facts against `ifrs-full_Revenue`'s
+    # 555,934; mapping only one spelling leaves a quarter of them unread.
+    from krx_collector.definitions.metric_rules import default_metric_mapping_rules
+
+    fallback = [r for r in default_metric_mapping_rules() if r.rule_code.startswith("xbrlfb.")]
+    revenue_concepts = {r.account_id for r in fallback if r.metric_code == "revenue"}
+
+    assert revenue_concepts == {"ifrs-full_Revenue", "ifrs_Revenue"}
+
+
+def test_every_fallback_rule_names_a_basis() -> None:
+    # A fallback rule without fs_div would be stranded at fs_basis='' and could
+    # never fill the gap it exists for.
+    from krx_collector.definitions.metric_rules import default_metric_mapping_rules
+
+    fallback = [r for r in default_metric_mapping_rules() if r.rule_code.startswith("xbrlfb.")]
+
+    assert fallback
+    assert all(r.fs_div in {"CFS", "OFS"} for r in fallback)
+    assert all(r.priority >= 100 for r in fallback)

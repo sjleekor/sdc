@@ -45,6 +45,9 @@ class ReadinessRow:
     coverage_ratio: float
     ready: bool
     blockers: tuple[str, ...]
+    #: First feature date this feature was judged over. ``None`` when the whole
+    #: calendar was used, which is also what a feature with no facts gets.
+    window_start: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +126,23 @@ def coverage_report(
     return out
 
 
+def _first_feature_dates(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    cfdf_view: str,
+    codes: Sequence[str],
+) -> dict[str, date]:
+    """Earliest date each feature has a fact for."""
+    rows = con.execute(f"""
+        WITH feature_codes(feature_code) AS ({_values_list(list(codes))})
+        SELECT c.feature_code, min(f.feature_date)
+        FROM feature_codes c
+        LEFT JOIN {cfdf_view} f ON f.feature_code = c.feature_code
+        GROUP BY c.feature_code
+        """).fetchall()
+    return {code: first for code, first in rows if first is not None}
+
+
 def readiness_report(
     con: duckdb.DuckDBPyConnection,
     *,
@@ -130,9 +150,33 @@ def readiness_report(
     required_coverage_ratio: float = 1.0,
     cfdf_view: str = "common_feature_daily_fact",
     feature_codes: Sequence[str] | None = None,
+    per_feature_window: bool = True,
 ) -> list[ReadinessRow]:
-    """Strict readiness: a feature is ready only with full coverage, no nulls,
-    no missing dates, and no PIT violations. Mirrors the Postgres readiness report."""
+    """Strict readiness: full coverage, no nulls, no missing dates, no PIT
+    violations — each feature judged over its own history.
+
+    ``per_feature_window`` is what makes this gate usable, and it is on by
+    default because the alternative measured 4 of 37 ready and stayed there.
+
+    The calendar spans the earliest availability of ANY series through the
+    latest, so four monthly ECOS series that start a year before everything
+    else (2013-06-20 against 2014-06-16) set the window for all 37. The other
+    33 were then charged ``missing_count=257`` for not existing yet — which is
+    not a defect, it is a shorter history. Only those same four passed, and a
+    gate that fails 33 of 37 every run is a gate nobody reads.
+
+    Judging each feature from its own first fact keeps every real defect: a hole
+    inside a feature's own span still counts, which is how 2017-10-10 (the
+    Chuseok closure that outran ``max_stale_business_days``) stays visible.
+
+    Set it ``False`` to reproduce the original single-window behaviour.
+    """
+    codes = _feature_codes(feature_codes)
+    first_dates = (
+        _first_feature_dates(con, cfdf_view=cfdf_view, codes=codes) if per_feature_window else {}
+    )
+    ordered_dates = sorted(feature_dates)
+
     out: list[ReadinessRow] = []
     for row in coverage_report(
         con,
@@ -140,25 +184,40 @@ def readiness_report(
         cfdf_view=cfdf_view,
         feature_codes=feature_codes,
     ):
-        blockers: list[str] = []
-        if row.target_count == 0:
-            blockers.append("target_count=0")
-        if row.coverage_ratio < required_coverage_ratio:
-            blockers.append(
-                f"coverage_ratio={row.coverage_ratio} < required={required_coverage_ratio}"
+        target_count = row.target_count
+        missing_count = row.missing_count
+        coverage_ratio = row.coverage_ratio
+        window_start: date | None = None
+
+        first = first_dates.get(row.feature_code)
+        if first is not None:
+            window_start = first
+            target_count = sum(1 for day in ordered_dates if day >= first)
+            # Facts can only exist on or after the first one, so fact_count is
+            # already confined to the window; only the target moves.
+            missing_count = max(target_count - row.fact_count, 0)
+            coverage_ratio = (
+                round(row.non_null_count / target_count, 4) if target_count > 0 else 0.0
             )
+
+        blockers: list[str] = []
+        if target_count == 0:
+            blockers.append("target_count=0")
+        if coverage_ratio < required_coverage_ratio:
+            blockers.append(f"coverage_ratio={coverage_ratio} < required={required_coverage_ratio}")
         if row.null_count > 0:
             blockers.append(f"null_count={row.null_count}")
-        if row.missing_count > 0:
-            blockers.append(f"missing_count={row.missing_count}")
+        if missing_count > 0:
+            blockers.append(f"missing_count={missing_count}")
         if row.pit_violation_count > 0:
             blockers.append(f"pit_violation_count={row.pit_violation_count}")
         out.append(
             ReadinessRow(
                 feature_code=row.feature_code,
-                coverage_ratio=row.coverage_ratio,
+                coverage_ratio=coverage_ratio,
                 ready=not blockers,
                 blockers=tuple(blockers),
+                window_start=window_start,
             )
         )
     out.sort(key=lambda r: (not r.ready, r.feature_code))
