@@ -1910,11 +1910,12 @@ def _handle_flows_sync_kis(args: argparse.Namespace) -> None:
     print(f"   - Requests skipped: {result.requests_skipped}")
     print(f"   - Rows upserted: {result.rows_upserted}")
     print(f"   - No-data requests: {result.no_data_requests}")
-    if result.pending_publication:
+    if result.rows_outside_window:
         print(
-            f"   - Not published yet: {result.pending_publication} "
-            "(KIS had rows for these tickers, none in the requested window; "
-            "not tombstoned, retried next run)"
+            f"   - No session in window: {result.rows_outside_window} "
+            "(KIS returned rows for these tickers, all outside the requested "
+            "window — no trading in it, typically a halt; not tombstoned, "
+            "retried next run)"
         )
     if result.phase_counts:
         print("   - Group counts:")

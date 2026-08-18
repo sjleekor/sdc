@@ -226,16 +226,21 @@ class KisFlowProvider:
             logger.warning("KIS %s fetch failed for %s: %s", label, ticker, exc)
             return SecurityFlowFetchResult(records=records, error=str(exc))
 
-        # "Upstream has nothing" and "upstream has not published our window yet"
-        # are different answers, and only the first may be tombstoned.
+        # "Upstream has nothing for this ticker" and "upstream has nothing for
+        # this ticker in THIS window" are different answers, and only the first
+        # may be tombstoned.
         #
         # The no-data tombstone key is ``group:ticker`` with no date in it, so a
         # single no-data verdict skips that ticker for the whole TTL (7 days by
-        # default). KIS publishes each session's investor breakdown per ticker
-        # on its own schedule — measured on prod at 20:5x KST on 2026-08-18,
-        # 005930 carried that day while five other tickers still ended at
-        # 08-14 — so treating a lag as no-data would turn a one-day wait into a
-        # week-long hole, once per ticker, silently.
+        # default). This endpoint returns the ticker's most recent traded
+        # sessions, so a ticker that did not trade during the requested window
+        # answers with thirty good rows, all of them older than it.
+        #
+        # Measured on prod 2026-08-18: 000880, 001570, 001470, 000300 and
+        # 900270 all came back ending 08-14, and daily_ohlcv shows why — volume
+        # zero with the price frozen since 08-10, i.e. trading halts. Reading
+        # that as no-data would suspend those tickers for a week, and a halted
+        # ticker is precisely one whose resumption must not be missed.
         #
         # Rows seen but none in the window therefore returns neither records nor
         # no_data: nothing is written, nothing is tombstoned, and the next run

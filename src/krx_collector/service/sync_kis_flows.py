@@ -115,12 +115,13 @@ class KisFlowSyncResult:
     rows_upserted: int = 0
     no_data_requests: int = 0
     #: Requests that reached KIS and got well-formed rows, none of them inside
-    #: the requested window — KIS had not published that session for this
-    #: ticker yet. Deliberately not counted as no-data: the tombstone key has
-    #: no date in it, so tombstoning a lag would skip the ticker for the whole
-    #: TTL. Counted separately because otherwise such a run reports "attempted
-    #: 129, rows 0, no_data 0, errors 0" and reads as if nothing happened.
-    pending_publication: int = 0
+    #: the requested window — the ticker did not trade during it. Halts are the
+    #: common cause. Deliberately NOT counted as no-data: the tombstone key has
+    #: no date in it, so tombstoning this would suspend the ticker for the whole
+    #: TTL, and a halted ticker is exactly one whose resumption must be caught.
+    #: Counted separately because otherwise such a run reports "attempted 129,
+    #: rows 0, no_data 0, errors 0" and reads as if nothing happened.
+    rows_outside_window: int = 0
     phase_counts: dict[str, KrxFlowPhaseCounts] = field(default_factory=dict)
     pending_metrics: list[str] = field(default_factory=list)
     skipped_groups: dict[str, str] = field(default_factory=dict)
@@ -496,7 +497,7 @@ def sync_kis_security_flows(
                     phase_counts.no_data_requests += 1
                     no_data_keys_seen.add(item.request_key)
                 elif not fetch_result.records:
-                    result.pending_publication += 1
+                    result.rows_outside_window += 1
 
             now = time.monotonic()
             should_log = processed == len(plan.items)
