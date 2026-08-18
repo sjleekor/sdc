@@ -166,6 +166,21 @@ def _parse_dated_rows(
 
     for row in rows:
         row_count += 1
+        # Field presence is checked on EVERY row, before the window filter.
+        #
+        # KIS publishes a session's investor breakdown per ticker on its own
+        # schedule: measured 2026-08-18 at 20:5x KST, 005930 already carried
+        # that day while 000300, 000880, 00088K, 001470 and 001570 still ended
+        # at 08-14. Asking those five for a single recent day returns 30
+        # perfectly good rows, none of them inside the window.
+        #
+        # Counting matches only inside the window turned that ordinary
+        # publication lag into "the response shape changed", which then tripped
+        # the consecutive-failure guard and stopped the whole run. The check
+        # exists to catch a rename, and a rename is visible in any row.
+        if any(field_name in row for field_name in field_specs):
+            matched_any_field = True
+
         trade_date = parse_trade_date(row.get(TRADE_DATE_FIELD))
         if trade_date is None:
             continue
@@ -174,8 +189,6 @@ def _parse_dated_rows(
         if trade_date < start or trade_date > end:
             continue
         for field_name, spec in field_specs.items():
-            if field_name in row:
-                matched_any_field = True
             value = parse_decimal(row.get(field_name))
             if value is None:
                 continue

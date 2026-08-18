@@ -626,3 +626,66 @@ def test_the_measured_default_rate_is_what_the_account_actually_sustains() -> No
 
     assert DEFAULT_KIS_REQUESTS_PER_SECOND == 1.0
     assert Settings().kis_max_burst_requests == 1
+
+
+def test_a_publication_lag_is_no_data_not_a_shape_change() -> None:
+    # Measured on prod 2026-08-18 at 20:5x KST: KIS had that session's investor
+    # breakdown for 005930 but not yet for 000300, 000880, 00088K, 001470 or
+    # 001570, whose newest row was still 08-14. Asking those five for a single
+    # recent day returns 30 perfectly good rows, none inside the window.
+    #
+    # Counting field matches only inside the window read that as "the response
+    # shape changed", which tripped the consecutive-failure guard and stopped
+    # the whole changeover run on its first five tickers.
+    rows = [
+        {
+            "stck_bsop_date": "20260814",
+            "prsn_ntby_qty": "410513",
+            "frgn_ntby_qty": "577859",
+            "orgn_ntby_qty": "-941461",
+        }
+    ]
+
+    records = parse_investor_net_volume_rows(
+        rows,
+        ticker="000300",
+        market=Market.KOSPI,
+        start=date(2026, 8, 18),
+        end=date(2026, 8, 18),
+        request={},
+    )
+
+    assert records == []
+
+
+def test_a_genuine_rename_still_raises() -> None:
+    # The guard has to keep working: a silent rename would otherwise look like
+    # a run that legitimately found nothing, and forward-fill collectors are
+    # exactly where that goes unnoticed.
+    rows = [{"stck_bsop_date": "20260818", "renamed_ntby_qty": "1"}]
+
+    with pytest.raises(KisFieldError):
+        parse_investor_net_volume_rows(
+            rows,
+            ticker="000300",
+            market=Market.KOSPI,
+            start=date(2026, 8, 18),
+            end=date(2026, 8, 18),
+            request={},
+        )
+
+
+def test_a_rename_is_caught_even_when_every_row_is_out_of_window() -> None:
+    # Field presence is judged per row, not per in-window row, so the check
+    # survives the case that used to mask it.
+    rows = [{"stck_bsop_date": "20260814", "renamed_ntby_qty": "1"}]
+
+    with pytest.raises(KisFieldError):
+        parse_investor_net_volume_rows(
+            rows,
+            ticker="000300",
+            market=Market.KOSPI,
+            start=date(2026, 8, 18),
+            end=date(2026, 8, 18),
+            request={},
+        )
