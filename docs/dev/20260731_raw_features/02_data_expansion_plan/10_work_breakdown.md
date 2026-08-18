@@ -500,8 +500,30 @@ N6은 대상 집합이 N3에서 S-1으로 바뀌었으므로(N6-5) **이제 KRX 
   - [x] 후보: `own_insider_filing_60d` · `own_insider_filing_burst` ·
         `own_major_filing_60d` · `own_amendment_ratio_1y`. 윈도 {60,120}, 부호 미고정
   - [x] 노출 시점 = `rcept_dt`의 **다음 거래일**
-- [ ] **N5-7 (신규) receipt 기반 지분공시 피쳐 구현** — 신규 수집 없음.
-      **`09` §3의 공시 활동 피쳐와 같은 원천이므로 한 묶음으로 사전등록**
+- [x] **N5-7 (신규) receipt 기반 지분공시 피쳐 구현** — `research/etl/features/filing_activity.py`,
+      `feat_filing_activity`. 신규 수집 없음. **`09` §3 공시 활동 피쳐와 한 묶음**으로 만들었다
+  - [x] 7종 — `ev_filing_count_{60,120}d` · `ev_filing_burst_{60,120}d` ·
+        `ev_amendment_ratio_1y` · `own_insider_filing_{60,120}d` ·
+        `own_insider_filing_burst_{60,120}d` · `own_major_filing_{60,120}d` ·
+        `own_amendment_ratio_1y`
+  - [x] **분류 규칙은 실측으로 확정** — insider `임원ㆍ주요주주특정증권등소유상황보고서`
+        139,697건/2,607사(PoC 수치와 일치), 5% rule `주식등의대량보유상황보고서` 101,656건.
+        **구분자가 가운뎃점이 아니라 `ㆍ`(U+318D)**라 부분일치로 잡는다
+  - [x] **정정 마커는 새로 정의하지 않는다** — `phase_b_quality.AMENDMENT_MARKERS`를
+        그대로 import한다. 같은 개념을 두 번 정의하면 `revision_ratio`와 조용히 갈라진다.
+        **동일 객체인지 테스트로 고정**
+  - [x] **PIT — 접수일 다음 거래일 노출.** lake 실측 2,859개 접수일 전부 매핑, 위반 0,
+        간격 1~11일(연휴 포함). DART는 장중에도 공시하므로 당일 노출은 저녁 공시가
+        그날 오후 수익률을 예측하게 만든다
+  - [x] 테스트 13건 + lake 실행 — 6,289,728행 / 2,792 ticker.
+        커버리지 count 100% · 정정비율 94.7% · burst 84.7%.
+        2024년 이후 `ev_filing_count_60d` 평균 11.7 **표준편차 23.0**(횡단면 변동 충분)
+  - [x] **검증 사례** — 삼성전자 2018-06-29 burst **3.86**. 50:1 액면분할 직후
+        임원·주요주주가 보유 현황을 일제히 재보고한 구간이다
+  - [ ] **`ev_material_event_flag`는 뺐다** — "무엇이 중대사건인가"(`report_nm` 목록)가
+        아직 결정이 아니다. 잠정 목록으로 넣으면 **사전등록 묶음 안에 미등록 판단이 들어간다**
+  - [ ] **기존 스캔 배선은 건드리지 않았다** — `horizon_scan_inputs.py`에 넣으면
+        `config_hash=e55c3046…`가 바뀐다. 검정 트랙의 "새 config로 별도 사전등록" 규율
 - [ ] **N5-8 (보류) `elestock` 정기 수집** — 지금 만들지 않는다.
       **다만 지연 1개월 = 과거 1개월 영구 손실**(2년 윈도가 흘러간다)
       (`fin_sue` coverage 0.0000 사례를 반복하지 않는다)
@@ -1404,3 +1426,4 @@ N1 PoC 중에 드러난 별건이다. 측정: [`poc/n1_adjusted_price_vintage.md
 | 2026-08-18 | **N6-7 결정 5개 고정 — 권고안대로.** 직원 수는 `sm`(합계), `hc_revenue_per_employee` 분모는 기말, 감사의견은 이진, 부호는 감사 비적정만 `−` 고정. **⑤ 합병·분할 보정은 규칙을 새로 세웠다** — 증거(`합병등종료보고서(분할\|합병)`) AND 크기(\|YoY\| ≥ 30% = 2σ)면 결측, 증거만 있으면 플래그. **그 과정에서 PoC 권고안이 틀린 원천을 지목했다는 게 드러났다** — `dart_capital_change_raw`로는 **동기가 된 LG화학 물적분할을 못 잡는다**(모회사 주식 수가 안 바뀐다). lake 실측: LG화학 2019~2021 분할 흔적 0, `isu_dcrs_stle` 전체 15종에 합병·회사분할 없음(`주식분할` 7,067건은 액면분할). `dart_filing_receipt_raw`의 `합병등종료보고서(분할)`은 2020-12-04로 정확히 찍힌다. 적용 규모 2015~2025 corp-year 43,549 중 **1,023건(2.35%)**. **N6에 남은 blocker는 N6-5 대상 집합(S-1 → sj2) 하나다** |
 | 2026-08-18 | **K-5 pykrx 문을 닫았다.** `prices backfill`이 가장 컸다 — 데이터는 원래 naver인데 **모듈 import만으로 KRX 로그인이 나갔다**(`webio.py` 모듈 레벨 `build_krx_session()`). naver 직접 어댑터로 끊었고 **prod 스크립트가 `--source`를 안 넘겨 기본값 전환만으로 닫힌다**. 실측으로 함정 셋 — 선언부 앞 빈 줄 · EUC-KR bytes를 ElementTree가 거부 · **에러 페이지도 well-formed라 root 태그로 갈라야 한다**(없는 종목도 `<protocol />`은 준다). 검증: naver 종가가 **Open API 원종가와 3종목 전부 일치**. `universe sync --source krx-openapi` 신설(2,763종목 실행 성공) — **`ISU_CD`가 여기서는 ISIN이라 `ISU_SRT_CD`를 써야 하고**, **오늘자 파일이 종가 뒤에도 한동안 안 올라와서**(16:04 KST 실측 0행) 기본 as_of는 마지막 게시일로 물러난다. FDR 기록 정정 — **KRX를 두 번 친다(중복 호출)이면서 목록은 GitHub CSV**라, 기존 두 기록이 각각 반만 맞았다. **pykrx 폴백 제거**, **`ALLOW_KRX_SCRAPING` 기본 off**. `shorting` freshness는 `DISCONTINUED_FLOW_METRICS`로 선행 처리. **남은 문 둘은 prod 자격증명 대기**(`flows`=KIS 키, `universe sync`=`AUTH_KEYS`) |
 | 2026-08-18 | **N6 코드 완성** — 스키마 2 + 등록 6곳 + 어댑터/포트 + 서비스/CLI + 테스트 41건. **L-1 ledger를 처음 실제로 쓰는 수집기다** — 8.4만 호출이 키 한도로 여러 번 끊기는데 `ingestion_runs.params`는 그걸 못 담는다(no-data 목록이 run당 상한, 최근 run만 읽는다). 포트를 엔드포인트별 메서드가 아니라 **statement enum 하나**로 받았다 — 5개가 인자도 응답도 같아서 메서드 5개는 URL만 다른 복사본이 된다. **연도 씨닝을 서비스에 넣었다**(162,000 → 83,700): `hyslrChgSttus`는 누적, 감사의견은 3개년씩 오므로 요청 연도를 건너뛴다. 테스트는 요청 목록이 아니라 **무손실 여부**를 단언한다. 실 DB 검증 — 005930 FY2023 4호출 34행, 감사의견이 실제로 **제55·54·53기 3개년**으로 왔고, ledger 4슬라이스 `expected==actual`, 재실행 시 전부 skip. **남은 건 N6-5 대상 집합(S-1 → sj2)과 N6-8 백필뿐이다** |
+| 2026-08-18 | **N5-7 공시활동 피쳐 구현** — `feat_filing_activity` 7종, 신규 수집 0. 분류 규칙을 lake 실측으로 확정했고(insider 139,697건/2,607사 = PoC 수치와 일치, **구분자가 `ㆍ`(U+318D)**), **정정 마커는 `phase_b_quality`의 것을 그대로 쓴다** — 같은 개념을 두 번 정의하면 `revision_ratio`와 갈라진다. PIT는 접수일 **다음 거래일** 노출이고 접수일 2,859개 전부 위반 0으로 확인했다. lake 실행 6,289,728행 / 2,792 ticker, 2024년 이후 평균 11.7 **표준편차 23.0**. 검증 사례 — 삼성전자 2018-06-29 burst **3.86**은 50:1 액면분할 직후 임원 재보고다. **`ev_material_event_flag`는 뺐다**(중대사건 목록이 아직 결정이 아니다), **스캔 배선도 안 건드렸다**(`config_hash` 보존) |
