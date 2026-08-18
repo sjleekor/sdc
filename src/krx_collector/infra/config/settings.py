@@ -35,6 +35,16 @@ DEFAULT_KIS_BASE_URL = "https://openapi.koreainvestment.com:9443"
 DEFAULT_KIS_REQUESTS_PER_SECOND = 1.0
 
 
+def _split_key_list(raw: str) -> list[str]:
+    """Split a comma-separated API key string, trimming blanks and duplicates."""
+    ordered: list[str] = []
+    for key in raw.split(","):
+        normalized = key.strip()
+        if normalized and normalized not in ordered:
+            ordered.append(normalized)
+    return ordered
+
+
 class RunMode(StrEnum):
     """Application run mode."""
 
@@ -112,6 +122,13 @@ class Settings(BaseSettings):
             :data:`DEFAULT_KIS_REQUESTS_PER_SECOND`.
         kis_max_burst_requests: Token-bucket burst size.  One, because a burst
             is what draws the throttle rejection.
+        krx_openapi_auth_keys_raw: Comma-separated KRX Open API keys, read from
+            ``AUTH_KEYS`` — the header the API itself expects is ``AUTH_KEY``.
+            Use :attr:`krx_openapi_auth_keys` rather than this raw string.
+        datago_api_key: 공공데이터포털 (data.go.kr) service key.  Store the
+            *Encoding* form and put it in the URL verbatim: passing it through
+            a query-parameter encoder turns ``%2B`` into ``%252B`` and the
+            server then receives a different key.
         ecos_api_key: Optional Bank of Korea ECOS API key.
         ecos_timeout_seconds: HTTP timeout for ECOS requests.
         fred_api_key: Optional FRED API key.
@@ -173,6 +190,14 @@ class Settings(BaseSettings):
     kis_requests_per_second: float = DEFAULT_KIS_REQUESTS_PER_SECOND
     kis_max_burst_requests: int = 1
 
+    # KRX Open API (data-dbg.krx.co.kr).  Multi-key like OpenDART: each key
+    # carries its own 10,000 requests/day quota.
+    krx_openapi_auth_keys_raw: str = Field(default="", validation_alias="AUTH_KEYS")
+    _krx_openapi_auth_keys: tuple[str, ...] = PrivateAttr(default=())
+
+    # 공공데이터포털 (data.go.kr)
+    datago_api_key: str = Field(default="", validation_alias="DATAGO_KEY")
+
     # ECOS
     ecos_api_key: str = ""
     ecos_timeout_seconds: float = 20.0
@@ -198,6 +223,11 @@ class Settings(BaseSettings):
     def opendart_api_keys(self) -> tuple[str, ...]:
         """Normalized OpenDART key list from OPENDART_API_KEYS and OPENDART_API_KEY."""
         return self._opendart_api_keys
+
+    @property
+    def krx_openapi_auth_keys(self) -> tuple[str, ...]:
+        """Normalized KRX Open API key list from ``AUTH_KEYS``."""
+        return self._krx_openapi_auth_keys
 
     @field_validator("krx_mdc_timeout_seconds", mode="before")
     @classmethod
@@ -231,21 +261,15 @@ class Settings(BaseSettings):
                 f"@{self.db_host}:{self.db_port}/{self.db_name}"
             )
 
-        ordered_keys: list[str] = []
-        seen_keys: set[str] = set()
-
-        for key in self.opendart_api_keys_raw.split(","):
-            normalized = key.strip()
-            if normalized and normalized not in seen_keys:
-                ordered_keys.append(normalized)
-                seen_keys.add(normalized)
+        ordered_keys = _split_key_list(self.opendart_api_keys_raw)
 
         legacy_key = self.opendart_api_key.strip()
-        if legacy_key and legacy_key not in seen_keys:
+        if legacy_key and legacy_key not in ordered_keys:
             ordered_keys.append(legacy_key)
 
         self.opendart_api_key = legacy_key
         self._opendart_api_keys = tuple(ordered_keys)
+        self._krx_openapi_auth_keys = tuple(_split_key_list(self.krx_openapi_auth_keys_raw))
         return self
 
     def export_krx_credentials_to_environment(self) -> None:

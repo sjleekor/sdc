@@ -1,5 +1,8 @@
 import os
 
+import pytest
+from pydantic import ValidationError
+
 from krx_collector.domain.enums import RunType, Source
 from krx_collector.infra.config.settings import Settings
 
@@ -56,6 +59,31 @@ def test_settings_accept_fred_api_key_from_env(monkeypatch) -> None:
 
     assert settings.fred_api_key == "fred-key"
     assert settings.fred_timeout_seconds == 20.0
+
+
+def test_settings_accept_comma_separated_krx_openapi_keys_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_KEYS", " key_a , key_b ,, key_a , ")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.krx_openapi_auth_keys == ("key_a", "key_b")
+
+
+def test_settings_accept_datago_key_from_env(monkeypatch) -> None:
+    # The Encoding form carries percent escapes; they must survive verbatim.
+    monkeypatch.setenv("DATAGO_KEY", "sE%2BE3t%3D%3D")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.datago_api_key == "sE%2BE3t%3D%3D"
+
+
+def test_settings_reject_unknown_env_names() -> None:
+    # ``extra`` is forbidden, so a credential added to .env without a field
+    # here does not fail at its first use -- it fails every command that
+    # builds Settings.  AUTH_KEYS and DATAGO_KEY did exactly that.
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, krx_openapi_auth_key="typo")
 
 
 def test_settings_accept_krx_mdc_timeout_with_seconds_suffix(monkeypatch) -> None:
