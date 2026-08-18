@@ -549,7 +549,7 @@ bin/parquet-compute-all.sh --from-step reports --required-coverage-ratio 0.0
 | 경로 | 문 | 상태 |
 |---|---|---|
 | `universe sync --source fdr` | **익명** (MDC 메타데이터 2요청 × 시장) | 매일 18:30 — **prod에 `AUTH_KEYS`가 들어오면 `--source krx-openapi`로 바꾼다** |
-| `flows sync` | MDC 로그인 | 매일 (체인) — **prod에 KIS 키가 들어오면 끈다** |
+| `flows sync` | MDC 로그인 | 매일 (체인) — **키는 들어왔다(2026-08-18). 하루 병행 뒤 끈다** |
 | `common sync --sources krx` | MDC 로그인 | 매일 (체인) — 대체재 없음 |
 | ~~`prices backfill`~~ | ~~pykrx 로그인~~ | **닫혔다.** naver 직접 어댑터가 기본값 |
 | ~~`prices market-cap-backfill`~~ (N1) | ~~pykrx 로그인~~ | **닫혔다.** Open API가 기본값 (K-4) |
@@ -598,6 +598,21 @@ KRX 안내문이 제시한 공식 경로는 셋이다 — **Open API**, 화면 �
 개인·외국인·기관 순매수, 공매도 거래량·거래대금, 외국인 보유주식수까지 옮겼고
 **`공매도 잔고 수량` 하나만 갈 곳이 없다.** KRX만 만드는 데이터다.
 → 아래 "KIS flows 수집" · [`poc/flows_alternatives.md`](dev/20260731_raw_features/02_data_expansion_plan/poc/flows_alternatives.md)
+
+### 진행 중인 일회성 백필 (2026-08-18 밤 시작)
+
+Cronicle 일회성 이벤트 셋이 돌고 있다. **끝나면 삭제한다** — 남겨두면 다음 사람이
+스케줄을 읽을 때 무엇이 정기 작업인지 흐려진다.
+
+| 이벤트 | 내용 | 중단·재개 |
+|---|---|---|
+| `sdc_backfill_n1_marketcap` | N1-8. `daily_market_cap`이 prod에서 0행이었다. Open API로 (세션, 시장) 슬라이스당 1요청, 약 5,980회 | 저장된 슬라이스는 skip. 중단 후 재트리거하면 이어간다 |
+| `sdc_backfill_s1_remainder` | S-1 잔여. 상폐 약 1,300 법인의 financials·share-info·XBRL. `bin/dart-backfill-all-years.sh`가 `--universe-scope`를 안 넘겨 `current`로 돌았던 구간이다 | **`STOP_BEFORE=03:30`** 벽시계 가드. exit 75면 멈추고 재트리거로 재개 |
+| `sdc_kis_flows_trial` | 내일 18:30 1회. KRX Flows(18:36)보다 **6분 먼저** 출발해야 한다 — KRX가 채운 세션은 KIS가 skip한다 | 대조 끝나면 삭제 |
+
+**lock 도메인이 겹치지 않게 짰다.** N1-8은 `krx_marketdata`, S-1은 `opendart`, KIS flows는
+`kis`다. 일일 잡은 lock을 **900초 기다린 뒤 실패**하므로, 백필이 프로덕션 슬롯을 물면
+그날 수집이 통째로 빠진다. S-1의 `STOP_BEFORE`가 04:00 DART 체인(04:00~04:08)을 피하는 이유다.
 
 ### KIS 자격증명 (2026-08-16 발급)
 
