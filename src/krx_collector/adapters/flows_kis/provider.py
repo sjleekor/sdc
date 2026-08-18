@@ -181,6 +181,7 @@ class KisFlowProvider:
             return SecurityFlowFetchResult(no_data=True)
 
         records: list[SecurityFlowLine] = []
+        rows_seen = 0
         page_end = end
         try:
             for page_index in range(MAX_PAGES_PER_REQUEST):
@@ -191,6 +192,7 @@ class KisFlowProvider:
                 rows = response.rows("output2")
                 if not rows:
                     break
+                rows_seen += len(rows)
 
                 records.extend(
                     parse_rows(
@@ -224,7 +226,21 @@ class KisFlowProvider:
             logger.warning("KIS %s fetch failed for %s: %s", label, ticker, exc)
             return SecurityFlowFetchResult(records=records, error=str(exc))
 
-        return SecurityFlowFetchResult(records=records, no_data=not records)
+        # "Upstream has nothing" and "upstream has not published our window yet"
+        # are different answers, and only the first may be tombstoned.
+        #
+        # The no-data tombstone key is ``group:ticker`` with no date in it, so a
+        # single no-data verdict skips that ticker for the whole TTL (7 days by
+        # default). KIS publishes each session's investor breakdown per ticker
+        # on its own schedule — measured on prod at 20:5x KST on 2026-08-18,
+        # 005930 carried that day while five other tickers still ended at
+        # 08-14 — so treating a lag as no-data would turn a one-day wait into a
+        # week-long hole, once per ticker, silently.
+        #
+        # Rows seen but none in the window therefore returns neither records nor
+        # no_data: nothing is written, nothing is tombstoned, and the next run
+        # asks again.
+        return SecurityFlowFetchResult(records=records, no_data=not records and rows_seen == 0)
 
 
 def _oldest_row_date(rows: list[dict[str, object]]) -> date | None:

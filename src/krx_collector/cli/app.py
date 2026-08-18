@@ -1910,6 +1910,12 @@ def _handle_flows_sync_kis(args: argparse.Namespace) -> None:
     print(f"   - Requests skipped: {result.requests_skipped}")
     print(f"   - Rows upserted: {result.rows_upserted}")
     print(f"   - No-data requests: {result.no_data_requests}")
+    if result.pending_publication:
+        print(
+            f"   - Not published yet: {result.pending_publication} "
+            "(KIS had rows for these tickers, none in the requested window; "
+            "not tombstoned, retried next run)"
+        )
     if result.phase_counts:
         print("   - Group counts:")
         for group, counts in sorted(result.phase_counts.items()):

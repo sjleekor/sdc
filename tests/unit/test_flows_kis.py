@@ -689,3 +689,55 @@ def test_a_rename_is_caught_even_when_every_row_is_out_of_window() -> None:
             end=date(2026, 8, 18),
             request={},
         )
+
+
+def test_rows_outside_the_window_are_not_reported_as_no_data() -> None:
+    # The no-data tombstone key is `group:ticker` with no date in it, so one
+    # no-data verdict skips that ticker for the whole TTL (7 days by default).
+    # KIS publishes each session's investor breakdown per ticker on its own
+    # schedule — on prod at 20:5x KST on 2026-08-18, 005930 carried that day
+    # while 000300 and four others still ended at 08-14 — so calling a lag
+    # no-data would turn a one-day wait into a week-long hole, per ticker.
+    provider, _session = _build_provider(
+        [
+            _ok(
+                {
+                    "output2": [
+                        {
+                            "stck_bsop_date": "20260814",
+                            "prsn_ntby_qty": "410513",
+                            "frgn_ntby_qty": "577859",
+                            "orgn_ntby_qty": "-941461",
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+
+    result = provider.fetch_investor_net_volume(
+        ticker="000300",
+        market=Market.KOSPI,
+        start=date(2026, 8, 18),
+        end=date(2026, 8, 18),
+    )
+
+    assert result.records == []
+    assert result.no_data is False
+    assert result.error is None
+
+
+def test_an_empty_response_is_still_no_data() -> None:
+    # The tombstone keeps its purpose: a ticker upstream genuinely has nothing
+    # for must not be re-requested on every run.
+    provider, _session = _build_provider([_ok({"output2": []})])
+
+    result = provider.fetch_investor_net_volume(
+        ticker="000300",
+        market=Market.KOSPI,
+        start=date(2026, 8, 18),
+        end=date(2026, 8, 18),
+    )
+
+    assert result.records == []
+    assert result.no_data is True
