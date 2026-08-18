@@ -467,6 +467,14 @@ def _handle_ops_freshness_report(args: argparse.Namespace) -> None:
     for group, latest in sorted(report.flow_group_latest_dates.items()):
         print(f"     {group}: {latest or '-'}")
 
+    # Printed separately so a metric nobody collects is visible as a decision
+    # rather than as a group that quietly stopped moving.
+    if report.discontinued_flow_metrics:
+        print("   - flow metrics no longer collected:")
+        for metric, reason in sorted(report.discontinued_flow_metrics.items()):
+            last_seen = report.flow_metric_latest_dates.get(metric)
+            print(f"     {metric}: last={last_seen or '-'} ({reason})")
+
     print("   - common raw latest by source:")
     common_by_source: dict[str, list[str]] = {}
     for row in report.common_series:
@@ -1868,7 +1876,13 @@ def _handle_universe_sync(args: argparse.Namespace) -> None:
     storage = PostgresStorage(settings.db_dsn)
 
     provider = None
-    if source_str == "FDR":
+    if source_str == "KRX-OPENAPI":
+        from krx_collector.adapters.market_data_krx_openapi.provider import (
+            KrxOpenApiUniverseProvider,
+        )
+
+        provider = KrxOpenApiUniverseProvider(_build_krx_openapi_client(settings))
+    elif source_str == "FDR":
         from krx_collector.adapters.universe_fdr.provider import FdrUniverseProvider
 
         provider = FdrUniverseProvider()
@@ -2034,7 +2048,7 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
         long_rest_seconds = settings.long_rest_seconds
 
     print(
-        f"→ prices backfill: market={args.market}, tickers={args.tickers}, "
+        f"→ prices backfill: source={args.source}, market={args.market}, tickers={args.tickers}, "
         f"start={args.start}, end={args.end}, "
         f"rate_limit={rate_limit}, "
         f"long_rest_interval={long_rest_interval}, "
@@ -2065,9 +2079,14 @@ def _handle_prices_backfill(args: argparse.Namespace) -> None:
     if args.tickers:
         tickers_list = [t.strip() for t in args.tickers.split(",")]
 
-    from krx_collector.adapters.prices_pykrx.provider import PykrxDailyPriceProvider
+    if args.source == "pykrx":
+        from krx_collector.adapters.prices_pykrx.provider import PykrxDailyPriceProvider
 
-    provider = PykrxDailyPriceProvider()
+        provider = PykrxDailyPriceProvider()
+    else:
+        from krx_collector.adapters.prices_naver.provider import NaverDailyPriceProvider
+
+        provider = NaverDailyPriceProvider()
 
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
 
@@ -3430,9 +3449,13 @@ def build_parser() -> argparse.ArgumentParser:
     universe_sync = universe_sub.add_parser("sync", help="Sync listed stock universe.")
     universe_sync.add_argument(
         "--source",
-        choices=["fdr", "pykrx"],
+        choices=["krx-openapi", "fdr", "pykrx"],
         default=None,
-        help="Data source (default: from config UNIVERSE_SOURCE_DEFAULT).",
+        help=(
+            "Data source (default: from config UNIVERSE_SOURCE_DEFAULT). "
+            "krx-openapi is the official endpoint and needs AUTH_KEYS; "
+            "fdr and pykrx reach KRX outside the permitted path (K-5)."
+        ),
     )
     universe_sync.add_argument(
         "--markets",
@@ -3512,6 +3535,16 @@ def build_parser() -> argparse.ArgumentParser:
     prices_sub = prices_parser.add_subparsers(dest="prices_command", required=True)
 
     prices_backfill = prices_sub.add_parser("backfill", help="Backfill daily OHLCV data.")
+    prices_backfill.add_argument(
+        "--source",
+        choices=["naver", "pykrx"],
+        default="naver",
+        help=(
+            "Where to fetch bars from (default: naver). Both return the same "
+            "adjusted series — pykrx's adjusted path is a wrapper over the same "
+            "Naver endpoint — but importing pykrx logs in to KRX (K-5)."
+        ),
+    )
     prices_backfill.add_argument(
         "--market",
         choices=["kospi", "kosdaq", "all"],

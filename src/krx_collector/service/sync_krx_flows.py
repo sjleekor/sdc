@@ -61,6 +61,45 @@ FLOW_METRIC_GROUPS: dict[str, tuple[str, ...]] = {
     "investor": tuple(INVESTOR_METRICS),
     "shorting": tuple(SHORTING_METRICS),
 }
+
+#: Metrics that no longer have a collector, mapped to why.
+#:
+#: A group's freshness is the *minimum* over its metrics, so one metric nobody
+#: collects any more drags its whole group permanently stale — and a gate that
+#: fires every single day is a gate nobody reads (O-8). Declaring the metric
+#: here keeps it visible in the freshness report, with its last date, while
+#: taking it out of the staleness budget.
+#:
+#: This is a statement about *us*, not about upstream: KRX still publishes the
+#: short-selling balance. We stopped collecting it because the KRX MDC scraping
+#: path is being decommissioned (K-5) and the KIS replacement covers six of the
+#: seven flow metrics but has no balance endpoint (K-6f). Restoring a collector
+#: means deleting the entry here in the same change.
+DISCONTINUED_FLOW_METRICS: dict[str, str] = {
+    SHORTING_BALANCE_METRIC: (
+        "KRX MDC only. The KIS replacement (K-6f) has no equivalent endpoint, "
+        "and the MDC scraping path was decommissioned in K-5."
+    ),
+}
+
+
+def active_flow_metrics(group: str) -> tuple[str, ...]:
+    """The metrics in *group* that something still collects.
+
+    Args:
+        group: Key of :data:`FLOW_METRIC_GROUPS`.
+
+    Returns:
+        The group's metrics minus anything in :data:`DISCONTINUED_FLOW_METRICS`.
+        Empty when every metric in the group has been discontinued.
+    """
+    return tuple(
+        metric
+        for metric in FLOW_METRIC_GROUPS.get(group, ())
+        if metric not in DISCONTINUED_FLOW_METRICS
+    )
+
+
 DEFAULT_PROGRESS_LOG_INTERVAL_SECONDS = 30.0
 DEFAULT_PROGRESS_LOG_EVERY_ITEMS = 100
 SLOW_FLOW_REQUEST_WARNING_SECONDS = 30.0

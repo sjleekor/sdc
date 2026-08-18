@@ -22,6 +22,7 @@ from krx_collector.adapters.market_data_krx_openapi.client import (
 from krx_collector.adapters.market_data_krx_openapi.provider import (
     KrxOpenApiHistoricalUniverseProvider,
     KrxOpenApiMarketCapProvider,
+    KrxOpenApiUniverseProvider,
     parse_int,
 )
 from krx_collector.domain.enums import Market, Source
@@ -332,3 +333,209 @@ def test_an_empty_universe_is_an_error_not_a_market_wide_delisting() -> None:
     assert result.snapshot is None
     assert result.error is not None
     assert "refusing to record an empty universe" in result.error
+
+
+# --------------------------------------------------------------------------
+# current universe (K-5) — sto/stk_isu_base_info
+# --------------------------------------------------------------------------
+
+# Verbatim from sto/stk_isu_base_info, basDd=20260814.
+KOSPI_ISSUE_ROW = {
+    "ISU_CD": "KR7095570008",
+    "ISU_SRT_CD": "095570",
+    "ISU_NM": "AJ네트웍스보통주",
+    "ISU_ABBRV": "AJ네트웍스",
+    "ISU_ENG_NM": "AJ Networks Co.,Ltd.",
+    "LIST_DD": "20150821",
+    "MKT_TP_NM": "KOSPI",
+    "SECUGRP_NM": "주권",
+    "SECT_TP_NM": "",
+    "KIND_STKCERT_TP_NM": "보통주",
+    "PARVAL": "1000",
+    "LIST_SHRS": "45252759",
+}
+
+
+def test_the_ticker_comes_from_the_short_code_not_from_isu_cd() -> None:
+    # The trap this endpoint sets: `ISU_CD` is the 6-digit code in the
+    # daily-trade response but the 12-character ISIN here. Reading it the same
+    # way in both places fills `ticker` with "KR7095570008".
+    provider = KrxOpenApiUniverseProvider(_client([_ok([KOSPI_ISSUE_ROW])]))
+
+    result = provider.fetch_universe([Market.KOSPI], as_of=TRADE_DATE)
+
+    assert result.snapshot is not None
+    (record,) = result.snapshot.records
+    assert record.ticker == "095570"
+
+
+def test_the_name_is_the_abbreviation_that_the_other_endpoint_also_returns() -> None:
+    # `ISU_NM` here is "AJ네트웍스보통주" — the legal name with the share class
+    # appended. `ISU_ABBRV` is what sto/stk_bydd_trd calls `ISU_NM`, so using it
+    # keeps names identical whichever endpoint filled the row.
+    provider = KrxOpenApiUniverseProvider(_client([_ok([KOSPI_ISSUE_ROW])]))
+
+    result = provider.fetch_universe([Market.KOSPI], as_of=TRADE_DATE)
+
+    assert result.snapshot is not None
+    assert result.snapshot.records[0].name == "AJ네트웍스"
+
+
+def test_the_listing_date_comes_from_the_exchange() -> None:
+    # FDR's listing date was a best-effort parse of a column whose name moved
+    # between versions. LIST_DD is the exchange's own field.
+    provider = KrxOpenApiUniverseProvider(_client([_ok([KOSPI_ISSUE_ROW])]))
+
+    result = provider.fetch_universe([Market.KOSPI], as_of=TRADE_DATE)
+
+    assert result.snapshot is not None
+    assert result.snapshot.records[0].listing_date == date(2015, 8, 21)
+
+
+def test_an_unparseable_listing_date_costs_the_field_not_the_fetch() -> None:
+    row = dict(KOSPI_ISSUE_ROW, LIST_DD="")
+    provider = KrxOpenApiUniverseProvider(_client([_ok([row])]))
+
+    result = provider.fetch_universe([Market.KOSPI], as_of=TRADE_DATE)
+
+    assert result.error is None
+    assert result.snapshot is not None
+    assert result.snapshot.records[0].listing_date is None
+
+
+def test_the_live_universe_is_not_tagged_as_a_backfill() -> None:
+    # `sync_universe` diffs consecutive snapshots to infer delistings, and the
+    # backfill provenance exists to be excluded from that diff. This one is the
+    # live series and must not be.
+    provider = KrxOpenApiUniverseProvider(_client([_ok([KOSPI_ISSUE_ROW])]))
+
+    result = provider.fetch_universe([Market.KOSPI], as_of=TRADE_DATE)
+
+    assert result.snapshot is not None
+    assert result.snapshot.source is Source.KRX_OPENAPI
+    assert all(r.source is Source.KRX_OPENAPI for r in result.snapshot.records)
+
+
+def test_the_current_universe_also_refuses_to_record_an_empty_market() -> None:
+    provider = KrxOpenApiUniverseProvider(_client([_ok([])]))
+
+    result = provider.fetch_universe([Market.KOSPI], as_of=TRADE_DATE)
+
+    assert result.snapshot is None
+    assert result.error is not None
+    assert "refusing to record an empty universe" in result.error
+
+
+def test_a_renamed_issue_base_column_is_an_error_not_a_universe_of_blanks() -> None:
+    row = {key: value for key, value in KOSPI_ISSUE_ROW.items() if key != "ISU_SRT_CD"}
+    provider = KrxOpenApiUniverseProvider(_client([_ok([row])]))
+
+    result = provider.fetch_universe([Market.KOSPI], as_of=TRADE_DATE)
+
+    assert result.snapshot is None
+    assert result.error is not None
+    assert "ISU_SRT_CD" in result.error
+
+
+def test_preferred_stocks_and_reits_are_kept_because_filtering_is_a_separate_decision() -> None:
+    # SECUGRP_NM / KIND_STKCERT_TP_NM finally make the composition visible, but
+    # narrowing the universe changes what every downstream table covers. That
+    # is N3-3's call, not this adapter's.
+    preferred = dict(KOSPI_ISSUE_ROW, ISU_SRT_CD="095575", KIND_STKCERT_TP_NM="구형우선주")
+    reit = dict(KOSPI_ISSUE_ROW, ISU_SRT_CD="330590", SECUGRP_NM="부동산투자회사")
+    provider = KrxOpenApiUniverseProvider(_client([_ok([KOSPI_ISSUE_ROW, preferred, reit])]))
+
+    result = provider.fetch_universe([Market.KOSPI], as_of=TRADE_DATE)
+
+    assert result.snapshot is not None
+    assert {r.ticker for r in result.snapshot.records} == {"095570", "095575", "330590"}
+
+
+def test_one_request_per_market() -> None:
+    client = _client([_ok([KOSPI_ISSUE_ROW]), _ok([dict(KOSPI_ISSUE_ROW, MKT_TP_NM="KOSDAQ")])])
+    provider = KrxOpenApiUniverseProvider(client)
+
+    provider.fetch_universe([Market.KOSPI, Market.KOSDAQ], as_of=TRADE_DATE)
+
+    calls = client._session.calls  # type: ignore[attr-defined]
+    assert [url.rsplit("/", 1)[-1] for url, _, _ in calls] == [
+        "stk_isu_base_info",
+        "ksq_isu_base_info",
+    ]
+
+
+def test_market_comes_from_the_call_not_from_the_response() -> None:
+    # MKT_TP_NM exists, but the endpoint is already market-specific and a row
+    # whose label disagreed would otherwise land in the wrong market.
+    mislabelled = dict(KOSPI_ISSUE_ROW, MKT_TP_NM="KOSDAQ")
+    provider = KrxOpenApiUniverseProvider(_client([_ok([mislabelled])]))
+
+    result = provider.fetch_universe([Market.KOSPI], as_of=TRADE_DATE)
+
+    assert result.snapshot is not None
+    assert result.snapshot.records[0].market is Market.KOSPI
+
+
+def test_a_named_date_is_used_exactly_as_given() -> None:
+    # Answering about a different day than the caller asked about would be a
+    # lie, and the backfill callers all name their dates.
+    client = _client([_ok([])])
+    provider = KrxOpenApiUniverseProvider(client)
+
+    result = provider.fetch_universe([Market.KOSPI], as_of=TRADE_DATE)
+
+    assert result.error is not None
+    assert "refusing to record an empty universe" in result.error
+    assert [params["basDd"] for _, params, _ in client._session.calls] == ["20260814"]  # type: ignore[attr-defined]
+
+
+def test_the_default_date_walks_back_to_the_last_published_day() -> None:
+    # Measured 2026-08-18 16:04 KST, after the close: today's file was still
+    # empty. FDR read a cache that always answered, so the daily job never met
+    # this; without the walk-back, `universe sync` fails until KRX publishes.
+    client = _client([_ok([]), _ok([]), _ok([KOSPI_ISSUE_ROW])])
+    provider = KrxOpenApiUniverseProvider(client)
+
+    result = provider.fetch_universe([Market.KOSPI])
+
+    assert result.error is None
+    assert result.snapshot is not None
+    requested = [params["basDd"] for _, params, _ in client._session.calls]  # type: ignore[attr-defined]
+    assert len(requested) == 3
+    # The snapshot is labelled with the day the data is actually from.
+    assert result.snapshot.as_of_date.strftime("%Y%m%d") == requested[-1]
+
+
+def test_the_walk_back_is_bounded_so_an_outage_is_not_hidden() -> None:
+    client = _client([_ok([]), _ok([]), _ok([])])
+    provider = KrxOpenApiUniverseProvider(client, max_lookback_days=2)
+
+    result = provider.fetch_universe([Market.KOSPI])
+
+    assert result.snapshot is None
+    assert result.error is not None
+    assert "published no KOSPI issue base info" in result.error
+
+
+def test_the_second_market_is_fetched_at_the_resolved_date() -> None:
+    # Both markets must describe the same day, or the snapshot mixes two dates.
+    client = _client([_ok([]), _ok([KOSPI_ISSUE_ROW]), _ok([KOSPI_ISSUE_ROW])])
+    provider = KrxOpenApiUniverseProvider(client)
+
+    result = provider.fetch_universe([Market.KOSPI, Market.KOSDAQ])
+
+    assert result.error is None
+    requested = [params["basDd"] for _, params, _ in client._session.calls]  # type: ignore[attr-defined]
+    assert requested[1] == requested[2]
+
+
+def test_the_probe_response_is_reused_rather_than_refetched() -> None:
+    # Resolving the date already fetched the first market; asking again would
+    # double every daily run's request count.
+    client = _client([_ok([KOSPI_ISSUE_ROW])])
+    provider = KrxOpenApiUniverseProvider(client)
+
+    result = provider.fetch_universe([Market.KOSPI])
+
+    assert result.error is None
+    assert len(client._session.calls) == 1  # type: ignore[attr-defined]

@@ -23,7 +23,6 @@ from typing import Any
 import FinanceDataReader as fdr
 import pandas as pd
 
-from krx_collector.adapters.universe_pykrx.provider import PykrxUniverseProvider
 from krx_collector.domain.enums import ListingStatus, Market, Source
 from krx_collector.domain.models import Stock, StockUniverseSnapshot, UniverseResult
 from krx_collector.util.time import now_kst, today_kst
@@ -78,14 +77,14 @@ class FdrUniverseProvider:
             return UniverseResult(snapshot=snapshot)
 
         except Exception as exc:
-            logger.warning("FDR universe fetch failed; falling back to pykrx: %s", exc)
-            fallback_result = PykrxUniverseProvider().fetch_universe(markets, as_of)
-            if fallback_result.error:
-                logger.exception("Failed to fetch FDR universe and pykrx fallback failed: %s", exc)
-                return UniverseResult(
-                    error=f"FDR failed: {exc}; pykrx fallback failed: {fallback_result.error}"
-                )
-            return fallback_result
+            # No pykrx fallback (K-5). It used to switch here automatically, and
+            # that is the worst possible moment to do it: FDR wobbles when KRX
+            # wobbles, so the fallback fired exactly when KRX was least willing
+            # to be scraped, turning an anonymous read into a login-based one
+            # without anybody choosing it. `--source pykrx` still exists for
+            # someone who decides to.
+            logger.exception("FDR universe fetch failed: %s", exc)
+            return UniverseResult(error=f"FDR failed: {exc}")
 
     @staticmethod
     def _parse_listing_date(row: Any) -> date | None:

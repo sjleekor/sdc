@@ -544,34 +544,44 @@ bin/parquet-compute-all.sh --from-step reports --required-coverage-ratio 0.0
 **0.32 req/s**(직전의 1/3)로 다시 돌렸는데 **95요청 만에 재차단**됐다.
 1차 차단은 9시간 만에 풀렸으나 재차단은 5분 만에 왔다. 약관에 속도 조건이 없다.
 
-### 지금 상태 — 매일 KRX를 치는 것은 **넷**이다
+### 지금 상태 (2026-08-18 K-5 반영) — 매일 KRX를 치는 것은 **둘**이다
 
 | 경로 | 문 | 상태 |
 |---|---|---|
-| `universe sync --source fdr` | **익명** (+ 실패 시 pykrx 폴백) | 매일 18:30 |
-| **`prices backfill`** | **pykrx 로그인** (import side effect) | **매일** |
-| `flows sync` | MDC 로그인 | 매일 (체인) |
-| `common sync --sources krx` | MDC 로그인 | 매일 (체인) |
-| `prices market-cap-backfill` (N1) | pykrx 로그인 | **중단** |
-| `universe backfill-snapshots` (N3) | pykrx 로그인 | **중단** — 60/152 |
+| `universe sync --source fdr` | **익명** (MDC 메타데이터 2요청 × 시장) | 매일 18:30 — **prod에 `AUTH_KEYS`가 들어오면 `--source krx-openapi`로 바꾼다** |
+| `flows sync` | MDC 로그인 | 매일 (체인) — **prod에 KIS 키가 들어오면 끈다** |
+| `common sync --sources krx` | MDC 로그인 | 매일 (체인) — 대체재 없음 |
+| ~~`prices backfill`~~ | ~~pykrx 로그인~~ | **닫혔다.** naver 직접 어댑터가 기본값 |
+| ~~`prices market-cap-backfill`~~ (N1) | ~~pykrx 로그인~~ | **닫혔다.** Open API가 기본값 (K-4) |
+| ~~`universe backfill-snapshots`~~ (N3) | ~~pykrx 로그인~~ | **닫혔다.** Open API가 기본값 (K-4) |
+| `universe sync --source pykrx` · `common-sync-pykrx.sh` · live test | pykrx 로그인 | **`ALLOW_KRX_SCRAPING=1` 없이는 안 돈다** |
 
-**`prices backfill`은 데이터만 naver다.** `adjusted=True`라 시세는 naver에서 오지만,
-`get_pykrx_stock_module()`이 pykrx를 import하는 순간 `build_krx_session()`이 돌아
-**실행당 로그인 3~4요청이 `data.krx.co.kr`로 나간다.** 종목 수와 무관하게 한 번이다.
+**`prices backfill`이 가장 컸다.** 데이터는 원래 naver였다 — `adjusted=True`가 기본이라
+`pykrx.website.naver`를 타는데, `get_pykrx_stock_module()`이 pykrx를 import하는 순간
+`webio.py`의 모듈 레벨 `build_krx_session()`이 돌아 **실행당 로그인 3~4요청이
+`data.krx.co.kr`로 나갔다.** naver 어댑터를 따로 만들어 끊었다.
+좁은 모듈만 import해서 피할 수는 없다 — `pykrx.website.naver.core`가 같은 `webio`를 쓴다.
 
-**`universe sync`도 KRX 수집기다.** FDR이 라이브러리 안에서
-`data.krx.co.kr/comm/bldAttendant/executeForResourceBundle.cmd`를 친다(최근 거래일 조회용,
-실제 데이터는 GitHub CSV 캐시). 로그인하지 않고 **우리 `HumanThrottle`도 안 걸린다.**
-그리고 **FDR이 실패하면 pykrx로 자동 폴백한다** — 차단 상황에서 가장 나쁜 실패 방식이다.
+**FDR에 대한 기록 두 개가 서로 달랐는데, 둘 다 반만 맞다.** 실제로는
+`fdr.StockListing`이 **`data.krx.co.kr`을 두 번 친다**(같은 URL을 중복 호출한다 —
+`executeForResourceBundle.cmd`, `max_work_dt` 하나 읽으려고). **목록 데이터 자체는
+GitHub CSV 캐시**에서 온다. 즉 "KRX를 친다"도 "GitHub을 읽는다"도 각각 맞다.
+로그인은 하지 않지만 **우리 `HumanThrottle` 밖이고 계수에도 안 잡힌다.**
 
-문이 셋(MDC 로그인 / pykrx 로그인 / FDR 익명)이라 하나를 막아도 나머지가 남는다.
-조건부·수동 경로(`universe sync --source pykrx`, `common-sync-pykrx.sh`,
-opt-in live test)도 남아 있다.
+**FDR의 pykrx 자동 폴백은 제거했다.** 차단 상황에서 가장 나쁜 실패 방식이었다 —
+FDR이 흔들리는 순간(= KRX가 흔들리는 순간) 익명 조회가 **로그인 조회로 자동 전환**됐다.
+이제 FDR 실패는 그냥 실패다.
 
-> **운영 지속은 미결이다.** 이전 판은 "하루 53요청이라 규모가 아니다"를 근거로 지속을
-> 허용했는데, **약관 제10조 제2호에 속도 조건이 없어 그 논리는 성립하지 않는다.**
-> 그리고 53은 HTTP 수가 아니라 **논리 작업 수**다(투자자 bulk 1건 = 4 엔드포인트).
-> 계속 돌린다면 근거는 **"데이터 공백을 감수하기로 한 선택"**이어야 한다. → K-0b
+**`shorting` freshness를 먼저 손봤다.** 그룹 최신일이 metric 3개의 **최솟값**인데
+`short_selling_balance_quantity`는 KIS가 못 채운다. KRX를 끄면 이 그룹이 매일 stale로
+뜨고, "매일 걸리는 게이트는 아무도 안 본다"에 정면으로 걸린다.
+`DISCONTINUED_FLOW_METRICS`로 **수집 중단을 선언**해 예산에서 빼되,
+`ops freshness-report`에는 마지막 수집일과 사유가 계속 보인다.
+
+> **운영 지속은 여전히 미결이다.** "하루 53요청이라 규모가 아니다"는 근거가 아니다 —
+> **약관 제10조 제2호에 속도 조건이 없다.** 남은 둘(`flows sync`·`common sync --sources krx`)을
+> 계속 돌린다면 근거는 **"데이터 공백을 감수하지 않기로 한 선택"**이어야 하고,
+> 둘 다 대체재가 준비되는 즉시 끈다. → K-0b
 
 전체 인벤토리:
 [`poc/krx_access_inventory.md`](dev/20260731_raw_features/02_data_expansion_plan/poc/krx_access_inventory.md)

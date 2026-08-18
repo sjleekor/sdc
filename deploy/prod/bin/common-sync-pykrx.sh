@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+#
+# Opt-in only, and now gated twice. common-features-refresh.sh runs this only
+# when SDC_COMMON_ENABLE_PYKRX=1, and pykrx itself refuses to import unless
+# ALLOW_KRX_SCRAPING=1 (K-5): the login it performs is the collection path KRX
+# restricted this host for. This script has no replacement yet — the Open API
+# index endpoints would be one, and that is not built.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

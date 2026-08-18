@@ -19,13 +19,20 @@ from __future__ import annotations
 import pytest
 
 from krx_collector.adapters import pykrx_auth
+from krx_collector.infra.config.settings import get_settings
 
 
 @pytest.fixture(autouse=True)
-def _fresh_state():
+def _fresh_state(monkeypatch: pytest.MonkeyPatch):
+    # Every test here exercises the login machinery, which K-5 put behind an
+    # opt-in gate. Opting in is what these tests are about; the gate itself is
+    # covered in `test_krx_scraping_gate.py`.
+    monkeypatch.setenv("ALLOW_KRX_SCRAPING", "1")
+    get_settings.cache_clear()
     pykrx_auth.reset_session_retry_state()
     yield
     pykrx_auth.reset_session_retry_state()
+    get_settings.cache_clear()
 
 
 def _fetcher(results: list[object]):

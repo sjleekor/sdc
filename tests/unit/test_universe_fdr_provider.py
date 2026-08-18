@@ -6,8 +6,6 @@ import pandas as pd
 
 from krx_collector.adapters.universe_fdr.provider import FdrUniverseProvider
 from krx_collector.domain.enums import Market, Source
-from krx_collector.domain.models import StockUniverseSnapshot, UniverseResult
-from krx_collector.util.time import now_kst
 
 
 def test_fdr_provider_maps_code_column(monkeypatch) -> None:
@@ -105,7 +103,11 @@ def test_fdr_provider_honors_alternate_listing_date_column(monkeypatch) -> None:
     assert result.snapshot.records[0].listing_date == date(2002, 10, 29)
 
 
-def test_fdr_provider_falls_back_to_pykrx(monkeypatch) -> None:
+def test_fdr_failure_does_not_silently_switch_to_a_login_based_source(monkeypatch) -> None:
+    # The automatic pykrx fallback is gone (K-5). It fired precisely when it
+    # should not have: FDR wobbles when KRX wobbles, so a failed anonymous read
+    # became a KRX login nobody asked for, during the window KRX was least
+    # willing to be scraped.
     provider = FdrUniverseProvider()
 
     monkeypatch.setattr(
@@ -113,44 +115,16 @@ def test_fdr_provider_falls_back_to_pykrx(monkeypatch) -> None:
         lambda _market: (_ for _ in ()).throw(ValueError("Failed to load data from KRX")),
     )
 
-    fallback_snapshot = StockUniverseSnapshot(
-        snapshot_id="fallback",
-        as_of_date=date(2026, 5, 21),
-        source=Source.PYKRX,
-        fetched_at=now_kst(),
-        records=[],
-    )
-
-    def fake_fallback(self, markets: list[Market], as_of: date | None = None) -> UniverseResult:
-        assert markets == [Market.KOSPI]
-        assert as_of == date(2026, 5, 21)
-        return UniverseResult(snapshot=fallback_snapshot)
-
-    monkeypatch.setattr(
-        "krx_collector.adapters.universe_fdr.provider.PykrxUniverseProvider.fetch_universe",
-        fake_fallback,
-    )
-
-    result = provider.fetch_universe([Market.KOSPI], as_of=date(2026, 5, 21))
-
-    assert result.error is None
-    assert result.snapshot is fallback_snapshot
-
-
-def test_fdr_provider_reports_both_errors_when_fallback_fails(monkeypatch) -> None:
-    provider = FdrUniverseProvider()
-
-    monkeypatch.setattr(
-        "krx_collector.adapters.universe_fdr.provider.fdr.StockListing",
-        lambda _market: (_ for _ in ()).throw(ValueError("FDR down")),
-    )
-
-    monkeypatch.setattr(
-        "krx_collector.adapters.universe_fdr.provider.PykrxUniverseProvider.fetch_universe",
-        lambda self, markets, as_of=None: UniverseResult(error="pykrx down"),
-    )
-
     result = provider.fetch_universe([Market.KOSPI], as_of=date(2026, 5, 21))
 
     assert result.snapshot is None
-    assert result.error == "FDR failed: FDR down; pykrx fallback failed: pykrx down"
+    assert result.error == "FDR failed: Failed to load data from KRX"
+
+
+def test_the_fdr_adapter_no_longer_imports_the_pykrx_provider() -> None:
+    # Importing it is enough to matter: pykrx logs in to KRX at import time,
+    # so a module-level import here would put a login on a code path that
+    # never uses pykrx.
+    import krx_collector.adapters.universe_fdr.provider as fdr_provider
+
+    assert not hasattr(fdr_provider, "PykrxUniverseProvider")

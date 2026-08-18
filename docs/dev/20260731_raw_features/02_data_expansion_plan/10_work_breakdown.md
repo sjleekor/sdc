@@ -794,14 +794,20 @@ KRX 안내문이 이유를 명시한다 — **약관 제10조 제2호는 자동�
         `backfill_universe_snapshots`를 따로 돌릴 이유가 없어진다
   - [ ] **원주가 4필드를 어디에 쓸지 정한다** — `TDD_OPNPRC`·`HGPRC`·`LWPRC`·`CLSPRC`가
         같이 온다. `daily_market_cap`에 넣을지 별도 테이블로 뺄지가 **K-7의 입구다**
-- [ ] **K-5 스크래핑 경로 폐기** — K-4 검증 후. 남겨두면 다시 밟는다
-  - [ ] **(K-6f에서 발견) `shorting` 그룹 freshness를 먼저 손봐야 한다.**
+- [~] **K-5 스크래핑 경로 폐기** — 2026-08-18 **pykrx 문은 닫았다.** 남은 둘은 prod 자격증명 대기
+  - [x] **(K-6f에서 발견) `shorting` 그룹 freshness를 먼저 손봐야 한다.**
         그룹 최신일은 metric 3개의 최솟값인데 그중 `short_selling_balance_quantity`는
         KIS가 못 채운다. KRX를 끄는 순간 **이 그룹이 매일 stale로 뜬다.**
-        "매일 걸리는 게이트는 아무도 안 본다"(O-8)에 정면으로 걸린다.
-        그룹을 쪼개든 metric을 "수집 중단"으로 명시하든 **K-5와 같은 PR에서 처리한다**
-  - [ ] **문이 셋이라 셋 다 닫아야 한다**(K-1b). pykrx 경로만 지우면
-        MDC 직접(`flows`·`common krx`)과 **FDR 익명(`universe sync`)이 그대로 남는다**
+        → `DISCONTINUED_FLOW_METRICS`로 **수집 중단을 선언**해 예산에서만 뺐다.
+        `ops freshness-report`에는 마지막 수집일과 사유가 계속 보인다.
+        **모르는 그룹은 계속 검사한다** — "모른다"가 게이트를 끄는 방법이 되면 안 된다
+  - [~] **문이 셋이라 셋 다 닫아야 한다**(K-1b).
+    - [x] **pykrx 문 — 닫았다.** `ALLOW_KRX_SCRAPING` 기본 off.
+          import·세션 refresh 두 입구 모두 게이트
+    - [ ] **MDC 직접**(`flows`·`common krx`) — prod KIS 키 대기.
+          `common krx`는 대체재 자체가 없다(Open API 지수 엔드포인트가 후보)
+    - [ ] **FDR 익명**(`universe sync`) — prod `AUTH_KEYS` 대기.
+          `universe-sync.sh`에 전환 조건을 주석으로 박아뒀다
   - [x] `universe sync`는 종목기본정보(`stk_isu_base_info`)로 **대체 가능하다** —
         2026-08-18 실호출로 12필드 확인. `ISU_SRT_CD`(단축코드)·`ISU_ABBRV`(약명)·
         `MKT_TP_NM`(시장)·`LIST_DD`(상장일)로 `stock_master`가 채워진다.
@@ -809,17 +815,20 @@ KRX 안내문이 이유를 명시한다 — **약관 제10조 제2호는 자동�
     - [x] **덤으로 N3-3의 미해결 질문이 풀린다** — `SECUGRP_NM`(주권 여부)과
           `KIND_STKCERT_TP_NM`(보통주/우선주)이 있다.
           "우선주·리츠·스팩 혼입 → 필터 정책"의 재료가 여기 다 있다
-  - [ ] **`prices backfill`의 pykrx import를 끊는다** — 데이터는 이미 naver인데
-        **모듈 로드만으로 로그인이 나간다.** pykrx를 거치지 않는 naver 어댑터로 분리하거나
-        KRX 인증 side effect가 없는 방식으로 바꾼다. **이걸 안 하면 K-5가 끝나지 않는다**
-  - [ ] **`universe_fdr`의 pykrx 폴백 제거 또는 명시적 비활성화** —
-        차단 상황에서 **가장 나쁜 실패 방식**이다. FDR이 흔들리는 그 순간
-        로그인 기반 수집으로 자동 전환된다. `tests/unit/test_universe_fdr_provider.py`도 같이
-  - [ ] **조건부·수동·테스트 경로도 범위에 넣는다** — `universe sync --source pykrx`,
-        `common-sync-pykrx.sh`, opt-in live test 3종.
-        **차단이 풀린 뒤 누군가 다시 실행하기 쉽다**
-  - [ ] **실 HTTP·page·retry·login 계수를 도입한다** — 지금 `requests_attempted`는
-        논리 작업 수라 **quota 감사도, 차단 원인 설명도 못 한다**
+  - [x] **`prices backfill`의 pykrx import를 끊는다** — `adapters/prices_naver/`.
+        prod 스크립트가 `--source`를 안 넘기므로 **기본값 전환만으로 닫힌다**(prod 변경 0).
+        실측으로 함정 셋이 나왔다 — ① 선언부 앞에 **빈 줄**이 와서 그냥 파싱하면 깨진다
+        ② EUC-KR 선언이 붙은 **bytes는 ElementTree가 거부**한다("multi-byte encodings
+        are not supported") ③ **에러 페이지도 well-formed라** 파싱만으로는 "행 없음"과
+        구분이 안 된다 → **root 태그**로 가른다(없는 종목도 `<protocol />`은 준다)
+  - [x] **`universe_fdr`의 pykrx 폴백 제거** — 이제 FDR 실패는 그냥 실패다.
+        어댑터가 `PykrxUniverseProvider`를 **import조차 하지 않는지** 테스트로 고정
+  - [x] **조건부·수동·테스트 경로도 범위에 넣는다** — `ALLOW_KRX_SCRAPING` 하나로 덮는다.
+        에러 메시지가 **대안 명령과 재활성화 방법을 같이 말한다** —
+        "안 된다"만 말하는 게이트는 결국 플래그를 켜는 것으로 우회된다
+  - [~] **실 HTTP·page·retry·login 계수를 도입한다** — 신규 경로는 실계수다
+        (`KrxOpenApiCounters`, `NaverDailyPriceProvider.http_requests`).
+        **남은 스크래핑 어댑터의 `requests_attempted`는 여전히 논리 작업 수다**
 - [ ] **K-6 빈 항목을 어떻게 덮을 것인가.** `flows` · N7 · N4
   - [x] **K-6a `flows` 대체 조사 완료** (2026-08-16) →
         [`poc/flows_alternatives.md`](poc/flows_alternatives.md).
@@ -1379,3 +1388,4 @@ N1 PoC 중에 드러난 별건이다. 측정: [`poc/n1_adjusted_price_vintage.md
 | 2026-08-18 | **KRX Open API 인증키 발급 — 그런데 blocker가 안 풀렸다.** 키 2개가 `.env` `AUTH_KEYS`에 있고 **키 자체는 유효하다.** 실호출 5개 엔드포인트가 전부 401인데 본문이 `Unauthorized API Call`이고, 가짜 키의 `Unauthorized Key`와 **다르다** → 키는 통과했고 **엔드포인트 이용 신청(K-3)이 승인되지 않았다.** K-1 §2.1의 함정 그대로다. **K 묶음의 단일 blocker가 "인증키 대기"에서 "이용 신청 승인 대기"로 바뀌었고 사람이 포털에서 신청해야 한다.** 키가 둘이라 한도는 하루 20,000회. 곁가지로 **O-16** — `.env`에 키만 넣고 `Settings`에 필드를 안 만들어 `get_settings()`가 `extra_forbidden`으로 죽었고 **모든 CLI 명령과 유닛 테스트 10건이 실패했다.** 배선(`krx_openapi_auth_keys`·`datago_api_key`)과 회귀 테스트 3건으로 해결 |
 | 2026-08-18 | **공공데이터포털 키 발급·실호출 확인 (4요청).** 신청이 **자동승인**이라 대기가 없었고 `DATAGO_KEY`가 동작한다. **필드 15개가 서드파티 목록과 정확히 일치** → 명세 대조 종결. **`mrktCtg`가 있어 pykrx와 달리 시장별 호출이 불필요**하다(호출 절반). **범위 조회 동작 확인**(`beginBasDt`/`endBasDt`) → 날짜별 6,000회 시나리오 회피. **그런데 이력이 2020-01-02부터다** — N1-8 목표 구간의 거래일 **약 54%**만 덮는다. **정정: "지연 자체를 무력화한다"는 절반만 맞다.** 다만 백필 순서가 "2024~현재 먼저"라 **1단계 전체 + 2020~2023까지 인증키 없이 가능**하고 V1~V8 검증도 전부 돌린다. 남는 건 2014-06~2019 뒷구간. 함정 기록 — **Encoding 키는 URL에 raw로** 넣는다(`params=`로 넘기면 `%2B`→`%252B` 이중 인코딩). 곁가지로 **스팩 포함 확인**(N3-3 필터 정책 질문 일부 해소) |
 | 2026-08-18 | **N6-7 결정 5개 고정 — 권고안대로.** 직원 수는 `sm`(합계), `hc_revenue_per_employee` 분모는 기말, 감사의견은 이진, 부호는 감사 비적정만 `−` 고정. **⑤ 합병·분할 보정은 규칙을 새로 세웠다** — 증거(`합병등종료보고서(분할\|합병)`) AND 크기(\|YoY\| ≥ 30% = 2σ)면 결측, 증거만 있으면 플래그. **그 과정에서 PoC 권고안이 틀린 원천을 지목했다는 게 드러났다** — `dart_capital_change_raw`로는 **동기가 된 LG화학 물적분할을 못 잡는다**(모회사 주식 수가 안 바뀐다). lake 실측: LG화학 2019~2021 분할 흔적 0, `isu_dcrs_stle` 전체 15종에 합병·회사분할 없음(`주식분할` 7,067건은 액면분할). `dart_filing_receipt_raw`의 `합병등종료보고서(분할)`은 2020-12-04로 정확히 찍힌다. 적용 규모 2015~2025 corp-year 43,549 중 **1,023건(2.35%)**. **N6에 남은 blocker는 N6-5 대상 집합(S-1 → sj2) 하나다** |
+| 2026-08-18 | **K-5 pykrx 문을 닫았다.** `prices backfill`이 가장 컸다 — 데이터는 원래 naver인데 **모듈 import만으로 KRX 로그인이 나갔다**(`webio.py` 모듈 레벨 `build_krx_session()`). naver 직접 어댑터로 끊었고 **prod 스크립트가 `--source`를 안 넘겨 기본값 전환만으로 닫힌다**. 실측으로 함정 셋 — 선언부 앞 빈 줄 · EUC-KR bytes를 ElementTree가 거부 · **에러 페이지도 well-formed라 root 태그로 갈라야 한다**(없는 종목도 `<protocol />`은 준다). 검증: naver 종가가 **Open API 원종가와 3종목 전부 일치**. `universe sync --source krx-openapi` 신설(2,763종목 실행 성공) — **`ISU_CD`가 여기서는 ISIN이라 `ISU_SRT_CD`를 써야 하고**, **오늘자 파일이 종가 뒤에도 한동안 안 올라와서**(16:04 KST 실측 0행) 기본 as_of는 마지막 게시일로 물러난다. FDR 기록 정정 — **KRX를 두 번 친다(중복 호출)이면서 목록은 GitHub CSV**라, 기존 두 기록이 각각 반만 맞았다. **pykrx 폴백 제거**, **`ALLOW_KRX_SCRAPING` 기본 off**. `shorting` freshness는 `DISCONTINUED_FLOW_METRICS`로 선행 처리. **남은 문 둘은 prod 자격증명 대기**(`flows`=KIS 키, `universe sync`=`AUTH_KEYS`) |

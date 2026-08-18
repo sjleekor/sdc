@@ -45,6 +45,13 @@ class Source(StrEnum):
     # Same reason PYKRX_BACKFILL exists: the live `sync_universe` diff must
     # never read a reconstructed snapshot as a newly observed one.
     KRX_OPENAPI_BACKFILL = "KRX_OPENAPI_BACKFILL"
+    # Naver's chart endpoint — where adjusted daily OHLCV has always come from.
+    # Rows written before 2026-08 carry ``PYKRX`` instead, but the upstream is
+    # the same: pykrx's ``adjusted=True`` path is a thin wrapper over this
+    # endpoint.  The label changed when K-5 dropped the wrapper, because
+    # importing pykrx logs in to KRX and that login was the last KRX contact in
+    # a collector that never needed KRX data.
+    NAVER = "NAVER"
     ECOS = "ECOS"
     FRED = "FRED"
     KOSIS = "KOSIS"

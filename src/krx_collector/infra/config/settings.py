@@ -68,8 +68,15 @@ class LogFormat(StrEnum):
 
 
 class UniverseSourceDefault(StrEnum):
-    """Default universe data source."""
+    """Default universe data source.
 
+    ``KRX_OPENAPI`` is the official endpoint and the only one of the three that
+    does not scrape (K-5). ``FDR`` and ``PYKRX`` remain selectable so a host
+    without ``AUTH_KEYS`` is not stranded, but both reach KRX outside the
+    permitted path and are on their way out.
+    """
+
+    KRX_OPENAPI = "krx-openapi"
     FDR = "fdr"
     PYKRX = "pykrx"
 
@@ -104,6 +111,7 @@ class Settings(BaseSettings):
         remote_db_ssh_host: Optional SSH host for local port forwarding.
         remote_db_ssh_local_port: Optional fixed local port for SSH tunnel.
         remote_db_ssh_compression: Enable SSH compression for DB tunnels.
+        allow_krx_scraping: Opt in to the pykrx login path, off by default (K-5).
         krx_mdc_timeout_seconds: HTTP timeout for KRX MDC requests.
         krx_logical_rate_limit_seconds: Delay between higher-level KRX flow
             requests.
@@ -178,6 +186,11 @@ class Settings(BaseSettings):
     # KRX / pykrx authentication
     krx_id: str = ""
     krx_pw: str = ""
+    # Off by default (K-5). pykrx logs in to KRX at import, and that login is
+    # the collection path KRX restricted this host for; the Open API and Naver
+    # cover the same data without it. Kept as a flag rather than deleted so a
+    # deliberate comparison run is still possible.
+    allow_krx_scraping: bool = Field(default=False, validation_alias="ALLOW_KRX_SCRAPING")
     krx_mdc_timeout_seconds: float = DEFAULT_KRX_MDC_TIMEOUT_SECONDS
     krx_logical_rate_limit_seconds: float = 8.0
     krx_min_delay_seconds: float = 1.5

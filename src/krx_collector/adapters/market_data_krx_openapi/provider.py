@@ -1,4 +1,4 @@
-"""KRX Open API market-cap and historical-universe providers.
+"""KRX Open API market-cap and universe providers.
 
 One request returns a whole market-day.  Verified live on 2026-08-18
 (``basDd=20260814``): KOSPI 942 rows, KOSDAQ 1,821 rows, 15 fields::
@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import date
+from datetime import date, timedelta
 
 from krx_collector.adapters.market_data_krx_openapi.client import KrxOpenApiClient
 from krx_collector.domain.enums import ListingStatus, Market, Source
@@ -66,6 +66,20 @@ ISSUE_BASE_ENDPOINTS: dict[Market, tuple[str, str]] = {
 
 _TICKER = "ISU_CD"
 _NAME = "ISU_NM"
+
+# Issue-base-info field names.  ``ISU_CD`` means something *different* here than
+# in the daily-trade response: base info returns the 12-character ISIN
+# (``KR7095570008``) in ``ISU_CD`` and the 6-digit code in ``ISU_SRT_CD``, while
+# daily trade puts the 6-digit code straight in ``ISU_CD``.  Reusing the
+# constant across the two would silently fill ``ticker`` with ISINs.
+_SHORT_TICKER = "ISU_SRT_CD"
+#: Abbreviated name.  Equal to what the daily-trade endpoint calls ``ISU_NM``
+#: ("AJ네트웍스"), whereas base info's ``ISU_NM`` is the legal name with the
+#: share class appended ("AJ네트웍스보통주").
+_ABBREVIATED_NAME = "ISU_ABBRV"
+_LISTING_DATE = "LIST_DD"
+_SECURITY_GROUP = "SECUGRP_NM"
+_SHARE_CLASS = "KIND_STKCERT_TP_NM"
 _CLOSE = "TDD_CLSPRC"
 _OPEN = "TDD_OPNPRC"
 _HIGH = "TDD_HGPRC"
@@ -87,6 +101,31 @@ REQUIRED_COLUMNS: tuple[str, ...] = (
     _MARKET_CAP,
     _LISTED_SHARES,
 )
+
+REQUIRED_ISSUE_BASE_COLUMNS: tuple[str, ...] = (
+    _SHORT_TICKER,
+    _ABBREVIATED_NAME,
+    _LISTING_DATE,
+)
+
+
+class _NoPublishedData(RuntimeError):
+    """The endpoint has nothing for any candidate date in the lookback window."""
+
+
+def parse_yyyymmdd(value: object) -> date | None:
+    """Parse a ``YYYYMMDD`` field, returning ``None`` when it is unusable.
+
+    A listing date is reference data, not a key, so an unparseable one should
+    cost that one field rather than the whole universe fetch.
+    """
+    text = str(value or "").strip()
+    if len(text) != 8 or not text.isdigit():
+        return None
+    try:
+        return date(int(text[0:4]), int(text[4:6]), int(text[6:8]))
+    except ValueError:
+        return None
 
 
 def parse_int(value: object) -> int | None:
@@ -286,3 +325,203 @@ class KrxOpenApiHistoricalUniverseProvider:
             records=records,
         )
         return UniverseResult(snapshot=snapshot)
+
+
+class KrxOpenApiUniverseProvider:
+    """Fetches the current listed universe from issue base info.
+
+    Conforms to :class:`~krx_collector.ports.universe.UniverseProvider`, and
+    replaces the FDR path that ``universe sync`` used (K-5).
+
+    The replacement is about permission, not volume.  ``fdr.StockListing`` reads
+    its listing rows from a GitHub CSV cache, but it first calls
+    ``data.krx.co.kr/comm/bldAttendant/executeForResourceBundle.cmd`` — twice per
+    call, the second one a duplicate — purely to learn ``max_work_dt``.  That is
+    four anonymous MDC requests per daily run, outside our throttle and outside
+    our accounting, for a field the official endpoint gives us as part of the
+    answer.  KRX restricted this host for automated collection (K-0), so the
+    question is not how much traffic it is; it is which door it goes through.
+
+    Two fields carry real gains over FDR: ``LIST_DD`` is a listing date from the
+    exchange rather than FDR's best-effort column, and ``SECUGRP_NM`` /
+    ``KIND_STKCERT_TP_NM`` finally make the universe's composition visible.
+    Nothing is filtered on them here — narrowing the universe is N3-3's decision
+    and would change what every downstream table covers — but the breakdown is
+    logged so that decision can be made from counts instead of guesses.
+
+    One behaviour FDR did not need: **this endpoint is dated, and today's file
+    is not published all day.**  Measured 2026-08-18 at 16:04 KST, after the
+    15:30 close, ``basDd=20260818`` still returned zero rows.  FDR reads a cache
+    that always answers, so a daily job never saw this.  When the caller does
+    not name a date, the provider therefore asks for the most recent day that
+    actually has data and labels the snapshot with *that* date — which is what
+    "as of" means.  A named date is used exactly as given.
+    """
+
+    def __init__(self, client: KrxOpenApiClient, *, max_lookback_days: int = 10) -> None:
+        self._client = client
+        # Enough for the longest KRX holiday cluster plus an unpublished day.
+        # Bounded so a real outage surfaces as an error instead of quietly
+        # resurrecting a universe from an arbitrary distance in the past.
+        self._max_lookback_days = max(0, max_lookback_days)
+
+    def fetch_universe(
+        self,
+        markets: list[Market],
+        as_of: date | None = None,
+    ) -> UniverseResult:
+        """Retrieve the listed universe as of a date.
+
+        Args:
+            markets: Market segments to query.
+            as_of: Reference date, used exactly as given.  ``None`` means the
+                most recent day the endpoint has published, searching back from
+                today (Asia/Seoul).
+
+        Returns:
+            ``UniverseResult`` with a ``Source.KRX_OPENAPI`` snapshot, or an
+            error.  Never raises for an upstream failure.
+        """
+        if not markets:
+            return UniverseResult(error="no markets requested")
+
+        fetched_at = now_kst()
+        try:
+            reference_date, probe_rows = self._resolve_reference_date(markets[0], as_of)
+        except _NoPublishedData as exc:
+            return UniverseResult(error=str(exc))
+        except Exception as exc:
+            logger.exception("KRX Open API universe fetch failed: %s", exc)
+            return UniverseResult(error=str(exc))
+
+        records: list[Stock] = []
+        for index, market in enumerate(markets):
+            if index == 0:
+                raw_rows = probe_rows
+            else:
+                endpoint = ISSUE_BASE_ENDPOINTS.get(market)
+                if endpoint is None:
+                    return UniverseResult(
+                        error=f"KRX Open API has no issue-base endpoint for market {market.value}"
+                    )
+                group, name = endpoint
+                try:
+                    raw_rows = self._client.fetch_rows(
+                        group, name, {"basDd": reference_date.strftime("%Y%m%d")}
+                    )
+                except Exception as exc:
+                    logger.exception("KRX Open API universe fetch failed: %s", exc)
+                    return UniverseResult(error=str(exc))
+
+            if not raw_rows:
+                # `sync_universe` infers delistings by diffing snapshots, so an
+                # empty one is not a small problem: it reads as every listing
+                # disappearing at once.
+                return UniverseResult(
+                    error=(
+                        f"KRX Open API returned no rows for {market.value} on "
+                        f"{reference_date.isoformat()}; refusing to record an empty universe"
+                    )
+                )
+
+            missing = tuple(
+                column for column in REQUIRED_ISSUE_BASE_COLUMNS if column not in raw_rows[0]
+            )
+            if missing:
+                return UniverseResult(
+                    error=(
+                        "KRX Open API issue-base response is missing columns: "
+                        f"{', '.join(missing)}"
+                    )
+                )
+
+            self._log_composition(market, raw_rows)
+
+            for raw in raw_rows:
+                ticker = str(raw.get(_SHORT_TICKER, "")).strip()
+                if not ticker:
+                    continue
+                records.append(
+                    Stock(
+                        ticker=ticker,
+                        market=market,
+                        name=str(raw.get(_ABBREVIATED_NAME, "")).strip() or ticker,
+                        status=ListingStatus.ACTIVE,
+                        last_seen_date=reference_date,
+                        source=Source.KRX_OPENAPI,
+                        listing_date=parse_yyyymmdd(raw.get(_LISTING_DATE)),
+                    )
+                )
+
+        snapshot = StockUniverseSnapshot(
+            snapshot_id=str(uuid.uuid4()),
+            as_of_date=reference_date,
+            source=Source.KRX_OPENAPI,
+            fetched_at=fetched_at,
+            records=records,
+        )
+        return UniverseResult(snapshot=snapshot)
+
+    def _resolve_reference_date(
+        self,
+        probe_market: Market,
+        as_of: date | None,
+    ) -> tuple[date, list[dict[str, object]]]:
+        """Pick the date to snapshot, and return the rows already fetched for it.
+
+        A named *as_of* is honoured with a single request, even if it comes back
+        empty — the caller asked about that day, and answering about a different
+        one would be a lie. Only the default walks back, and only over the empty
+        responses that mean "weekend, holiday, or not published yet".
+
+        Raises:
+            _NoPublishedData: nothing found within the lookback window.
+        """
+        endpoint = ISSUE_BASE_ENDPOINTS.get(probe_market)
+        if endpoint is None:
+            raise _NoPublishedData(
+                f"KRX Open API has no issue-base endpoint for market {probe_market.value}"
+            )
+        group, name = endpoint
+
+        if as_of is not None:
+            rows = self._client.fetch_rows(group, name, {"basDd": as_of.strftime("%Y%m%d")})
+            return as_of, rows
+
+        start = today_kst()
+        for offset in range(self._max_lookback_days + 1):
+            candidate = start - timedelta(days=offset)
+            rows = self._client.fetch_rows(group, name, {"basDd": candidate.strftime("%Y%m%d")})
+            if rows:
+                if offset:
+                    logger.info(
+                        "KRX Open API has no %s issue base info for %s yet; "
+                        "using %s, the most recent published day.",
+                        probe_market.value,
+                        start.isoformat(),
+                        candidate.isoformat(),
+                    )
+                return candidate, rows
+
+        raise _NoPublishedData(
+            f"KRX Open API published no {probe_market.value} issue base info in the "
+            f"{self._max_lookback_days + 1} days up to {start.isoformat()}"
+        )
+
+    @staticmethod
+    def _log_composition(market: Market, raw_rows: list[dict[str, object]]) -> None:
+        """Log what the universe is made of, without acting on it (N3-3)."""
+        groups: dict[str, int] = {}
+        classes: dict[str, int] = {}
+        for raw in raw_rows:
+            group = str(raw.get(_SECURITY_GROUP, "")).strip() or "(blank)"
+            share_class = str(raw.get(_SHARE_CLASS, "")).strip() or "(blank)"
+            groups[group] = groups.get(group, 0) + 1
+            classes[share_class] = classes.get(share_class, 0) + 1
+        logger.info(
+            "%s universe composition: %d rows, security groups=%s, share classes=%s",
+            market.value,
+            len(raw_rows),
+            dict(sorted(groups.items(), key=lambda item: -item[1])),
+            dict(sorted(classes.items(), key=lambda item: -item[1])),
+        )

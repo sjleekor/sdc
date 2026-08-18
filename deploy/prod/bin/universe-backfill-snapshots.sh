@@ -5,14 +5,16 @@ set -euo pipefail
 #
 # Writes only stock_master_snapshot / _items; stock_master is never touched, so
 # this cannot disturb the live universe or sync_universe's delisting diff.
-# Snapshots are tagged Source.PYKRX_BACKFILL to keep them distinguishable.
+# Snapshots are tagged with a *_BACKFILL source to keep them distinguishable.
 #
-# Idempotent on (as_of_date, source): re-running skips dates already captured.
+# Idempotent on (as_of_date, source): re-running skips dates already captured,
+# under either backfill provenance.
 #
-# Pacing is NOT set here. It comes from the KRX_* settings, the same ones the
-# MDC collectors use, because this reaches the same data.krx.co.kr portal they
-# do. Override per run with UNIVERSE_SNAPSHOT_MIN_DELAY_SECONDS /
-# UNIVERSE_SNAPSHOT_MAX_DELAY_SECONDS.
+# The default source is now the KRX Open API (K-4), which needs AUTH_KEYS in
+# this host's .env. It paces itself with a token bucket, so the KRX_* delay
+# settings and the --min/--max-delay-seconds overrides below apply only to
+# `--source pykrx`, which is the scraping path and is gated by
+# ALLOW_KRX_SCRAPING (K-5).
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/lib/sdc-wrapper.sh"

@@ -33,9 +33,9 @@ were removed from the CLI — they now run as DuckDB marts via
 Top-level subcommands (see `src/krx_collector/cli/app.py`, where the argparse tree and DI wiring live):
 
 - `db init` / `db sync-remote` — schema init; pull prod DB → local (incremental, `--full-refresh`, `--all-tables`, `--ssh-host` tunnel).
-- `universe sync` — sync stock master from `fdr` or `pykrx`.
+- `universe sync` — sync stock master; `--source krx-openapi` (official, needs `AUTH_KEYS`), `fdr`, or `pykrx`. Prod still passes `--source fdr` because prod has no `AUTH_KEYS` yet.
   `universe backfill-snapshots` — month-end PIT snapshots; `--source krx-openapi` (default) or `pykrx`.
-- `prices backfill` — daily OHLCV; default = gap-detection backfill, `--incremental` = only after each ticker's `MAX(trade_date)`.
+- `prices backfill` — daily OHLCV; default = gap-detection backfill, `--incremental` = only after each ticker's `MAX(trade_date)`. `--source naver` (default) reads Naver's chart endpoint directly; `--source pykrx` is the old wrapper over *the same* endpoint and is gated by `ALLOW_KRX_SCRAPING` (K-5) because importing pykrx logs in to KRX.
   `prices market-cap-backfill` — daily market cap / trading value / listed shares, plus the unadjusted OHLC the Open API returns in the same response. `--source krx-openapi` (default, needs `AUTH_KEYS`) or `pykrx` (scrapes; kept only for comparison until K-5).
 - `dart sync-corp | sync-financials | sync-share-info | sync-xbrl` — OpenDART raw ingestion.
   `sync-share-info` also collects `dart_capital_change_raw` (irdsSttus) in the same run.
@@ -92,6 +92,8 @@ Strict **ports & adapters (hexagonal)**. The dependency rule is the key invarian
 ## Config & secrets
 
 Settings load from `.env` (template: `.env.example`) via pydantic-settings. DB via `DB_DSN` or `DB_HOST/PORT/NAME/USER/PASSWORD`. OpenDART keys as above. KRX MDC login fallback uses `KRX_ID`/`KRX_PW`. `db sync-remote` reads remote DB creds from `/Users/whishaw/wss_p/stock_data_collector_secrets/db_info` by default.
+
+`ALLOW_KRX_SCRAPING` (default `false`) gates the pykrx login path — the collection path KRX restricted this host for. The replacements are wired and verified, so leave it off; set it only for a deliberate one-off comparison. Two doors are deliberately *not* gated because they still have no replacement in prod: MDC direct (`flows sync`, `common sync --sources krx`) and FDR anonymous (`universe sync --source fdr`, which calls `data.krx.co.kr` twice per invocation just to read `max_work_dt` while reading its actual rows from a GitHub CSV cache).
 
 `KIS_APP_KEY`/`KIS_APP_SECRET` (한국투자증권 오픈API) are in the **local `.env` only** as of 2026-08-16 — **prod does not have them yet**, so `flows sync-kis` cannot run there until someone adds them. They serve the KRX-replacement work (K 묶음): KRX restricted this host's IP on 2026-08-16 for a ToS violation, so the scraping path is being replaced by KRX Open API (N1/N3) plus KIS (`flows`). See `docs/operations.md` "KRX 접근 제한". Note the secrets directory holds **connection metadata** (`db_info`, `cronicle_info`) — API keys always go in `.env`, not there.
 

@@ -22,7 +22,11 @@ from krx_collector.domain.enums import Source
 from krx_collector.domain.models import IngestionRun
 from krx_collector.infra.calendar.trading_days import get_trading_days
 from krx_collector.ports.storage import Storage
-from krx_collector.service.sync_krx_flows import FLOW_METRIC_GROUPS
+from krx_collector.service.sync_krx_flows import (
+    DISCONTINUED_FLOW_METRICS,
+    FLOW_METRIC_GROUPS,
+    active_flow_metrics,
+)
 from krx_collector.util.time import now_kst, today_kst
 
 # Both sources write the same security-flow metric codes: KRX until 2026-08,
@@ -52,6 +56,10 @@ class FreshnessReport:
     market_cap_latest_date: date | None = None
     flow_metric_latest_dates: dict[str, date] = field(default_factory=dict)
     flow_group_latest_dates: dict[str, date | None] = field(default_factory=dict)
+    #: Metric code → why it is no longer collected. These are excluded from
+    #: every group's latest date and from the staleness gate, so carrying the
+    #: reasons here is what keeps them from disappearing from the report.
+    discontinued_flow_metrics: dict[str, str] = field(default_factory=dict)
     common_series: list[CommonSeriesFreshness] = field(default_factory=list)
     dart_year_ranges: list[YearRangeFreshness] = field(default_factory=list)
     running_runs: list[IngestionRun] = field(default_factory=list)
@@ -66,8 +74,11 @@ def build_freshness_report(storage: Storage, *, running_limit: int = 20) -> Fres
         sources=FLOW_SOURCES,
     )
     flow_group_latest_dates: dict[str, date | None] = {}
-    for group, metrics in FLOW_METRIC_GROUPS.items():
-        dates = [flow_metric_latest_dates.get(metric) for metric in metrics]
+    for group in FLOW_METRIC_GROUPS:
+        # Over the metrics still collected, not every metric ever defined: a
+        # discontinued metric's frozen date would otherwise become the group's
+        # date, since the group is a minimum.
+        dates = [flow_metric_latest_dates.get(metric) for metric in active_flow_metrics(group)]
         present_dates = [item for item in dates if item is not None]
         flow_group_latest_dates[group] = min(present_dates) if present_dates else None
 
@@ -111,6 +122,7 @@ def build_freshness_report(storage: Storage, *, running_limit: int = 20) -> Fres
         market_cap_latest_date=storage.get_latest_market_cap_date(),
         flow_metric_latest_dates=flow_metric_latest_dates,
         flow_group_latest_dates=flow_group_latest_dates,
+        discontinued_flow_metrics=dict(DISCONTINUED_FLOW_METRICS),
         common_series=common_series,
         dart_year_ranges=dart_year_ranges,
         running_runs=storage.get_running_ingestion_runs(limit=running_limit),
@@ -199,6 +211,14 @@ def evaluate_staleness(
     check("daily_market_cap", report.market_cap_latest_date, trading_threshold, "trading")
 
     for group, latest in sorted(report.flow_group_latest_dates.items()):
+        if group in FLOW_METRIC_GROUPS and not active_flow_metrics(group):
+            # Nothing collects this group any more, so there is no lag to
+            # measure. It stays in the report — its last date is worth seeing —
+            # but a permanently-failing gate trains people to ignore the gate.
+            #
+            # A group we do not recognise is still checked: "unknown" must not
+            # be a way to turn a gate off.
+            continue
         check(f"krx_security_flow_raw:{group}", latest, trading_threshold, "trading")
 
     for row in sorted(report.common_series, key=lambda item: item.series_id):

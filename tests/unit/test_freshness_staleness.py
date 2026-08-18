@@ -18,6 +18,7 @@ from datetime import date
 import pytest
 
 from krx_collector.domain.enums import Source
+from krx_collector.service import freshness
 from krx_collector.service.freshness import (
     FLOW_SOURCES,
     TRADING_DAY_SOURCES,
@@ -25,6 +26,11 @@ from krx_collector.service.freshness import (
     FreshnessReport,
     build_freshness_report,
     evaluate_staleness,
+)
+from krx_collector.service.sync_krx_flows import (
+    DISCONTINUED_FLOW_METRICS,
+    SHORTING_BALANCE_METRIC,
+    active_flow_metrics,
 )
 
 # 2026-08-15 is a Saturday; the sessions before it are Fri 08-14 and Thu 08-13.
@@ -201,6 +207,120 @@ def test_the_flow_cursor_asks_about_both_krx_and_kis() -> None:
     assert Source.KRX in storage.flow_sources
     assert Source.KIS in storage.flow_sources
     assert report.flow_group_latest_dates["investor"] == FRIDAY
+
+
+class _FlowStorage:
+    """Storage stub whose flow metric dates are set per metric code."""
+
+    def __init__(self, metric_dates: dict[str, date]) -> None:
+        self._metric_dates = metric_dates
+
+    def get_krx_security_flow_metric_max_dates(self, metric_codes, sources):
+        return {
+            metric: self._metric_dates[metric]
+            for metric in metric_codes
+            if metric in self._metric_dates
+        }
+
+    def get_common_feature_series(self, active_only=True):
+        return []
+
+    def get_common_feature_observation_max_dates(self, series_ids):
+        return {}
+
+    def get_table_bsns_year_range(self, table_name):
+        return None
+
+    def get_latest_daily_price_date(self):
+        return FRIDAY
+
+    def get_latest_market_cap_date(self):
+        return FRIDAY
+
+    def get_running_ingestion_runs(self, limit=20):
+        return []
+
+
+def _shorting_storage(balance: date) -> _FlowStorage:
+    """KIS-collected shorting metrics current, the KRX-only balance frozen."""
+    return _FlowStorage(
+        {
+            "foreign_holding_shares": FRIDAY,
+            "institution_net_buy_volume": FRIDAY,
+            "individual_net_buy_volume": FRIDAY,
+            "foreign_net_buy_volume": FRIDAY,
+            "short_selling_volume": FRIDAY,
+            "short_selling_value": FRIDAY,
+            SHORTING_BALANCE_METRIC: balance,
+        }
+    )
+
+
+def test_the_krx_only_balance_metric_is_declared_discontinued() -> None:
+    # KIS covers six of the seven flow metrics. If the seventh stays in the
+    # budget, decommissioning KRX (K-5) makes this gate fire every morning.
+    assert SHORTING_BALANCE_METRIC in DISCONTINUED_FLOW_METRICS
+    assert SHORTING_BALANCE_METRIC not in active_flow_metrics("shorting")
+    assert set(active_flow_metrics("shorting")) == {"short_selling_volume", "short_selling_value"}
+
+
+def test_a_group_takes_its_date_from_the_metrics_still_collected() -> None:
+    # The group date is a minimum, so before this change one frozen metric
+    # became the group's date no matter how current the other two were.
+    report = build_freshness_report(_shorting_storage(balance=date(2026, 8, 1)))
+
+    assert report.flow_group_latest_dates["shorting"] == FRIDAY
+
+
+def test_turning_krx_off_does_not_make_the_shorting_gate_fire_daily() -> None:
+    # The regression this exists for: KRX is decommissioned, the balance
+    # freezes on its last scraped date, and the other two keep arriving.
+    report = build_freshness_report(_shorting_storage(balance=date(2026, 8, 1)))
+
+    assert _evaluate(report) == []
+
+
+def test_the_gate_still_fires_when_a_collected_shorting_metric_lags() -> None:
+    # Excluding the discontinued metric must not excuse the whole group.
+    storage = _shorting_storage(balance=date(2026, 8, 1))
+    storage._metric_dates["short_selling_volume"] = THURSDAY
+
+    findings = _evaluate(build_freshness_report(storage))
+
+    assert [finding.domain for finding in findings] == ["krx_security_flow_raw:shorting"]
+
+
+def test_a_discontinued_metric_keeps_its_last_date_in_the_report() -> None:
+    # Dropping it from the budget must not drop it from view — otherwise the
+    # group merely stops moving and nobody can tell why.
+    report = build_freshness_report(_shorting_storage(balance=date(2026, 8, 1)))
+
+    assert report.flow_metric_latest_dates[SHORTING_BALANCE_METRIC] == date(2026, 8, 1)
+    assert SHORTING_BALANCE_METRIC in report.discontinued_flow_metrics
+    assert "KIS" in report.discontinued_flow_metrics[SHORTING_BALANCE_METRIC]
+
+
+def test_an_unrecognised_group_is_still_gated() -> None:
+    # "Has no active metrics" and "is not a group we know" look identical from
+    # the lookup. Only the first may switch a gate off; a renamed or misspelt
+    # group must stay loud.
+    findings = _evaluate(_report(flows={"not_a_real_group": THURSDAY}))
+
+    assert [finding.domain for finding in findings] == ["krx_security_flow_raw:not_a_real_group"]
+
+
+def test_a_fully_discontinued_group_is_not_gated_even_though_it_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No group is fully discontinued today. Pin the behaviour anyway: a group
+    # with nothing left to collect has no lag to measure, and reporting it as
+    # stale forever is the failure mode this whole change is about.
+    monkeypatch.setitem(freshness.DISCONTINUED_FLOW_METRICS, "foreign_holding_shares", "test")
+
+    report = build_freshness_report(_shorting_storage(balance=FRIDAY))
+
+    assert report.flow_group_latest_dates["foreign_holding"] is None
+    assert _evaluate(report) == []
 
 
 def test_kis_is_treated_as_a_trading_day_source() -> None:

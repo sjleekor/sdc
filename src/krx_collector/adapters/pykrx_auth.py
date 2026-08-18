@@ -48,6 +48,7 @@ from collections.abc import Callable
 from functools import lru_cache
 from types import ModuleType
 
+from krx_collector.adapters.krx_scraping import ensure_krx_scraping_allowed
 from krx_collector.infra.config.settings import configure_krx_credentials_from_settings
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,12 @@ def get_pykrx_stock_module() -> ModuleType:
             for a growing cooldown, so callers after the first one fail without
             touching KRX at all.
     """
+    ensure_krx_scraping_allowed(
+        "importing pykrx",
+        "`prices backfill --source naver`, `universe sync --source krx-openapi`, "
+        "or `prices market-cap-backfill --source krx-openapi`",
+    )
+
     now = time.monotonic()
     cached = _cached_login_failure(now)
     if cached is not None:
@@ -173,6 +180,10 @@ def refresh_pykrx_session() -> bool:
     Returns:
         ``True`` when a new session was established.
     """
+    # The other door into the same login. Gating only the import would leave
+    # the empty-streak trigger free to re-authenticate on a host that opted out.
+    ensure_krx_scraping_allowed("refreshing the pykrx KRX session", "the Open API path")
+
     now = time.monotonic()
     if _cached_login_failure(now) is not None:
         return False
