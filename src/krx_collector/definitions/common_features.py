@@ -771,6 +771,105 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
                 "calendar when wired."
             ),
         ),
+        # N8 — 고용. One statistic table (901Y027 경제활동인구), three items.
+        #
+        # ``item_code2`` is not optional here and that is the whole trap.
+        # Measured live on 2026-08-18: requesting I61BC alone returns 14 rows
+        # for 7 months — 원계열 (I28A) AND 계절조정 (I28B), two different values
+        # per month under one ITEM_CODE1. Storing that would put two
+        # observations on the same (series_id, observation_date) and let
+        # whichever arrived last win.
+        #
+        # 원계열 is chosen over 계절조정 because seasonal adjustment is revised
+        # after the fact: today's adjusted 2019 value is not what was published
+        # in 2019, so it leaks. Same reasoning as `08` §B1.5.
+        #
+        # INACTIVE until the N8-5 duplicate-measure gate has run. Seeding an
+        # active series starts collecting it, and the gate ("drop it if it
+        # correlates above 0.8 with macro_m2 / macro_consumer_sentiment, after
+        # transform and after availability alignment") is meant to decide
+        # whether it belongs at all.
+        CommonFeatureSeries(
+            series_id="macro_unemployment_rate",
+            source=Source.ECOS,
+            source_series_key="901Y027",
+            category="macro_employment",
+            frequency="M",
+            name_kr="실업률",
+            name_en="Unemployment Rate",
+            unit="pct",
+            country="KR",
+            market="MACRO",
+            endpoint_params={
+                "stat_code": "901Y027",
+                "cycle": "M",
+                "item_code1": "I61BC",
+                "item_code2": "I28A",
+            },
+            availability_policy="manual_lag_days",
+            manual_lag_days=20,
+            source_timezone="Asia/Seoul",
+            history_start_date=date(2000, 1, 1),
+            max_stale_business_days=45,
+            default_transform="level",
+            active=False,
+            notes=(
+                "N8. 원계열 (I28A); without item_code2 the response mixes in "
+                "계절조정 (I28B) at the same TIME. Inactive until N8-5."
+            ),
+        ),
+        CommonFeatureSeries(
+            series_id="macro_employment_rate",
+            source=Source.ECOS,
+            source_series_key="901Y027",
+            category="macro_employment",
+            frequency="M",
+            name_kr="고용률",
+            name_en="Employment Rate",
+            unit="pct",
+            country="KR",
+            market="MACRO",
+            endpoint_params={
+                "stat_code": "901Y027",
+                "cycle": "M",
+                "item_code1": "I61E",
+                "item_code2": "I28A",
+            },
+            availability_policy="manual_lag_days",
+            manual_lag_days=20,
+            source_timezone="Asia/Seoul",
+            history_start_date=date(2000, 1, 1),
+            max_stale_business_days=45,
+            default_transform="level",
+            active=False,
+            notes="N8. 원계열 (I28A). Inactive until N8-5.",
+        ),
+        CommonFeatureSeries(
+            series_id="macro_employed_persons",
+            source=Source.ECOS,
+            source_series_key="901Y027",
+            category="macro_employment",
+            frequency="M",
+            name_kr="취업자",
+            name_en="Employed Persons",
+            unit="thousand_persons",
+            country="KR",
+            market="MACRO",
+            endpoint_params={
+                "stat_code": "901Y027",
+                "cycle": "M",
+                "item_code1": "I61BA",
+                "item_code2": "I28A",
+            },
+            availability_policy="manual_lag_days",
+            manual_lag_days=20,
+            source_timezone="Asia/Seoul",
+            history_start_date=date(2000, 1, 1),
+            max_stale_business_days=45,
+            default_transform="level",
+            active=False,
+            notes="N8. 원계열 (I28A). Inactive until N8-5.",
+        ),
         CommonFeatureSeries(
             series_id="macro_ppi",
             source=Source.ECOS,

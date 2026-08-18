@@ -601,3 +601,59 @@ def test_seed_common_feature_catalog_upserts_series_only() -> None:
         "market_kospi200",
     ]
     assert storage.catalog == []  # catalog table not seeded
+
+
+# --------------------------------------------------------------------------
+# N8 — employment series (ECOS 901Y027)
+# --------------------------------------------------------------------------
+
+N8_SERIES = ("macro_unemployment_rate", "macro_employment_rate", "macro_employed_persons")
+
+
+def _series_by_id() -> dict[str, object]:
+    return {series.series_id: series for series in default_common_feature_series()}
+
+
+def test_the_employment_series_pin_item_code2() -> None:
+    # The trap this exists for, measured live 2026-08-18: requesting I61BC
+    # alone returned 14 rows for 7 months — 원계열 AND 계절조정 under one
+    # ITEM_CODE1, two values per month. Without item_code2 both would land on
+    # the same (series_id, observation_date) and one would arbitrarily win.
+    by_id = _series_by_id()
+
+    for series_id in N8_SERIES:
+        params = by_id[series_id].endpoint_params
+        assert params["stat_code"] == "901Y027"
+        assert params["item_code2"] == "I28A", series_id
+
+
+def test_the_employment_series_take_the_unadjusted_variant() -> None:
+    # Seasonal adjustment is revised after the fact, so today's adjusted 2019
+    # value is not what was published in 2019. That is a leak, not a detail.
+    by_id = _series_by_id()
+
+    assert all(by_id[series_id].endpoint_params["item_code2"] == "I28A" for series_id in N8_SERIES)
+    assert all("I28B" not in str(by_id[series_id].endpoint_params) for series_id in N8_SERIES)
+
+
+def test_the_employment_series_are_inactive_until_the_duplicate_gate_runs() -> None:
+    # N8-5 decides whether these belong at all: drop them if they correlate
+    # above 0.8 with macro_m2 / macro_consumer_sentiment after transform and
+    # after availability alignment. Seeding them active would start collecting
+    # before that question is answered.
+    by_id = _series_by_id()
+
+    assert all(by_id[series_id].active is False for series_id in N8_SERIES)
+
+
+def test_the_employment_series_use_the_same_conservative_availability_lag() -> None:
+    # Same policy as the other monthly ECOS macro series; a new series must not
+    # quietly introduce a second PIT convention.
+    by_id = _series_by_id()
+    cpi = by_id["macro_cpi"]
+
+    for series_id in N8_SERIES:
+        series = by_id[series_id]
+        assert series.availability_policy == cpi.availability_policy
+        assert series.manual_lag_days == cpi.manual_lag_days
+        assert series.max_stale_business_days == cpi.max_stale_business_days
