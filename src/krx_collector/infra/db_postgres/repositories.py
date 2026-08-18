@@ -14,8 +14,16 @@ from typing import Any
 
 import psycopg2.extras
 
-from krx_collector.domain.enums import ListingStatus, Market, RunStatus, RunType, Source
+from krx_collector.domain.enums import (
+    ListingStatus,
+    Market,
+    RunStatus,
+    RunType,
+    SliceStatus,
+    Source,
+)
 from krx_collector.domain.models import (
+    CollectionSliceState,
     CommonFeatureCatalogEntry,
     CommonFeatureDailyFact,
     CommonFeatureObservation,
@@ -44,6 +52,7 @@ from krx_collector.domain.models import (
 )
 from krx_collector.infra.calendar.trading_days import get_trading_days
 from krx_collector.infra.db_postgres.connection import get_connection
+from krx_collector.util.time import now_kst
 
 logger = logging.getLogger(__name__)
 
@@ -3752,6 +3761,92 @@ class PostgresStorage:
                 )
             )
         return runs
+
+    # -- Collection slice ledger (L-1) ----------------------------------------
+
+    def get_collection_slice_states(
+        self,
+        source: Source,
+        endpoint: str,
+        slice_keys: list[str] | None = None,
+    ) -> dict[str, CollectionSliceState]:
+        """Return the per-slice completion ledger for one ``(source, endpoint)``."""
+        sql = """
+            SELECT slice_key, status, expected_rows, actual_rows,
+                   attempt_count, last_error, updated_at
+            FROM collection_slice_state
+            WHERE source = %s AND endpoint = %s
+        """
+        params: list[object] = [source.value, endpoint]
+        if slice_keys is not None:
+            if not slice_keys:
+                return {}
+            sql += " AND slice_key = ANY(%s)"
+            params.append(list(slice_keys))
+
+        states: dict[str, CollectionSliceState] = {}
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                for row in cur.fetchall():
+                    states[row[0]] = CollectionSliceState(
+                        source=source,
+                        endpoint=endpoint,
+                        slice_key=row[0],
+                        status=SliceStatus(row[1]),
+                        expected_rows=row[2],
+                        actual_rows=row[3],
+                        attempt_count=row[4],
+                        last_error=row[5],
+                        updated_at=row[6],
+                    )
+        return states
+
+    def upsert_collection_slice_states(self, states: list[CollectionSliceState]) -> UpsertResult:
+        """Record slice outcomes, incrementing ``attempt_count`` in SQL."""
+        if not states:
+            return UpsertResult()
+
+        statement = """
+            INSERT INTO collection_slice_state (
+                source, endpoint, slice_key, status,
+                expected_rows, actual_rows, attempt_count, last_error, updated_at
+            )
+            VALUES %s
+            ON CONFLICT (source, endpoint, slice_key) DO UPDATE SET
+                status = EXCLUDED.status,
+                expected_rows = EXCLUDED.expected_rows,
+                actual_rows = EXCLUDED.actual_rows,
+                -- Incremented here rather than read-modify-written by the
+                -- caller: two runs working the same endpoint would otherwise
+                -- overwrite each other's attempt counts, and the count exists
+                -- precisely to show which slices keep failing.
+                attempt_count = collection_slice_state.attempt_count + 1,
+                last_error = EXCLUDED.last_error,
+                updated_at = EXCLUDED.updated_at
+        """
+
+        now = now_kst()
+        args = [
+            (
+                state.source.value,
+                state.endpoint,
+                state.slice_key,
+                state.status.value,
+                state.expected_rows,
+                state.actual_rows,
+                1,
+                (state.last_error or None) and state.last_error[:2000],
+                state.updated_at or now,
+            )
+            for state in states
+        ]
+
+        result = UpsertResult()
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                result.updated = _execute_values_counted(cur, statement, args, page_size=1000)
+        return result
 
     # -- Query helpers --------------------------------------------------------
 

@@ -168,6 +168,50 @@ CREATE TABLE IF NOT EXISTS sync_checkpoints (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- 6b) collection_slice_state ─ per-slice completion ledger (L-1)
+--
+-- sync_checkpoints is the same idea one row per sync; this is one row per
+-- SLICE, for backfills large enough to span days and many runs.
+--
+-- Why a table and not ingestion_runs.params, where the no-data tombstone
+-- currently lives: a run's params list is capped and only the most recent runs
+-- are read back, so a backfill spanning several days cannot reconstruct its
+-- own completion state from it.  N6 is ~84,000 calls over about three days,
+-- which is exactly the case that breaks.
+--
+-- expected_rows/actual_rows exist because "the slice has at least one row" is
+-- not completion.  A response half-written before a crash leaves a slice that
+-- every later run skips and nothing ever repairs.  A slice counts as done only
+-- when the two agree.
+--
+-- status:
+--   running  ─ claimed by a run that has not reported back.  Treated as NOT
+--              done, so a killed process leaves work to retry rather than a
+--              permanent block.
+--   success  ─ stored and reconciled.  Never expires.
+--   no_data  ─ upstream really has nothing here.  DOES expire: a suspended
+--              ticker resumes, and a company that filed nothing in 2019 may
+--              file a correction later.
+--   failed   ─ attempted and errored.  Retried, with attempt_count showing
+--              which slices keep failing.
+CREATE TABLE IF NOT EXISTS collection_slice_state (
+    source        TEXT        NOT NULL,   -- PYKRX | OPENDART | KRX_OPENAPI | ...
+    endpoint      TEXT        NOT NULL,   -- market_cap | empSttus | ...
+    slice_key     TEXT        NOT NULL,   -- '2024-01-02|KOSPI' | '00126380|2020|11011'
+    status        TEXT        NOT NULL,   -- running | success | no_data | failed
+    expected_rows INT,
+    actual_rows   INT,
+    attempt_count INT         NOT NULL DEFAULT 0,
+    last_error    TEXT,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (source, endpoint, slice_key)
+);
+
+-- Planning reads one (source, endpoint) at a time and filters by status, and
+-- the no_data expiry needs updated_at in the same scan.
+CREATE INDEX IF NOT EXISTS ix_collection_slice_state_status
+    ON collection_slice_state (source, endpoint, status, updated_at);
+
 -- =============================================================================
 -- Phase 0 scaffold for account / flow ingestion
 -- =============================================================================

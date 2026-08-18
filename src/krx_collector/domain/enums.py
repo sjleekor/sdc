@@ -116,3 +116,23 @@ class RunStatus(StrEnum):
     SUCCESS = "success"
     PARTIAL = "partial"
     FAILED = "failed"
+
+
+class SliceStatus(StrEnum):
+    """Completion state of one collection slice (``collection_slice_state``).
+
+    Deliberately not :class:`RunStatus`: a run can be ``partial`` because some
+    of its slices failed, but a *slice* never is — it either reconciled or it
+    did not.  Sharing the enum would let ``partial`` reach a column where it
+    has no meaning.
+
+    ``RUNNING`` counts as not done, so a killed process leaves work to retry
+    rather than a slice nothing will ever revisit.  ``NO_DATA`` expires on a
+    TTL because "upstream has nothing" is a statement about when it was asked;
+    ``SUCCESS`` does not.
+    """
+
+    RUNNING = "running"
+    SUCCESS = "success"
+    NO_DATA = "no_data"
+    FAILED = "failed"

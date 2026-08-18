@@ -441,6 +441,23 @@ SYNC_CHECKPOINTS = TableProfileSpec(
     domain_checks=(),
 )
 
+# Per-slice completion ledger for backfills that span runs (L-1).  Operational
+# like sync_checkpoints, but one row per SLICE rather than per sync, so the
+# useful profile is the status mix — a growing `failed` share is the signal.
+COLLECTION_SLICE_STATE = TableProfileSpec(
+    table="collection_slice_state",
+    weight=ProfileWeight.LIGHT,
+    role=ProfileTableRole.OPERATIONAL,
+    natural_key=("source", "endpoint", "slice_key"),
+    category_cols=("source", "endpoint", "status"),
+    numeric_cols=("expected_rows", "actual_rows", "attempt_count"),
+    null_cols=("expected_rows", "actual_rows", "last_error"),
+    ingest_col="updated_at",
+    cost_class=CostClass.CHEAP,
+    sampling=SamplingPolicy(sample_pct=None),
+    domain_checks=(),
+)
+
 # operating_* are pre-load (0 rows) — checks are written but auto-skip until
 # data lands, then activate without a catalog change.
 _CATALOG: tuple[TableProfileSpec, ...] = (
@@ -467,6 +484,7 @@ _CATALOG: tuple[TableProfileSpec, ...] = (
     STOCK_MASTER_SNAPSHOT_ITEMS,
     INGESTION_RUNS,
     SYNC_CHECKPOINTS,
+    COLLECTION_SLICE_STATE,
 )
 
 _BY_TABLE: dict[str, TableProfileSpec] = {spec.table: spec for spec in _CATALOG}

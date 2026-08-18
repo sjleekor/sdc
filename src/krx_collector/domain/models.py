@@ -26,6 +26,7 @@ from krx_collector.domain.enums import (
     Market,
     RunStatus,
     RunType,
+    SliceStatus,
     Source,
 )
 
@@ -1235,3 +1236,51 @@ class IngestionRun:
     params: dict[str, object] | None = None
     counts: dict[str, int] | None = None
     error_summary: str | None = None
+
+
+@dataclass(slots=True)
+class CollectionSliceState:
+    """Completion state of one collection slice (``collection_slice_state``).
+
+    The unit is whatever one upstream call covers: ``(trade_date, market)`` for
+    a market-wide daily endpoint, ``(corp_code, year, report)`` for OpenDART.
+    ``slice_key`` is that tuple rendered as a string, because the ledger is
+    shared across sources whose slice shapes do not agree.
+
+    Attributes:
+        source: Upstream system that owns the slice.
+        endpoint: Endpoint name within that source, so two collectors reading
+            the same source never collide on a slice key.
+        slice_key: Stable identifier for the slice, e.g. ``2024-01-02|KOSPI``.
+        status: Completion state.
+        expected_rows: Rows the response carried, when the caller knows.
+        actual_rows: Rows storage reported writing.  A slice is complete only
+            when this agrees with ``expected_rows`` — "it has some rows" is how
+            a half-written slice becomes permanent.
+        attempt_count: Attempts so far, so a slice that keeps failing is
+            visible rather than buried in per-run error lists.
+        last_error: Last failure message, truncated by the storage layer.
+        updated_at: KST timestamp of the last transition.  The ``no_data`` TTL
+            is measured from here.
+    """
+
+    source: Source
+    endpoint: str
+    slice_key: str
+    status: SliceStatus
+    expected_rows: int | None = None
+    actual_rows: int | None = None
+    attempt_count: int = 0
+    last_error: str | None = None
+    updated_at: datetime | None = None
+
+    @property
+    def is_complete(self) -> bool:
+        """Return ``True`` when this slice needs no further collection.
+
+        ``no_data`` is complete only until its TTL expires, which the caller
+        applies — the model cannot know the TTL.
+        """
+        if self.status is SliceStatus.SUCCESS:
+            return self.expected_rows is None or self.expected_rows == self.actual_rows
+        return self.status is SliceStatus.NO_DATA

@@ -14,6 +14,7 @@ from typing import Protocol, runtime_checkable
 
 from krx_collector.domain.enums import ListingStatus, Market, RunType, Source
 from krx_collector.domain.models import (
+    CollectionSliceState,
     CommonFeatureCatalogEntry,
     CommonFeatureDailyFact,
     CommonFeatureObservation,
@@ -576,6 +577,44 @@ class Storage(Protocol):
 
     def get_recent_ingestion_runs(self, run_type: RunType, limit: int = 20) -> list[IngestionRun]:
         """Return recent ingestion runs for one run type, newest first."""
+        ...
+
+    def get_collection_slice_states(
+        self,
+        source: Source,
+        endpoint: str,
+        slice_keys: list[str] | None = None,
+    ) -> dict[str, CollectionSliceState]:
+        """Return the per-slice completion ledger for one ``(source, endpoint)``.
+
+        The durable form of what ``ingestion_runs.params`` cannot hold: a run's
+        tombstone list is capped and only the newest runs are read back, so a
+        backfill spanning days cannot reconstruct its own progress from it.
+
+        Args:
+            source: Upstream system.
+            endpoint: Endpoint name within that source.
+            slice_keys: Optional allowlist.  ``None`` returns every recorded
+                slice for the pair.
+
+        Returns:
+            ``{slice_key: CollectionSliceState}``.  Slices never attempted are
+            simply absent.
+        """
+        ...
+
+    def upsert_collection_slice_states(self, states: list[CollectionSliceState]) -> UpsertResult:
+        """Record slice outcomes, incrementing ``attempt_count`` per write.
+
+        The count is incremented in SQL rather than read-modify-written, so two
+        runs working the same endpoint cannot lose each other's attempts.
+
+        Args:
+            states: Slice states to record.
+
+        Returns:
+            Rows written.
+        """
         ...
 
     def get_active_stocks(self, market: Market | None = None) -> list[Stock]:
