@@ -28,6 +28,16 @@ from research.etl.mart import materialize, register_mart_view
 
 FIN_SCAN_TABLE = "feat_fin_scan_daily"
 
+#: N2-9 diagnostic table name. A separate mart, never a replacement: the
+#: industry variant is not PIT, so both have to exist side by side to be
+#: comparable at all.
+FIN_SCAN_INDUSTRY_TABLE = "feat_fin_scan_daily_ind"
+
+#: Cross-section the industry-neutral variant normalises within. Banks, biotech,
+#: shipbuilders and game studios currently z-score against one KOSPI pool; Barra
+#: keeps industry as a first-class block for exactly this reason.
+CROSS_SECTION_WITH_INDUSTRY = "trade_date, market, industry_group"
+
 # §1.3 fingerprint, same role as ``EVENT_FEATURE_FORMULA_VERSION`` for the event
 # features: the formula/handling rules below are not covered by ``config_hash``
 # (the scan YAML) or ``phase_b_code_hash`` (which only hashes
@@ -126,9 +136,31 @@ def build_fin_scan_daily_sql(
     pit_view: str = "dim_stock_pit_daily",
     quality_view: str = "dim_price_quality_daily",
     vintage_view: str = "fin_quarterly_metric_vintage",
+    industry_view: str | None = None,
 ) -> str:
-    """SQL producing ``feat_fin_scan_daily`` from B-3's quarterly vintage mart."""
+    """SQL producing ``feat_fin_scan_daily`` from B-3's quarterly vintage mart.
+
+    Args:
+        pit_view: A0's PIT shares/market-cap mart.
+        quality_view: A0's price-quality mart.
+        vintage_view: B-3's quarterly metric vintage mart.
+        industry_view: When given, a ``(ticker, industry_group)`` view; every
+            cross-sectional winsorize and z-score then partitions on
+            ``(trade_date, market, industry_group)`` instead of
+            ``(trade_date, market)``. This is the N2-9 **diagnostic** variant
+            and is not point-in-time — ``induty_code`` carries today's industry
+            backwards — so it belongs beside the existing path, never in place
+            of it. Left ``None`` the emitted SQL is unchanged, which is what
+            keeps the frozen parity tests meaningful.
+    """
     joins = "\n".join(_metric_join(m, b) for m in _METRICS for b in _BASES)
+    # One string, used by every winsorize percentile and every z-score, so the
+    # variant cannot end up neutralising some components and not others.
+    cross_section = "trade_date, market" if industry_view is None else CROSS_SECTION_WITH_INDUSTRY
+    industry_join = (
+        "" if industry_view is None else f"\n        LEFT JOIN {industry_view} ind USING (ticker)"
+    )
+    industry_column = "" if industry_view is None else ",\n            ind.industry_group"
 
     return f"""
     WITH {_metric_intervals_cte(vintage_view)},
@@ -137,9 +169,9 @@ def build_fin_scan_daily_sql(
             pit.trade_date, pit.ticker, pit.market,
             pit.market_cap_pit, pit.issued_shares_pit,
             pit.shares_is_available, pit.shares_invalid_flag, pit.shares_available_from,
-            q.is_halted, q.valid_session_idx
+            q.is_halted, q.valid_session_idx{industry_column}
         FROM {pit_view} pit
-        LEFT JOIN {quality_view} q USING (trade_date, ticker, market)
+        LEFT JOIN {quality_view} q USING (trade_date, ticker, market){industry_join}
     ),
     joined AS (
         SELECT panel.*,
@@ -260,44 +292,44 @@ def build_fin_scan_daily_sql(
             CASE WHEN fin_book_to_market IS NULL THEN NULL ELSE
                 LEAST(GREATEST(fin_book_to_market,
                     quantile_cont(fin_book_to_market, 0.01)
-                        OVER (PARTITION BY trade_date, market)),
+                        OVER (PARTITION BY {cross_section})),
                     quantile_cont(fin_book_to_market, 0.99)
-                        OVER (PARTITION BY trade_date, market))
+                        OVER (PARTITION BY {cross_section}))
             END AS w_bm,
             CASE WHEN fin_earnings_yield IS NULL THEN NULL ELSE
                 LEAST(GREATEST(fin_earnings_yield,
                     quantile_cont(fin_earnings_yield, 0.01)
-                        OVER (PARTITION BY trade_date, market)),
+                        OVER (PARTITION BY {cross_section})),
                     quantile_cont(fin_earnings_yield, 0.99)
-                        OVER (PARTITION BY trade_date, market))
+                        OVER (PARTITION BY {cross_section}))
             END AS w_ep,
             CASE WHEN fin_cfo_yield IS NULL THEN NULL ELSE
                 LEAST(GREATEST(fin_cfo_yield,
                     quantile_cont(fin_cfo_yield, 0.01)
-                        OVER (PARTITION BY trade_date, market)),
+                        OVER (PARTITION BY {cross_section})),
                     quantile_cont(fin_cfo_yield, 0.99)
-                        OVER (PARTITION BY trade_date, market))
+                        OVER (PARTITION BY {cross_section}))
             END AS w_cfop,
             CASE WHEN fin_sales_to_price IS NULL THEN NULL ELSE
                 LEAST(GREATEST(fin_sales_to_price,
                     quantile_cont(fin_sales_to_price, 0.01)
-                        OVER (PARTITION BY trade_date, market)),
+                        OVER (PARTITION BY {cross_section})),
                     quantile_cont(fin_sales_to_price, 0.99)
-                        OVER (PARTITION BY trade_date, market))
+                        OVER (PARTITION BY {cross_section}))
             END AS w_sp
         FROM ratios
     ),
     zscored AS (
         SELECT
             *,
-            (w_bm - AVG(w_bm) OVER (PARTITION BY trade_date, market))
-                / NULLIF(STDDEV_SAMP(w_bm) OVER (PARTITION BY trade_date, market), 0) AS z_bm,
-            (w_ep - AVG(w_ep) OVER (PARTITION BY trade_date, market))
-                / NULLIF(STDDEV_SAMP(w_ep) OVER (PARTITION BY trade_date, market), 0) AS z_ep,
-            (w_cfop - AVG(w_cfop) OVER (PARTITION BY trade_date, market))
-                / NULLIF(STDDEV_SAMP(w_cfop) OVER (PARTITION BY trade_date, market), 0) AS z_cfop,
-            (w_sp - AVG(w_sp) OVER (PARTITION BY trade_date, market))
-                / NULLIF(STDDEV_SAMP(w_sp) OVER (PARTITION BY trade_date, market), 0) AS z_sp
+            (w_bm - AVG(w_bm) OVER (PARTITION BY {cross_section}))
+                / NULLIF(STDDEV_SAMP(w_bm) OVER (PARTITION BY {cross_section}), 0) AS z_bm,
+            (w_ep - AVG(w_ep) OVER (PARTITION BY {cross_section}))
+                / NULLIF(STDDEV_SAMP(w_ep) OVER (PARTITION BY {cross_section}), 0) AS z_ep,
+            (w_cfop - AVG(w_cfop) OVER (PARTITION BY {cross_section}))
+                / NULLIF(STDDEV_SAMP(w_cfop) OVER (PARTITION BY {cross_section}), 0) AS z_cfop,
+            (w_sp - AVG(w_sp) OVER (PARTITION BY {cross_section}))
+                / NULLIF(STDDEV_SAMP(w_sp) OVER (PARTITION BY {cross_section}), 0) AS z_sp
         FROM winsorized
     ),
     value_combined AS (
@@ -360,13 +392,63 @@ def register_fin_scan_daily_view(
     pit_view: str = "dim_stock_pit_daily",
     quality_view: str = "dim_price_quality_daily",
     vintage_view: str = "fin_quarterly_metric_vintage",
+    industry_view: str | None = None,
 ) -> str:
     """Register a DuckDB view over the SQL above (no parquet — tests/parity)."""
     sql = build_fin_scan_daily_sql(
-        pit_view=pit_view, quality_view=quality_view, vintage_view=vintage_view
+        pit_view=pit_view,
+        quality_view=quality_view,
+        vintage_view=vintage_view,
+        industry_view=industry_view,
     )
     con.execute(f"CREATE OR REPLACE VIEW {view_name} AS {sql}")
     return view_name
+
+
+def materialize_fin_scan_daily_industry(
+    con: duckdb.DuckDBPyConnection,
+    config: LakeConfig,
+    *,
+    pit_view: str = "dim_stock_pit_daily",
+    quality_view: str = "dim_price_quality_daily",
+    vintage_view: str = "fin_quarterly_metric_vintage",
+    corp_master_view: str = "dart_corp_master",
+    force: bool = False,
+) -> str:
+    """Build the N2-9 industry-neutral diagnostic mart beside the plain one.
+
+    Every winsorize percentile and z-score normalises within
+    ``(trade_date, market, industry_group)`` rather than ``(trade_date,
+    market)``, so the same features are recomputed against industry peers.
+    Nothing else changes: same ratios, same fs_basis rule, same component
+    count.
+
+    It is a *diagnostic*, and the reason is not caution. ``induty_code`` is
+    today's industry with no change history, so a company that switched
+    business lines carries its present industry backwards through the whole
+    sample. That is a look-ahead, which disqualifies the output as an alpha
+    feature while leaving it perfectly good for asking whether a result
+    survives industry neutralisation.
+
+    Raises:
+        RuntimeError: When the corp master carries no ``induty_code``.
+    """
+    from research.etl.industry import register_industry_group_view
+
+    industry_view = register_industry_group_view(con, corp_master_view=corp_master_view)
+    materialize(
+        con,
+        config,
+        FIN_SCAN_INDUSTRY_TABLE,
+        build_fin_scan_daily_sql(
+            pit_view=pit_view,
+            quality_view=quality_view,
+            vintage_view=vintage_view,
+            industry_view=industry_view,
+        ),
+        force=force,
+    )
+    return register_mart_view(con, config, FIN_SCAN_INDUSTRY_TABLE)
 
 
 def materialize_fin_scan_daily(
