@@ -3523,7 +3523,10 @@ class PostgresStorage:
                 listed_shares,
                 volume,
                 source,
-                fetched_at
+                fetched_at,
+                source_open,
+                source_high,
+                source_low
             )
             VALUES %s
             ON CONFLICT (trade_date, ticker, market) DO UPDATE SET
@@ -3533,7 +3536,10 @@ class PostgresStorage:
                 listed_shares = EXCLUDED.listed_shares,
                 volume = EXCLUDED.volume,
                 source = EXCLUDED.source,
-                fetched_at = EXCLUDED.fetched_at
+                fetched_at = EXCLUDED.fetched_at,
+                source_open = EXCLUDED.source_open,
+                source_high = EXCLUDED.source_high,
+                source_low = EXCLUDED.source_low
         """
 
         with get_connection(self._dsn) as conn:
@@ -3550,6 +3556,9 @@ class PostgresStorage:
                         r.volume,
                         r.source.value,
                         r.fetched_at,
+                        r.source_open,
+                        r.source_high,
+                        r.source_low,
                     )
                     for r in rows
                 ]

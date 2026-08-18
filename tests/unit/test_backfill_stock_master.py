@@ -112,12 +112,15 @@ def test_nothing_to_recover_is_a_success_not_an_error() -> None:
 
 def test_it_reads_only_the_historical_backfill_snapshots_by_default() -> None:
     # The live FDR snapshots cannot contribute: anything in them is in the
-    # master by construction, so reading them is wasted work at best.
+    # master by construction, so reading them is wasted work at best.  Both
+    # backfill provenances do contribute — the pykrx series stopped at 60/152
+    # when KRX blocked this host and the Open API series continues it, so
+    # reading only one would leave half the recovered tickers behind.
     storage = _FakeStorage([])
 
     backfill_stock_master_from_snapshots(storage)
 
-    assert storage.requested_sources == [[Source.PYKRX_BACKFILL]]
+    assert storage.requested_sources == [[Source.PYKRX_BACKFILL, Source.KRX_OPENAPI_BACKFILL]]
 
 
 def test_an_explicit_source_list_is_honoured() -> None:
@@ -145,4 +148,4 @@ def test_the_run_records_what_it_did() -> None:
 
     run = storage.runs[-1]
     assert run.counts == {"candidates": 1, "rows_upserted": 1}
-    assert run.params["sources"] == ["PYKRX_BACKFILL"]
+    assert run.params["sources"] == ["PYKRX_BACKFILL", "KRX_OPENAPI_BACKFILL"]

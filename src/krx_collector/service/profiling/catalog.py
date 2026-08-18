@@ -71,6 +71,12 @@ DAILY_MARKET_CAP = TableProfileSpec(
         "trading_value",
         "listed_shares",
         "volume",
+        # Unadjusted OHLC, Open API only.  The pykrx response has no
+        # open/high/low, so a high null rate here is provenance, not a defect
+        # — read it against the source column.
+        "source_open",
+        "source_high",
+        "source_low",
     ),
     category_cols=("market", "source"),
     null_cols=(
@@ -79,6 +85,9 @@ DAILY_MARKET_CAP = TableProfileSpec(
         "trading_value",
         "listed_shares",
         "volume",
+        "source_open",
+        "source_high",
+        "source_low",
     ),
     ingest_col="fetched_at",
     fk_relations=(

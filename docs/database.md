@@ -92,8 +92,22 @@ KRX가 일별로 공표하는 시가총액·거래대금·상장주식수입니�
 | `trading_value` | BIGINT          | 거래대금 (KRW)                         |
 | `listed_shares` | BIGINT          | 상장주식수                             |
 | `volume`        | BIGINT          | KRX 기준 거래량 (naver 기준과 대조용)  |
-| `source`        | TEXT NOT NULL   | PYKRX                                  |
+| `source`        | TEXT NOT NULL   | PYKRX \| KRX_OPENAPI                   |
 | `fetched_at`    | TIMESTAMPTZ NOT NULL | 데이터를 수집한 시간              |
+| `source_open`   | BIGINT          | KRX 당일 시가 (미수정) — Open API만    |
+| `source_high`   | BIGINT          | KRX 당일 고가 (미수정) — Open API만    |
+| `source_low`    | BIGINT          | KRX 당일 저가 (미수정) — Open API만    |
+
+**원주가 3개는 `fetched_at` 뒤에 붙였습니다.** `ALTER TABLE ADD COLUMN`이 항상 끝에
+붙으므로, 새로 만든 테이블과 기존 테이블의 컬럼 순서를 같게 유지하려면 이 자리여야 합니다.
+`remote_sync`의 커서 인덱스도 `fetched_at` 위치에 고정돼 있어서 중간에 끼우면
+조용히 다른 컬럼을 가리키게 됩니다.
+
+**이 셋은 원천에 따라 갈립니다.** KRX Open API 응답에는 시가·고가·저가가 시가총액과
+**같은 응답에** 들어 있어서 추가 호출이 없습니다. pykrx 응답에는 없어서 NULL로 남습니다.
+즉 결측률이 높은 건 결함이 아니라 provenance입니다 — `source`와 같이 봐야 합니다.
+이 원주가가 있으면 **조정 계수를 우리가 PIT로 계산**할 수 있습니다(K-7). 지금
+`daily_ohlcv`는 naver 수정주가라 분할이 생길 때마다 과거가 소급 재작성됩니다.
 
 **기본키(Primary key):** `(trade_date, ticker, market)`
 **인덱스(Index):** `(ticker, market, trade_date DESC)`, `(fetched_at, trade_date, ticker, market)`
@@ -471,7 +485,8 @@ ON CONFLICT (trade_date, ticker, market) DO UPDATE SET
 
 ```sql
 INSERT INTO daily_market_cap (trade_date, ticker, market, source_close, market_cap,
-                              trading_value, listed_shares, volume, source, fetched_at)
+                              trading_value, listed_shares, volume, source, fetched_at,
+                              source_open, source_high, source_low)
 VALUES (...)
 ON CONFLICT (trade_date, ticker, market) DO UPDATE SET
     source_close = EXCLUDED.source_close,
@@ -480,7 +495,10 @@ ON CONFLICT (trade_date, ticker, market) DO UPDATE SET
     listed_shares = EXCLUDED.listed_shares,
     volume = EXCLUDED.volume,
     source = EXCLUDED.source,
-    fetched_at = EXCLUDED.fetched_at;
+    fetched_at = EXCLUDED.fetched_at,
+    source_open = EXCLUDED.source_open,
+    source_high = EXCLUDED.source_high,
+    source_low = EXCLUDED.source_low;
 ```
 
 **설계 이유:** `daily_ohlcv`와 같습니다. 추가로 **한 응답(= 한 날짜 · 한 시장)의 전체 행을

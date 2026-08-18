@@ -158,6 +158,13 @@ def test_daily_market_cap_spec_matches_ddl_and_cursor() -> None:
         "volume",
         "source",
         "fetched_at",
+        # K-4: the unadjusted OHLC that arrives with the Open API response.
+        # Appended AFTER fetched_at so cursor_indexes below keeps pointing at
+        # the same columns — inserting them mid-list would silently repoint
+        # the resume cursor at source_open.
+        "source_open",
+        "source_high",
+        "source_low",
     )
     assert spec.conflict_columns == ("trade_date", "ticker", "market")
     # PK columns are never in update_columns; every value column is.

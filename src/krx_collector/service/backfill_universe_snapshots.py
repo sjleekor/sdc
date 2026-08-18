@@ -48,6 +48,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_MARKETS: tuple[Market, ...] = (Market.KOSPI, Market.KOSDAQ)
 DEFAULT_START = date(2014, 6, 1)
 
+# Provenances that mean "this month-end has already been reconstructed".
+# Kept separate from the live FDR/pykrx snapshot sources on purpose.
+BACKFILL_SNAPSHOT_SOURCES: tuple[Source, ...] = (
+    Source.PYKRX_BACKFILL,
+    Source.KRX_OPENAPI_BACKFILL,
+)
+
 
 def month_end_trading_days(start: date, end: date) -> list[date]:
     """Return the last trading day of each month intersecting ``[start, end]``.
@@ -84,6 +91,7 @@ def backfill_universe_snapshots(
     throttle: HumanThrottle | None = None,
     force: bool = False,
     max_consecutive_failures: int = 5,
+    snapshot_source: Source = Source.PYKRX_BACKFILL,
 ) -> UniverseSnapshotBackfillResult:
     """Backfill month-end universe snapshots from *provider* into *storage*.
 
@@ -115,7 +123,7 @@ def backfill_universe_snapshots(
             "end": str(resolved_end),
             "force": force,
             "max_consecutive_failures": max_consecutive_failures,
-            "source": Source.PYKRX_BACKFILL.value,
+            "source": snapshot_source.value,
         },
     )
     storage.record_run(run)
@@ -136,7 +144,15 @@ def backfill_universe_snapshots(
             raise ValueError(f"start ({resolved_start}) must be <= end ({resolved_end})")
 
         targets = month_end_trading_days(resolved_start, resolved_end)
-        existing = set() if force else storage.get_existing_snapshot_dates(Source.PYKRX_BACKFILL)
+        # Skip on *any* backfill provenance, not just this run's. The pykrx
+        # path stopped at 60/152 when KRX blocked this host and the Open API
+        # path resumes the same series; scoping the skip to one source would
+        # re-collect those 60 month-ends under a second provenance and leave
+        # two snapshots per date for the master backfill to reconcile.
+        existing: set[date] = set()
+        if not force:
+            for source in BACKFILL_SNAPSHOT_SOURCES:
+                existing |= storage.get_existing_snapshot_dates(source)
         logger.info(
             "Universe snapshot backfill %s..%s: %d month-ends (%d already stored)",
             resolved_start,

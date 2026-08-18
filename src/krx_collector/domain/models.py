@@ -140,6 +140,11 @@ class DailyMarketCapRow:
         trading_value: Traded value (KRW).
         listed_shares: Listed share count.
         volume: Traded volume on a KRX basis.
+        source_open: KRX unadjusted session open (KRW).  Only the Open API
+            carries it; the pykrx response has no open/high/low, so rows from
+            that adapter leave these three ``None``.
+        source_high: KRX unadjusted session high (KRW).
+        source_low: KRX unadjusted session low (KRW).
         source: Data source.
         fetched_at: KST timestamp when the data was retrieved.
     """
@@ -154,6 +159,13 @@ class DailyMarketCapRow:
     volume: int | None
     source: Source
     fetched_at: datetime
+    # Trailing with defaults so the pykrx adapter's positional construction is
+    # unaffected.  These arrive free with the Open API response, and they are
+    # the unadjusted series that lets the adjustment factor be computed here
+    # instead of inherited from naver's retroactive rewrites (K-7).
+    source_open: int | None = None
+    source_high: int | None = None
+    source_low: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

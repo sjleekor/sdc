@@ -20,6 +20,7 @@ from krx_collector.domain.models import (
     UpsertResult,
 )
 from krx_collector.service.backfill_universe_snapshots import (
+    BACKFILL_SNAPSHOT_SOURCES,
     backfill_universe_snapshots,
     month_end_trading_days,
 )
@@ -76,9 +77,15 @@ class FakeStorage:
         self._existing = existing or set()
         self.snapshot_writes: list[StockUniverseSnapshot] = []
         self.recorded_runs: list = []
+        self.snapshot_source_queries: list[Source] = []
 
     def get_existing_snapshot_dates(self, source: Source) -> set[date]:
-        assert source is Source.PYKRX_BACKFILL
+        # The skip check spans every backfill provenance, not just this run's:
+        # the pykrx series stopped at 60/152 when KRX blocked the host and the
+        # Open API series continues it, so a month-end already collected under
+        # either source must not be collected again under the other.
+        assert source in BACKFILL_SNAPSHOT_SOURCES
+        self.snapshot_source_queries.append(source)
         return set(self._existing)
 
     def insert_stock_master_snapshot_only(self, snapshot: StockUniverseSnapshot) -> UpsertResult:
@@ -154,6 +161,18 @@ def test_snapshots_are_tagged_pykrx_backfill_not_pykrx() -> None:
     assert all(
         r.source is Source.PYKRX_BACKFILL for s in storage.snapshot_writes for r in s.records
     )
+
+
+def test_skip_check_spans_every_backfill_provenance() -> None:
+    # The pykrx series stopped at 60/152 when KRX blocked this host; the Open
+    # API series continues it. Asking only about this run's source would
+    # re-collect those month-ends under a second provenance and leave two
+    # snapshots per date for backfill-master to reconcile.
+    storage = FakeStorage()
+
+    _run(storage, FakeProvider())
+
+    assert set(storage.snapshot_source_queries) == set(BACKFILL_SNAPSHOT_SOURCES)
 
 
 def test_existing_dates_are_skipped_and_force_overrides() -> None:

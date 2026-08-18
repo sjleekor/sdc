@@ -50,7 +50,9 @@ logger = logging.getLogger(__name__)
 
 # Snapshots written by the historical backfill. The live FDR snapshots are
 # excluded because anything in them is already in the master by construction.
-DEFAULT_SNAPSHOT_SOURCES = (Source.PYKRX_BACKFILL,)
+# Both backfill provenances count: the pykrx path stopped at 60/152 when KRX
+# blocked this host, and the Open API path continues the same series.
+DEFAULT_SNAPSHOT_SOURCES = (Source.PYKRX_BACKFILL, Source.KRX_OPENAPI_BACKFILL)
 
 
 @dataclass

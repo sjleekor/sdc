@@ -247,9 +247,13 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
     ),
     TableSyncSpec(
         name="daily_market_cap",
+        # The unadjusted OHLC trio is appended AFTER fetched_at so that
+        # cursor_indexes below keeps pointing at the same columns.  Inserting
+        # them mid-list would silently repoint the resume cursor.
         select_list=(
             "trade_date, ticker, market, source_close, market_cap, trading_value, "
-            "listed_shares, volume, source, fetched_at"
+            "listed_shares, volume, source, fetched_at, "
+            "source_open, source_high, source_low"
         ),
         from_clause="daily_market_cap",
         order_columns=("fetched_at", "trade_date", "ticker", "market"),
@@ -264,6 +268,9 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
             "volume",
             "source",
             "fetched_at",
+            "source_open",
+            "source_high",
+            "source_low",
         ),
         conflict_columns=("trade_date", "ticker", "market"),
         update_columns=(
@@ -274,6 +281,9 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
             "volume",
             "source",
             "fetched_at",
+            "source_open",
+            "source_high",
+            "source_low",
         ),
         local_cursor_sql=(
             "SELECT fetched_at, trade_date, ticker, market "

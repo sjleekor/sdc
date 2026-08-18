@@ -34,7 +34,9 @@ Top-level subcommands (see `src/krx_collector/cli/app.py`, where the argparse tr
 
 - `db init` / `db sync-remote` — schema init; pull prod DB → local (incremental, `--full-refresh`, `--all-tables`, `--ssh-host` tunnel).
 - `universe sync` — sync stock master from `fdr` or `pykrx`.
+  `universe backfill-snapshots` — month-end PIT snapshots; `--source krx-openapi` (default) or `pykrx`.
 - `prices backfill` — daily OHLCV; default = gap-detection backfill, `--incremental` = only after each ticker's `MAX(trade_date)`.
+  `prices market-cap-backfill` — daily market cap / trading value / listed shares, plus the unadjusted OHLC the Open API returns in the same response. `--source krx-openapi` (default, needs `AUTH_KEYS`) or `pykrx` (scrapes; kept only for comparison until K-5).
 - `dart sync-corp | sync-financials | sync-share-info | sync-xbrl` — OpenDART raw ingestion.
   `sync-share-info` also collects `dart_capital_change_raw` (irdsSttus) in the same run.
   `dart sync-filings` (raw disclosure-receipt history, list.json) runs as the last stage of

@@ -127,6 +127,22 @@ CREATE TABLE IF NOT EXISTS daily_market_cap (
     PRIMARY KEY (trade_date, ticker, market)
 );
 
+-- 4b-1) unadjusted OHLC, added 2026-08-18 with the KRX Open API adapter (K-4).
+--
+-- ALTER rather than an edit to the CREATE above, because CREATE TABLE IF NOT
+-- EXISTS is a no-op on a database that already has the table — editing it
+-- would leave every existing deployment without the columns.
+--
+-- These arrive in the SAME response as market cap, so the unadjusted OHLC
+-- costs no extra request.  That is what makes a point-in-time adjustment
+-- factor computable here (K-7) instead of inherited from naver, which
+-- rewrites history on every split.  The pykrx path has no open/high/low in
+-- its response and leaves all three NULL.
+ALTER TABLE daily_market_cap
+    ADD COLUMN IF NOT EXISTS source_open BIGINT,
+    ADD COLUMN IF NOT EXISTS source_high BIGINT,
+    ADD COLUMN IF NOT EXISTS source_low  BIGINT;
+
 CREATE INDEX IF NOT EXISTS ix_daily_market_cap_ticker_date
     ON daily_market_cap (ticker, market, trade_date DESC);
 

@@ -308,6 +308,35 @@ def _handle_db_with_remote_dsn(args: argparse.Namespace) -> None:
 ABORTED_RUN_ERROR_KEYS = ("source_blocked", "pipeline")
 
 
+def _build_krx_openapi_client(settings: object) -> object:
+    """Build the KRX Open API client, or exit with a usable message.
+
+    Exits 2 rather than raising because a missing key is an operator problem
+    with a one-line fix, and the traceback would bury it.
+    """
+    from krx_collector.adapters.market_data_krx_openapi import KrxOpenApiClient
+
+    keys = settings.krx_openapi_auth_keys  # type: ignore[attr-defined]
+    if not keys:
+        print(
+            "❌ KRX Open API needs AUTH_KEYS in .env (comma-separated).\n"
+            "   Issue keys at https://openapi.krx.co.kr, then apply (이용 신청) "
+            "for each endpoint separately —\n"
+            "   a valid key on an unapproved endpoint returns "
+            "401 'Unauthorized API Call'.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    return KrxOpenApiClient(
+        keys,
+        base_url=settings.krx_openapi_base_url,  # type: ignore[attr-defined]
+        timeout_seconds=settings.krx_openapi_timeout_seconds,  # type: ignore[attr-defined]
+        requests_per_second=settings.krx_openapi_requests_per_second,  # type: ignore[attr-defined]
+        max_burst_requests=settings.krx_openapi_max_burst_requests,  # type: ignore[attr-defined]
+    )
+
+
 def _build_krx_throttle(
     args: argparse.Namespace,
     *,
@@ -359,6 +388,26 @@ def _build_krx_throttle(
             error_backoff_max_seconds=settings.krx_error_backoff_max_seconds,
         ),
         logger_instance=logger_instance or logger,
+    )
+
+
+def _add_krx_source_argument(parser: argparse.ArgumentParser) -> None:
+    """Attach ``--source`` to a command that can read KRX two ways.
+
+    ``krx-openapi`` is the default because the pykrx path reaches
+    ``data.krx.co.kr``, whose terms forbid automated collection, and KRX
+    restricted this host for exactly that on 2026-08-16. The scraping path
+    stays reachable only by naming it, until K-5 removes it.
+    """
+    parser.add_argument(
+        "--source",
+        choices=("krx-openapi", "pykrx"),
+        default="krx-openapi",
+        help=(
+            "krx-openapi (default) uses the official API and needs AUTH_KEYS. "
+            "pykrx scrapes data.krx.co.kr, which violates its terms of service "
+            "and is kept only for comparison."
+        ),
     )
 
 
@@ -1872,21 +1921,38 @@ def _handle_universe_backfill_snapshots(args: argparse.Namespace) -> None:
     throttle = _build_krx_throttle(args)
 
     print(
-        f"→ universe backfill-snapshots: markets={[m.value for m in markets]}, "
+        f"→ universe backfill-snapshots: source={args.source}, "
+        f"markets={[m.value for m in markets]}, "
         f"start={args.start}, end={args.end}, force={args.force}, "
         f"min_delay={args.min_delay_seconds}, max_delay={args.max_delay_seconds}"
     )
 
-    from krx_collector.adapters.universe_pykrx.provider import (
-        PykrxHistoricalUniverseProvider,
-    )
+    from krx_collector.domain.enums import Source
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
     from krx_collector.service.backfill_universe_snapshots import (
         backfill_universe_snapshots,
     )
 
+    if args.source == "pykrx":
+        from krx_collector.adapters.universe_pykrx.provider import (
+            PykrxHistoricalUniverseProvider,
+        )
+
+        snapshot_provider = PykrxHistoricalUniverseProvider()
+        snapshot_source = Source.PYKRX_BACKFILL
+    else:
+        from krx_collector.adapters.market_data_krx_openapi import (
+            KrxOpenApiHistoricalUniverseProvider,
+        )
+
+        snapshot_provider = KrxOpenApiHistoricalUniverseProvider(
+            _build_krx_openapi_client(settings)
+        )
+        snapshot_source = Source.KRX_OPENAPI_BACKFILL
+        throttle = None
+
     result = backfill_universe_snapshots(
-        provider=PykrxHistoricalUniverseProvider(),
+        provider=snapshot_provider,
         storage=PostgresStorage(settings.db_dsn),
         markets=markets,
         start=args.start,
@@ -1894,6 +1960,7 @@ def _handle_universe_backfill_snapshots(args: argparse.Namespace) -> None:
         throttle=throttle,
         force=args.force,
         max_consecutive_failures=args.max_consecutive_failures,
+        snapshot_source=snapshot_source,
     )
 
     if result.errors:
@@ -2068,7 +2135,8 @@ def _handle_prices_market_cap_backfill(args: argparse.Namespace) -> None:
     throttle = _build_krx_throttle(args)
 
     print(
-        f"→ prices market-cap-backfill: markets={[m.value for m in markets]}, "
+        f"→ prices market-cap-backfill: source={args.source}, "
+        f"markets={[m.value for m in markets]}, "
         f"start={args.start}, end={args.end}, "
         f"min_delay={args.min_delay_seconds}, max_delay={args.max_delay_seconds}, "
         # No scope here: a market-cap slice is a whole market on a date, so there
@@ -2076,12 +2144,26 @@ def _handle_prices_market_cap_backfill(args: argparse.Namespace) -> None:
         f"force={args.force}, max_consecutive_failures={args.max_consecutive_failures}"
     )
 
-    from krx_collector.adapters.market_cap_pykrx.provider import PykrxMarketCapProvider
     from krx_collector.infra.db_postgres.repositories import PostgresStorage
     from krx_collector.service.backfill_market_cap import backfill_market_cap
 
+    if args.source == "pykrx":
+        from krx_collector.adapters.market_cap_pykrx.provider import PykrxMarketCapProvider
+
+        provider = PykrxMarketCapProvider()
+    else:
+        from krx_collector.adapters.market_data_krx_openapi import (
+            KrxOpenApiMarketCapProvider,
+        )
+
+        provider = KrxOpenApiMarketCapProvider(_build_krx_openapi_client(settings))
+        # The scraping throttle is randomised detection avoidance for a site
+        # that forbids automation. The Open API is authorised and paces itself
+        # with a token bucket inside the client.
+        throttle = None
+
     result = backfill_market_cap(
-        provider=PykrxMarketCapProvider(),
+        provider=provider,
         storage=PostgresStorage(settings.db_dsn),
         markets=markets,
         start=args.start,
@@ -3382,6 +3464,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     universe_backfill.add_argument("--start", type=_parse_date, default=None)
     universe_backfill.add_argument("--end", type=_parse_date, default=None)
+    _add_krx_source_argument(universe_backfill)
     _add_krx_throttle_arguments(universe_backfill)
     universe_backfill.add_argument(
         "--force",
@@ -3564,6 +3647,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prices_market_cap.add_argument("--start", type=_parse_date, default=None)
     prices_market_cap.add_argument("--end", type=_parse_date, default=None)
+    _add_krx_source_argument(prices_market_cap)
     _add_krx_throttle_arguments(prices_market_cap)
     prices_market_cap.add_argument(
         "--force",

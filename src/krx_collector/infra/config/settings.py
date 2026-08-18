@@ -34,6 +34,14 @@ DEFAULT_KIS_BASE_URL = "https://openapi.koreainvestment.com:9443"
 # asking for more only converts successes into retries.
 DEFAULT_KIS_REQUESTS_PER_SECOND = 1.0
 
+DEFAULT_KRX_OPENAPI_BASE_URL = "https://data-dbg.krx.co.kr/svc/apis"
+
+# Ten consecutive unpaced calls on 2026-08-18 drew no rejection, and each one
+# takes 1.3-1.7s anyway, so a request-per-second cap is a safety rail rather
+# than a real constraint.  Two is loose enough not to slow the backfill and
+# tight enough that a bug cannot spend the daily quota in a minute.
+DEFAULT_KRX_OPENAPI_REQUESTS_PER_SECOND = 2.0
+
 
 def _split_key_list(raw: str) -> list[str]:
     """Split a comma-separated API key string, trimming blanks and duplicates."""
@@ -125,6 +133,12 @@ class Settings(BaseSettings):
         krx_openapi_auth_keys_raw: Comma-separated KRX Open API keys, read from
             ``AUTH_KEYS`` — the header the API itself expects is ``AUTH_KEY``.
             Use :attr:`krx_openapi_auth_keys` rather than this raw string.
+        krx_openapi_base_url: KRX Open API service base URL.
+        krx_openapi_timeout_seconds: HTTP timeout for KRX Open API requests.
+        krx_openapi_requests_per_second: Token-bucket rate — a safety rail, not
+            an observed limit; see
+            :data:`DEFAULT_KRX_OPENAPI_REQUESTS_PER_SECOND`.
+        krx_openapi_max_burst_requests: Token-bucket burst size.
         datago_api_key: 공공데이터포털 (data.go.kr) service key.  Store the
             *Encoding* form and put it in the URL verbatim: passing it through
             a query-parameter encoder turns ``%2B`` into ``%252B`` and the
@@ -190,10 +204,15 @@ class Settings(BaseSettings):
     kis_requests_per_second: float = DEFAULT_KIS_REQUESTS_PER_SECOND
     kis_max_burst_requests: int = 1
 
-    # KRX Open API (data-dbg.krx.co.kr).  Multi-key like OpenDART: each key
-    # carries its own 10,000 requests/day quota.
+    # KRX Open API (data-dbg.krx.co.kr).  Multi-key like OpenDART; KRX
+    # publishes 10,000 requests/day but does not say whether that budget is per
+    # key or per account, so nothing here assumes it.
     krx_openapi_auth_keys_raw: str = Field(default="", validation_alias="AUTH_KEYS")
     _krx_openapi_auth_keys: tuple[str, ...] = PrivateAttr(default=())
+    krx_openapi_base_url: str = DEFAULT_KRX_OPENAPI_BASE_URL
+    krx_openapi_timeout_seconds: float = 20.0
+    krx_openapi_requests_per_second: float = DEFAULT_KRX_OPENAPI_REQUESTS_PER_SECOND
+    krx_openapi_max_burst_requests: int = 1
 
     # 공공데이터포털 (data.go.kr)
     datago_api_key: str = Field(default="", validation_alias="DATAGO_KEY")

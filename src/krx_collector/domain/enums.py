@@ -36,6 +36,15 @@ class Source(StrEnum):
     # service violation.  Provenance stays distinct so the changeover is
     # auditable, which is why every flow cursor reads a *list* of sources.
     KIS = "KIS"
+    # KRX Open API (data-dbg.krx.co.kr) — the official replacement for the
+    # pykrx/MDC scraping path.  Distinct from KRX because the two carry
+    # different price bases and different permission terms, and because a
+    # backfill has to be able to tell which rows came from the scraper.
+    KRX_OPENAPI = "KRX_OPENAPI"
+    # Historical universe snapshots reconstructed from KRX Open API responses.
+    # Same reason PYKRX_BACKFILL exists: the live `sync_universe` diff must
+    # never read a reconstructed snapshot as a newly observed one.
+    KRX_OPENAPI_BACKFILL = "KRX_OPENAPI_BACKFILL"
     ECOS = "ECOS"
     FRED = "FRED"
     KOSIS = "KOSIS"
