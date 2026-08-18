@@ -16,6 +16,7 @@ Design choices:
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -870,6 +871,43 @@ class SecurityFlowFetchResult:
     records: list[SecurityFlowLine] = field(default_factory=list)
     no_data: bool = False
     error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FlowRequestStats:
+    """Transport-level counters a flow provider reports back to its service.
+
+    ``requests_attempted`` in ``ingestion_runs`` has always been a count of
+    logical work items, which is why it could neither audit a published quota
+    nor account for the traffic that got this host blocked. These are the real
+    numbers: calls that left, retries, pages walked.
+    """
+
+    http_requests: int = 0
+    http_retries: int = 0
+    pages_fetched: int = 0
+    rate_limited_responses: int = 0
+    auth_token_issued: int = 0
+    auth_token_cache_hits: int = 0
+    throttle_waits: int = 0
+    throttle_wait_seconds: float = 0.0
+    status_counts: Mapping[str, int] = field(default_factory=dict)
+
+    def as_counts(self) -> dict[str, int]:
+        """Flatten into ``ingestion_runs.counts``-shaped integers."""
+        counts = {
+            "http_requests": self.http_requests,
+            "http_retries": self.http_retries,
+            "http_pages_fetched": self.pages_fetched,
+            "http_rate_limited": self.rate_limited_responses,
+            "auth_token_issued": self.auth_token_issued,
+            "auth_token_cache_hits": self.auth_token_cache_hits,
+            "throttle_waits": self.throttle_waits,
+            "throttle_wait_seconds": int(self.throttle_wait_seconds),
+        }
+        for status, count in sorted(self.status_counts.items()):
+            counts[f"http_status_{status}"] = int(count)
+        return counts
 
 
 @dataclass(slots=True)

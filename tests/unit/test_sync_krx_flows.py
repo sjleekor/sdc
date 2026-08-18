@@ -312,9 +312,9 @@ class MockFlowStorage:
     def get_krx_security_flow_metric_max_dates(
         self,
         metric_codes: list[str],
-        source: Source,
+        sources: tuple[Source, ...],
     ) -> dict[str, date]:
-        del source
+        del sources
         return {
             metric_code: latest_date
             for metric_code, latest_date in self.metric_max_dates.items()

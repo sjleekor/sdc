@@ -584,11 +584,10 @@ KRX 안내문이 제시한 공식 경로는 셋이다 — **Open API**, 화면 �
 하루 10,000회, 무료. **투자자별 거래실적·공매도·PER/PBR·지수 구성종목은 없다** —
 `flows`와 N4·N7이 여기 걸린다.
 
-**`flows`는 KIS Developers로 5/7이 대체된다.** 개인·외국인·기관 순매수와
-공매도 거래량·거래대금은 옮길 수 있고, **외국인 보유주식수와 공매도 잔고는 갈 곳이 없다.**
-다만 2007년부터의 이력을 이미 갖고 있어 급한 사안은 아니다 —
-`flows`는 하루 38요청이고 차단은 백필 6,000요청에서 났다.
-→ [`poc/flows_alternatives.md`](dev/20260731_raw_features/02_data_expansion_plan/poc/flows_alternatives.md)
+**`flows`는 KIS Developers로 6/7이 대체된다** — 어댑터는 구현됐다(K-6f).
+개인·외국인·기관 순매수, 공매도 거래량·거래대금, 외국인 보유주식수까지 옮겼고
+**`공매도 잔고 수량` 하나만 갈 곳이 없다.** KRX만 만드는 데이터다.
+→ 아래 "KIS flows 수집" · [`poc/flows_alternatives.md`](dev/20260731_raw_features/02_data_expansion_plan/poc/flows_alternatives.md)
 
 ### KIS 자격증명 (2026-08-16 발급)
 
@@ -600,20 +599,102 @@ KRX 안내문이 제시한 공식 경로는 셋이다 — **Open API**, 화면 �
 | `KIS_APP_KEY` / `KIS_APP_SECRET` | 앱키·시크릿 |
 | `KIS_BASE_URL` | 실전 `openapi.koreainvestment.com:9443` · 모의 `openapivts…:29443` |
 | `KIS_TIMEOUT_SECONDS` | 기본 20.0 |
+| `KIS_TOKEN_CACHE_PATH` | 기본 `state/kis_token.json` · prod은 `/state/kis_token.json` |
+| `KIS_REQUESTS_PER_SECOND` | 기본 **1.0** (아래 참조) |
+| `KIS_TOKEN_REFRESH_MARGIN_SECONDS` | 기본 3600 |
 
-**현재 상태: 로컬 `.env`에만 있다.** prod(`/home/whi/apps/sdc/.env`)에는 아직 없고,
-**읽는 코드도 아직 없다.** 어댑터(K-4/K-6)가 붙을 때 둘 다 처리한다.
+**현재 상태: 로컬 `.env`에만 있다.** prod(`/home/whi/apps/sdc/.env`)에는 **아직 넣지 않았다.**
+`flows sync-kis`를 prod에서 돌리기 전에 사람이 넣어야 한다.
 prod compose의 `collector`는 `env_file: - .env`라 **키만 넣으면 컨테이너로 들어간다.**
 
 시세조회에는 **계좌번호가 필요 없다.** 앱키·시크릿·토큰만 쓴다(계좌번호는 주문·잔고용).
-유량 제한은 **실전 초당 20건 / 계좌당**, 모의 초당 2~5건이다.
 
-> **토큰 캐시를 반드시 호스트에 둬야 한다.**
+> **토큰 캐시는 호스트에 둔다 — 이미 반영했다.**
 > access token은 유효기간 1일이고, 6시간 이내 재발급은 같은 값을 주지만
 > **발급할 때마다 알림톡이 발송된다.** 수집기는 매번 `docker compose run --rm`으로
 > 새 컨테이너를 띄우므로 컨테이너 안에 캐시하면 **매 실행이 재발급 + 알림톡**이 된다.
-> 지금 `collector` 서비스에는 볼륨 마운트가 하나도 없다 —
-> `KIS_TOKEN_CACHE_PATH`와 `./state:/state` 마운트를 어댑터와 함께 넣는다.
+> `deploy/prod/compose.yaml`에 `./state:/state` 마운트와 `KIS_TOKEN_CACHE_PATH`를 넣었다.
+> **`collector`에 볼륨이 붙은 유일한 이유가 이것이다.**
+
+### 유량 제한 — 문서는 초당 20건인데 실측은 **초당 1건**이다
+
+KIS 문서와 안내는 **실전 계좌 초당 20건**이라고 한다. 이 계정은 그렇지 않다.
+2026-08-16 실측:
+
+| 설정 rate | 성공 | 거부(EGW00201) | 실효 처리량 |
+|---:|---:|---:|---:|
+| 20 / 10 / 5 /s | 6~7 / 15 | 8~9 | 2.1~3.4/s |
+| 1.5/s | 14 / 20 | 6 | 1.09/s |
+| 1.2/s | 17 / 20 | 3 | 1.11/s |
+| **1.0/s** | **20 / 20** | **0** | 1.05/s |
+
+**어떤 rate로 올려도 실효 처리량은 1.1/s를 못 넘었다.** 높게 잡으면 성공이 재시도로
+바뀔 뿐이라 기본값을 **1.0**으로 뒀다. 이게 운영 시간을 결정한다.
+
+> **함정 하나 — 유량 초과가 HTTP 500으로 온다.** KIS는 `초당 거래건수를 초과하였습니다`
+> (`EGW00201`)를 **429가 아니라 HTTP 500 + 본문**으로 준다. 상태 코드만 보면 전부
+> 일반 서버 오류로 분류돼 **rate-limit 카운터가 0으로 남고 서킷 브레이커가 영영 안 걸린다.**
+> 어댑터는 상태 코드보다 **본문 `msg_cd`를 먼저** 본다.
+
+### KIS flows 수집 — `flows sync-kis`
+
+```bash
+krx-collector flows sync-kis --plan-only            # 요청 0건·토큰 발급 0건, 계획만 출력
+krx-collector flows sync-kis                        # 최근 거래일까지 증분
+krx-collector flows sync-kis --exclude-groups foreign_holding
+```
+
+**구조가 KRX와 정반대다.** KRX는 `(날짜×시장)→전종목`, KIS는 `(종목)→기간`이다.
+그래서 실패 단위가 시장-일 공백이 아니라 **종목별 구멍**이고,
+`ingestion_runs.params.failed_request_keys`에 **어느 종목이 빠졌는지** 그대로 남는다.
+
+| 그룹 | 엔드포인트 | 한 호출이 주는 것 | 주기 |
+|---|---|---|---|
+| `investor` | `FHPTJ04160001` | **30 거래일** | 주 1회로 충분 |
+| `shorting` | `FHPST04830000` | **100 거래일** | 주 1회로 충분 |
+| `foreign_holding` | `FHKST01010100` | **현재값 1건** | **매일 돌려야 한다** |
+
+**`foreign_holding`만 성격이 다르다.** `inquire-price`는 기준일이 없는 현재값이라
+과거를 못 받는다. 그래서 어댑터는 **최신 거래일이 아닌 날짜로는 아예 수집하지 않는다** —
+오늘 값을 과거 날짜로 적는 것이 안 받는 것보다 나쁘다. 놓친 날은 영구 손실이다.
+
+**소요 시간은 초당 1건에서 나온다.** 2,763종목 기준:
+
+| 작업 | 요청 수 | 소요 |
+|---|---:|---:|
+| `foreign_holding` 1일치 | 2,763 | **약 46분** |
+| `investor` + `shorting` 1회 | 5,526 | **약 1.5시간** |
+| 전체 1회 | 8,289 | **약 2.3시간** |
+
+초당 20건 가정으로 잡았던 "4.6분"은 성립하지 않는다.
+스케줄은 **`foreign_holding` 매일 · 나머지 주 1회**로 나누는 것이 맞다.
+
+> **주기를 늘리면 `--lookback-days`도 같이 늘려야 한다.** 기본 10일은 약 7 세션이라
+> 주 1회는 덮지만, **한 번 실패해서 2주가 벌어지면 창 밖의 날은 그냥 빠진다.**
+> 실패를 견디려면 `주기 × 2` 이상으로 둔다. 호출당 30~100 세션이라 창을 넓혀도
+> 요청 수는 거의 그대로다 — **겹치는 건 사실상 공짜고, 빠지는 건 아니다.**
+
+**중복 실행 방지는 종목별 커서다.** 이미 최신 거래일까지 있고 창 안에 구멍이 없으면
+그 종목·그룹은 요청하지 않는다. 재실행하면 요청 0건이다.
+**커서는 `KRX`와 `KIS` 양쪽을 함께 읽는다** — `KIS`만 보면 전환 첫날 커서가 비어
+증분 시작점이 사라진다.
+
+**자료 없음은 `no_data_request_keys`에 남고 7일간 재요청하지 않는다.** TTL이 있는 이유는
+거래정지 종목이 다시 살아나기 때문이다. 영구 tombstone은 그걸 못 받는다.
+
+**인증·유량 실패는 항목 오류가 아니라 run 실패다.** 계속 돌면 남은 종목 전부를
+거부하는 서버에 던지게 되고, KIS는 인증 재시도마다 알림톡이 나간다.
+유량 소진은 종료 코드 **75**(OpenDART 전례), 인증 실패는 **1**이다.
+
+### K-5(KRX 경로 폐기) 전에 처리해야 할 것 하나
+
+**freshness의 `shorting` 그룹은 metric 3개의 최솟값이다.** 그 안에 KIS가 못 채우는
+`short_selling_balance_quantity`가 들어 있다. KRX 수집을 끄면 이 metric만 날짜가
+멈추고, **`krx_security_flow_raw:shorting`이 매일 stale로 뜬다.**
+
+매일 걸리는 게이트는 아무도 안 본다 — O-8에서 이미 정한 원칙이다.
+그래서 **K-5를 할 때 그룹 정의를 쪼개거나 이 metric을 "수집 중단"으로 명시해야 한다.**
+지금은 KRX가 계속 돌고 있어 드러나지 않는다. **고쳐 둔 게 아니라 미뤄 둔 것이다.**
 
 조사 결과와 진행 상태:
 [`docs/dev/20260731_raw_features/02_data_expansion_plan/poc/krx_open_api.md`](dev/20260731_raw_features/02_data_expansion_plan/poc/krx_open_api.md) ·

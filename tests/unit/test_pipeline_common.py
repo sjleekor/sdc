@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from datetime import date
 
+import pytest
+
 from krx_collector.domain.enums import Market, RunStatus, RunType, Source
 from krx_collector.domain.models import (
     DartCorp,
@@ -11,6 +13,11 @@ from krx_collector.domain.models import (
 )
 from krx_collector.service.sync_dart_financials import sync_dart_financial_statements
 from krx_collector.util.pipeline import (
+    NON_RETRYABLE_EXCEPTIONS,
+    OpenDartKeyExhaustedError,
+    SourceAuthError,
+    SourceBlockedError,
+    SourceQuotaExhaustedError,
     call_with_retry,
     complete_run,
     should_retry_opendart_result,
@@ -333,3 +340,45 @@ def test_sync_dart_financial_statements_stops_on_all_keys_rate_limited() -> None
     assert result.opendart_exhaustion_reason == "all_rate_limited"
     assert result.errors == {"pipeline": "All OpenDART API keys are temporarily rate limited."}
     assert storage.runs[-1].status == RunStatus.FAILED
+
+
+def test_call_with_retry_never_retries_a_terminal_source_condition() -> None:
+    # None of these are transient: the source is out of quota, has refused our
+    # credentials, or has started blocking. Retrying multiplies the condition —
+    # and for KIS an auth retry can cost a token issuance, which notifies the
+    # account holder once per attempt.
+    for error in (
+        SourceAuthError("credentials rejected"),
+        SourceQuotaExhaustedError("quota spent"),
+        SourceBlockedError("source refusing"),
+        OpenDartKeyExhaustedError("all keys rate limited"),
+    ):
+        calls = 0
+
+        def operation(error=error):
+            nonlocal calls
+            calls += 1
+            raise error
+
+        try:
+            call_with_retry(
+                operation,
+                request_label="probe",
+                max_attempts=3,
+                sleep_fn=lambda _seconds: pytest.fail("must not sleep before re-raising"),
+            )
+        except type(error):
+            pass
+        else:  # pragma: no cover - the call must raise
+            pytest.fail(f"{type(error).__name__} was swallowed")
+
+        assert calls == 1, f"{type(error).__name__} was retried"
+
+
+def test_the_non_retryable_set_is_not_silently_narrowed() -> None:
+    assert set(NON_RETRYABLE_EXCEPTIONS) == {
+        SourceAuthError,
+        SourceBlockedError,
+        SourceQuotaExhaustedError,
+        OpenDartKeyExhaustedError,
+    }

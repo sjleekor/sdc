@@ -25,6 +25,11 @@ from krx_collector.ports.storage import Storage
 from krx_collector.service.sync_krx_flows import FLOW_METRIC_GROUPS
 from krx_collector.util.time import now_kst, today_kst
 
+# Both sources write the same security-flow metric codes: KRX until 2026-08,
+# KIS after. Asking only about KRX would report the flow domain as frozen on
+# changeover day — the gate would fire every morning on data that is current.
+FLOW_SOURCES: tuple[Source, ...] = (Source.KRX, Source.KIS)
+
 
 @dataclass(frozen=True, slots=True)
 class YearRangeFreshness:
@@ -58,7 +63,7 @@ def build_freshness_report(storage: Storage, *, running_limit: int = 20) -> Fres
     metric_codes = sorted({metric for metrics in FLOW_METRIC_GROUPS.values() for metric in metrics})
     flow_metric_latest_dates = storage.get_krx_security_flow_metric_max_dates(
         metric_codes=metric_codes,
-        source=Source.KRX,
+        sources=FLOW_SOURCES,
     )
     flow_group_latest_dates: dict[str, date | None] = {}
     for group, metrics in FLOW_METRIC_GROUPS.items():
@@ -116,7 +121,7 @@ def build_freshness_report(storage: Storage, *, running_limit: int = 20) -> Fres
 # Sources whose observations land on KRX trading days. Everything else (ECOS,
 # FRED) publishes on its own calendar with a release lag, so a trading-day
 # budget would flag it every single day and the gate would be ignored.
-TRADING_DAY_SOURCES = frozenset({Source.KRX, Source.FDR, Source.PYKRX})
+TRADING_DAY_SOURCES = frozenset({Source.KRX, Source.KIS, Source.FDR, Source.PYKRX})
 
 DEFAULT_MAX_LAG_TRADING_DAYS = 1
 DEFAULT_MAX_LAG_CALENDAR_DAYS = 14

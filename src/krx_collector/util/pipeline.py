@@ -5,9 +5,9 @@ from __future__ import annotations
 import logging
 import random
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import Any
 
@@ -176,6 +176,26 @@ class SourceBlockedError(RuntimeError):
     """Raised when a source has refused enough consecutive requests to stop."""
 
 
+class SourceAuthError(RuntimeError):
+    """Raised when a source rejects our credentials.
+
+    Distinct from :class:`SourceBlockedError` because there is nothing to
+    resume: every remaining item would fail the same way, and for KIS each
+    recovery attempt costs a token issuance (which notifies the account
+    holder).  Collectors abort the whole run on this rather than counting it
+    as a per-item error.
+    """
+
+
+class SourceQuotaExhaustedError(RuntimeError):
+    """Raised when a source's published request quota is spent.
+
+    OpenDART has :class:`OpenDartKeyExhaustedError` and its own exit code 75.
+    This is the same idea for sources that publish a rate/day quota instead of
+    per-key limits: stop cleanly and resume on the next scheduled run.
+    """
+
+
 class ConsecutiveFailureGuard:
     """Stop a run once a source looks like it is refusing us.
 
@@ -249,6 +269,18 @@ class ConsecutiveFailureGuard:
             self._sleep_fn(delay)
 
 
+# Conditions no amount of waiting fixes: the source is out of quota, has
+# refused our credentials, or has started blocking. `call_with_retry` lets
+# these through untouched so a collector cannot accidentally multiply them by
+# its retry count.
+NON_RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    SourceAuthError,
+    SourceBlockedError,
+    SourceQuotaExhaustedError,
+    OpenDartKeyExhaustedError,
+)
+
+
 def sleep_with_jitter(
     rate_limit_seconds: float,
     jitter_ratio: float = 0.2,
@@ -286,7 +318,14 @@ def call_with_retry[T](
     logger_instance: logging.Logger | None = None,
     should_retry_result: Callable[[T], bool] | None = None,
 ) -> T:
-    """Execute one provider call with retry on exceptions or ``result.error``."""
+    """Execute one provider call with retry on exceptions or ``result.error``.
+
+    :data:`NON_RETRYABLE_EXCEPTIONS` pass straight through. None of them are
+    transient — the source is out of quota, has refused our credentials, or has
+    started blocking — so retrying only makes the situation it describes worse.
+    For KIS an auth retry can cost a token issuance, which notifies the account
+    holder; three attempts per item would notify three times.
+    """
     active_logger = logger_instance or logger
     delay = base_delay_seconds
     last_exception: BaseException | None = None
@@ -295,6 +334,8 @@ def call_with_retry[T](
     for attempt in range(1, max_attempts + 1):
         try:
             result = operation()
+        except NON_RETRYABLE_EXCEPTIONS:
+            raise
         except Exception as exc:
             last_exception = exc
             if attempt == max_attempts:
@@ -447,3 +488,58 @@ def build_run_counts(**counts: Any) -> dict[str, int]:
     for key, value in counts.items():
         normalized[key] = int(value)
     return normalized
+
+
+NO_DATA_REQUEST_KEYS_PARAM = "no_data_request_keys"
+
+
+def recent_no_data_request_keys(
+    storage: Storage,
+    *,
+    run_type: RunType,
+    as_of: date,
+    ttl_days: int,
+    run_limit: int = 20,
+) -> set[str]:
+    """Return request keys recent runs proved carry no data upstream.
+
+    The tombstone that keeps a forward-fill collector from asking the same
+    dead question every night. It lives in ``ingestion_runs.params`` rather
+    than a table because the durable version of this is the
+    ``collection_slice_state`` ledger, which is a later work package; putting
+    half of that ledger in the schema now would only have to be removed again.
+
+    The TTL matters: "no data today" is a statement about today. A ticker that
+    was suspended can resume, so the tombstone has to expire on its own.
+    """
+    cutoff = as_of - timedelta(days=max(0, ttl_days))
+    keys: set[str] = set()
+    for run in storage.get_recent_ingestion_runs(run_type=run_type, limit=run_limit):
+        if run.started_at is None or run.started_at.date() < cutoff:
+            continue
+        raw_keys = (run.params or {}).get(NO_DATA_REQUEST_KEYS_PARAM, [])
+        if isinstance(raw_keys, list):
+            keys.update(str(item) for item in raw_keys)
+    return keys
+
+
+def record_no_data_request_keys(
+    run: IngestionRun,
+    keys: Iterable[str],
+    *,
+    limit: int = 20000,
+) -> int:
+    """Store no-data keys on ``run.params`` and return how many were dropped.
+
+    A silently truncated list reads as "nothing else was skipped", so the count
+    that did not fit is recorded alongside it.
+    """
+    ordered = sorted(set(keys))
+    if not ordered:
+        return 0
+    run.params[NO_DATA_REQUEST_KEYS_PARAM] = ordered[:limit]
+    dropped = max(0, len(ordered) - limit)
+    if dropped:
+        run.params["no_data_request_keys_truncated"] = dropped
+        logger.warning("no-data tombstone list truncated: kept %d of %d keys", limit, len(ordered))
+    return dropped

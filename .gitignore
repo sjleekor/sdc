@@ -17,6 +17,11 @@ env/
 .agents/
 .claude/
 
+# Host-side runtime state mounted into the collector container.
+# Holds the KIS access token, which must survive `docker compose run --rm`
+# because every issuance notifies the account holder.
+state/
+
 # IDE
 .idea/
 .vscode/

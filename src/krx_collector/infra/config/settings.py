@@ -25,6 +25,14 @@ from pydantic import Field, PrivateAttr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_KRX_MDC_TIMEOUT_SECONDS = 20.0
+DEFAULT_KIS_BASE_URL = "https://openapi.koreainvestment.com:9443"
+
+# KIS documents 20 requests/second per account for a live account. This one
+# does not deliver that: measured on 2026-08-16, 20 sequential quotation calls
+# came back clean at 1.0/s, while 1.2/s already drew 3 rejections and 1.5/s
+# drew 6. Effective throughput topped out near 1.1/s at *every* rate tried, so
+# asking for more only converts successes into retries.
+DEFAULT_KIS_REQUESTS_PER_SECOND = 1.0
 
 
 class RunMode(StrEnum):
@@ -89,6 +97,21 @@ class Settings(BaseSettings):
         krx_auth_cooldown_seconds: Delay after a successful KRX login.
         krx_error_backoff_min_seconds: Minimum delay after a KRX error.
         krx_error_backoff_max_seconds: Maximum delay after a KRX error.
+        kis_app_key: 한국투자증권 오픈API app key (quotation endpoints need no
+            account number).
+        kis_app_secret: 한국투자증권 오픈API app secret.
+        kis_base_url: KIS REST base URL (real vs paper trading domain).
+        kis_timeout_seconds: HTTP timeout for KIS requests.
+        kis_token_cache_path: Where the OAuth access token is cached.  This
+            **must** point at a host volume: tokens last a day, and every
+            issuance sends the account holder a KakaoTalk notification, so a
+            cache inside an ephemeral container reissues on every run.
+        kis_token_refresh_margin_seconds: Reissue this long before expiry.
+        kis_requests_per_second: Token-bucket rate for KIS calls.  The default
+            is measured, not documented — see
+            :data:`DEFAULT_KIS_REQUESTS_PER_SECOND`.
+        kis_max_burst_requests: Token-bucket burst size.  One, because a burst
+            is what draws the throttle rejection.
         ecos_api_key: Optional Bank of Korea ECOS API key.
         ecos_timeout_seconds: HTTP timeout for ECOS requests.
         fred_api_key: Optional FRED API key.
@@ -139,6 +162,16 @@ class Settings(BaseSettings):
     opendart_api_key: str = ""
     opendart_api_keys_raw: str = Field(default="", validation_alias="OPENDART_API_KEYS")
     _opendart_api_keys: tuple[str, ...] = PrivateAttr(default=())
+
+    # KIS (한국투자증권 오픈API)
+    kis_app_key: str = ""
+    kis_app_secret: str = ""
+    kis_base_url: str = DEFAULT_KIS_BASE_URL
+    kis_timeout_seconds: float = 20.0
+    kis_token_cache_path: Path = Path("state/kis_token.json")
+    kis_token_refresh_margin_seconds: float = 3600.0
+    kis_requests_per_second: float = DEFAULT_KIS_REQUESTS_PER_SECOND
+    kis_max_burst_requests: int = 1
 
     # ECOS
     ecos_api_key: str = ""

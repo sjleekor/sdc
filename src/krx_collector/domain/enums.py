@@ -18,8 +18,8 @@ class Source(StrEnum):
     """Data source identifier.
 
     FDR and PYKRX are implemented for market data fallbacks. OPENDART, KRX,
-    and the macro/common-feature sources identify raw upstream systems.
-    KIS and KIWOOM remain reserved for future broker-API integrations.
+    KIS and the macro/common-feature sources identify raw upstream systems.
+    KIWOOM remains reserved for a future broker-API integration.
     """
 
     FDR = "FDR"
@@ -31,6 +31,11 @@ class Source(StrEnum):
     PYKRX_BACKFILL = "PYKRX_BACKFILL"
     OPENDART = "OPENDART"
     KRX = "KRX"
+    # 한국투자증권 오픈API.  Writes the same security-flow metric codes as KRX
+    # from 2026-08 onward, because KRX restricted this host for a terms-of-
+    # service violation.  Provenance stays distinct so the changeover is
+    # auditable, which is why every flow cursor reads a *list* of sources.
+    KIS = "KIS"
     ECOS = "ECOS"
     FRED = "FRED"
     KOSIS = "KOSIS"
@@ -38,7 +43,6 @@ class Source(StrEnum):
     KITA = "KITA"
     NASDAQ_DATA_LINK = "NASDAQ_DATA_LINK"
     # Future sources (not implemented):
-    # KIS = "KIS"
     # KIWOOM = "KIWOOM"
 
 
@@ -89,6 +93,7 @@ class RunType(StrEnum):
     XBRL_RECEIPT_BACKFILL = "xbrl_receipt_backfill"
     METRIC_NORMALIZE = "metric_normalize"
     KRX_FLOW_SYNC = "krx_flow_sync"
+    KIS_FLOW_SYNC = "kis_flow_sync"
     XBRL_PARSE = "xbrl_parse"
     OPERATING_METRIC_SYNC = "operating_metric_sync"
     COMMON_FEATURE_SYNC = "common_feature_sync"

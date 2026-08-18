@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date
 
 from krx_collector.domain.enums import RunType
 from krx_collector.ports.storage import Storage
+from krx_collector.util.pipeline import recent_no_data_request_keys
 from krx_collector.util.time import today_kst
 
 DEFAULT_REPRT_CODES = ("11011", "11012", "11013", "11014")
@@ -99,13 +100,9 @@ def _recent_no_data_request_keys(
     as_of: date,
     ttl_days: int,
 ) -> set[str]:
-    cutoff = as_of - timedelta(days=max(0, ttl_days))
-    keys: set[str] = set()
-    for run in storage.get_recent_ingestion_runs(run_type=run_type, limit=20):
-        if run.started_at is None or run.started_at.date() < cutoff:
-            continue
-        params = run.params or {}
-        raw_keys = params.get("no_data_request_keys", [])
-        if isinstance(raw_keys, list):
-            keys.update(str(item) for item in raw_keys)
-    return keys
+    return recent_no_data_request_keys(
+        storage,
+        run_type=run_type,
+        as_of=as_of,
+        ttl_days=ttl_days,
+    )

@@ -38,6 +38,15 @@ from krx_collector.service.freshness import (
     DEFAULT_MAX_LAG_CALENDAR_DAYS,
     DEFAULT_MAX_LAG_TRADING_DAYS,
 )
+from krx_collector.service.sync_kis_flows import (
+    DEFAULT_LOOKBACK_DAYS as DEFAULT_KIS_LOOKBACK_DAYS,
+)
+from krx_collector.service.sync_kis_flows import (
+    DEFAULT_MAX_CONSECUTIVE_FAILURES as DEFAULT_KIS_MAX_CONSECUTIVE_FAILURES,
+)
+from krx_collector.service.sync_kis_flows import (
+    DEFAULT_NO_DATA_TTL_DAYS as DEFAULT_KIS_NO_DATA_TTL_DAYS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1431,7 +1440,7 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
                 latest_price_date=storage.get_latest_daily_price_date(tickers=tickers),
                 metric_latest_dates=storage.get_krx_security_flow_metric_max_dates(
                     metric_codes=metric_codes,
-                    source=Source.KRX,
+                    sources=(Source.KRX, Source.KIS),
                 ),
                 lookback_days=args.lookback_days,
                 exclude_groups=exclude_groups,
@@ -1590,6 +1599,192 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
     if result.errors:
         for request_key, error in list(result.errors.items())[:10]:
             print(f"   - Error {request_key}: {error}")
+
+
+def _handle_flows_sync_kis(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector flows sync-kis``."""
+    settings = get_settings()
+
+    from krx_collector.adapters.flows_kis import KIS_FLOW_GROUPS, KisFlowProvider
+    from krx_collector.adapters.kis_common import KisClient, KisTokenCache, KisTokenProvider
+    from krx_collector.infra.calendar.trading_days import get_trading_days
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.sync_kis_flows import (
+        build_kis_flow_plan,
+        load_kis_flow_targets,
+        sync_kis_security_flows,
+    )
+    from krx_collector.util.rate_limit import TokenBucket
+    from krx_collector.util.time import today_kst
+
+    tickers = _split_csv(args.tickers)
+    exclude_groups = set(_split_csv(args.exclude_groups) or [])
+    unknown_groups = sorted(exclude_groups - set(KIS_FLOW_GROUPS))
+    if unknown_groups:
+        print(
+            f"❌ KIS flow sync failed: unknown group(s) {', '.join(unknown_groups)} "
+            f"(supported: {', '.join(KIS_FLOW_GROUPS)}).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    enabled_groups = [group for group in KIS_FLOW_GROUPS if group not in exclude_groups]
+    if not enabled_groups:
+        print("❌ KIS flow sync failed: every metric group was excluded.", file=sys.stderr)
+        sys.exit(2)
+
+    scope = UniverseScope(args.universe_scope)
+    today = today_kst()
+    if args.end is not None:
+        end = args.end
+    else:
+        recent_sessions = get_trading_days(today - timedelta(days=30), today)
+        if not recent_sessions:
+            print(
+                "❌ KIS flow sync failed: no KRX trading day found in the last 30 days.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        end = recent_sessions[-1]
+    start = args.start if args.start is not None else end - timedelta(days=args.lookback_days)
+    if start > end:
+        print(
+            f"❌ KIS flow sync failed: resolved range is empty (start={start}, end={end}).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    requests_per_second = (
+        args.requests_per_second
+        if args.requests_per_second is not None
+        else settings.kis_requests_per_second
+    )
+    timeout_seconds = (
+        args.timeout_seconds if args.timeout_seconds is not None else settings.kis_timeout_seconds
+    )
+    token_cache_path = (
+        Path(args.token_cache_path)
+        if args.token_cache_path is not None
+        else settings.kis_token_cache_path
+    )
+
+    print(
+        f"→ flows sync-kis: start={start}, end={end}, "
+        f"tickers={tickers}, groups={','.join(enabled_groups)}, "
+        f"scope={scope.value}, requests_per_second={requests_per_second}, "
+        f"timeout={timeout_seconds}, "
+        f"max_consecutive_failures={args.max_consecutive_failures}, "
+        f"no_data_ttl_days={args.no_data_ttl_days}, "
+        f"token_cache={token_cache_path}, plan_only={args.plan_only}"
+    )
+
+    storage = PostgresStorage(settings.db_dsn)
+
+    if args.plan_only:
+        targets = load_kis_flow_targets(storage, tickers, scope)
+        trading_days = get_trading_days(start, end)
+        if not targets or not trading_days:
+            print(
+                "❌ KIS flow sync plan failed: no targets or no trading days in range.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        plan = build_kis_flow_plan(
+            storage=storage,
+            targets=targets,
+            trading_days=trading_days,
+            enabled_groups=enabled_groups,
+            no_data_ttl_days=args.no_data_ttl_days,
+        )
+        print("✅ KIS flow sync plan (no requests sent, no token issued).")
+        print(f"   - Targets: {plan.targets}")
+        print(f"   - Trading days: {len(trading_days)}")
+        print(f"   - Planned requests: {len(plan.items)}")
+        for group, count in sorted(plan.group_counts().items()):
+            print(f"     {group}: {count}")
+        print(f"   - Skipped (already current): {plan.skipped_current}")
+        print(f"   - Skipped (no-data tombstone): {plan.skipped_no_data}")
+        for group, reason in sorted(plan.skipped_groups.items()):
+            print(f"   - Skipped group {group}: {reason}")
+        return
+
+    if not settings.kis_app_key or not settings.kis_app_secret:
+        print(
+            "❌ KIS flow sync failed: KIS_APP_KEY / KIS_APP_SECRET are not configured.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    token_provider = KisTokenProvider(
+        app_key=settings.kis_app_key,
+        app_secret=settings.kis_app_secret,
+        base_url=settings.kis_base_url,
+        cache=KisTokenCache(
+            token_cache_path,
+            refresh_margin_seconds=settings.kis_token_refresh_margin_seconds,
+        ),
+        timeout_seconds=timeout_seconds,
+    )
+    client = KisClient(
+        token_provider=token_provider,
+        app_key=settings.kis_app_key,
+        app_secret=settings.kis_app_secret,
+        base_url=settings.kis_base_url,
+        bucket=TokenBucket(requests_per_second, burst=settings.kis_max_burst_requests),
+        timeout_seconds=timeout_seconds,
+    )
+    provider = KisFlowProvider(client=client)
+
+    result = sync_kis_security_flows(
+        provider,
+        storage,
+        start=start,
+        end=end,
+        tickers=tickers,
+        enabled_flow_groups=enabled_groups,
+        scope=scope,
+        max_consecutive_failures=args.max_consecutive_failures,
+        no_data_ttl_days=args.no_data_ttl_days,
+    )
+
+    if result.aborted_reason:
+        print(
+            f"❌ KIS flow sync aborted ({result.aborted_reason}): "
+            f"{result.errors.get('pipeline', '')}",
+            file=sys.stderr,
+        )
+    elif result.errors:
+        print(f"⚠ KIS flow sync completed with {len(result.errors)} errors.", file=sys.stderr)
+    else:
+        print("✅ KIS flow sync completed.")
+
+    print(f"   - Source: {provider.source().value}")
+    print(f"   - Targets processed: {result.targets_processed}")
+    print(f"   - Requests attempted: {result.requests_attempted}")
+    print(f"   - Requests skipped: {result.requests_skipped}")
+    print(f"   - Rows upserted: {result.rows_upserted}")
+    print(f"   - No-data requests: {result.no_data_requests}")
+    if result.phase_counts:
+        print("   - Group counts:")
+        for group, counts in sorted(result.phase_counts.items()):
+            print(
+                f"     {group}: attempted={counts.requests_attempted}, "
+                f"rows={counts.rows_upserted}, no_data={counts.no_data_requests}, "
+                f"errors={counts.error_count}"
+            )
+    if result.http_counts:
+        print("   - Real HTTP:")
+        for key, value in sorted(result.http_counts.items()):
+            print(f"     {key}={value}")
+    for group, reason in sorted(result.skipped_groups.items()):
+        print(f"   - Skipped group {group}: {reason}")
+    if result.pending_metrics:
+        print(f"   - Pending metrics (KRX-only): {', '.join(result.pending_metrics)}")
+    if result.errors:
+        for request_key, error in list(result.errors.items())[:10]:
+            print(f"   - Error {request_key}: {error}")
+
+    if result.aborted_reason:
+        sys.exit(75 if result.aborted_reason == "SourceQuotaExhaustedError" else 1)
 
 
 def _handle_universe_sync(args: argparse.Namespace) -> None:
@@ -3048,6 +3243,103 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     flows_sync.set_defaults(handler=_handle_flows_sync)
+
+    flows_sync_kis = flows_sub.add_parser(
+        "sync-kis",
+        help="Sync investor/shorting/foreign-holding raw flow metrics from KIS Developers.",
+    )
+    flows_sync_kis.add_argument(
+        "--start",
+        type=_parse_date,
+        default=None,
+        help="Start date (YYYY-MM-DD). Default: --lookback-days before --end.",
+    )
+    flows_sync_kis.add_argument(
+        "--end",
+        type=_parse_date,
+        default=None,
+        help="End date (YYYY-MM-DD). Default: the most recent KRX trading day.",
+    )
+    flows_sync_kis.add_argument(
+        "--lookback-days",
+        type=int,
+        default=DEFAULT_KIS_LOOKBACK_DAYS,
+        help=(
+            "Calendar days of overlap to re-check before --end when --start is omitted. "
+            "One investor call covers 30 sessions, so overlap is nearly free and it is "
+            "what lets a weekly schedule backfill days a failed run missed."
+        ),
+    )
+    flows_sync_kis.add_argument(
+        "--tickers",
+        default=None,
+        help="Optional comma-separated ticker allowlist.",
+    )
+    flows_sync_kis.add_argument(
+        "--exclude-groups",
+        default=None,
+        help=(
+            "Comma-separated flow metric groups to skip " "(foreign_holding, investor, shorting)."
+        ),
+    )
+    flows_sync_kis.add_argument(
+        "--universe-scope",
+        choices=["current", "historical"],
+        default="current",
+        help=(
+            "Which universe to target. 'current' = the active universe. "
+            "'historical' = every stock ever listed."
+        ),
+    )
+    flows_sync_kis.add_argument(
+        "--requests-per-second",
+        type=float,
+        default=None,
+        help=(
+            "Token-bucket rate for KIS calls (default: env KIS_REQUESTS_PER_SECOND or 1.0). "
+            "KIS documents 20/s per account, but this one was measured at 1/s on "
+            "2026-08-16 — 1.2/s already draws rejections and effective throughput "
+            "never exceeded ~1.1/s, so raising this buys retries, not speed."
+        ),
+    )
+    flows_sync_kis.add_argument(
+        "--timeout-seconds",
+        type=_parse_positive_seconds,
+        default=None,
+        help="KIS HTTP timeout in seconds (default: env KIS_TIMEOUT_SECONDS or 20).",
+    )
+    flows_sync_kis.add_argument(
+        "--max-consecutive-failures",
+        type=int,
+        default=DEFAULT_KIS_MAX_CONSECUTIVE_FAILURES,
+        help="Stop after N consecutive failed requests (0 disables the guard).",
+    )
+    flows_sync_kis.add_argument(
+        "--no-data-ttl-days",
+        type=int,
+        default=DEFAULT_KIS_NO_DATA_TTL_DAYS,
+        help=(
+            "How long a ticker/group that returned no data stays tombstoned. "
+            "A suspended name can resume, so this expires rather than being permanent."
+        ),
+    )
+    flows_sync_kis.add_argument(
+        "--token-cache-path",
+        default=None,
+        help=(
+            "Where the KIS access token is cached (default: env KIS_TOKEN_CACHE_PATH). "
+            "Must be a host volume — every issuance notifies the account holder."
+        ),
+    )
+    flows_sync_kis.add_argument(
+        "--plan-only",
+        action="store_true",
+        help=(
+            "Resolve and print the work plan without calling KIS. "
+            "Issues no token and sends no request."
+        ),
+    )
+    flows_sync_kis.set_defaults(handler=_handle_flows_sync_kis)
 
     # -- universe -------------------------------------------------------------
     universe_parser = subparsers.add_parser("universe", help="Stock universe management.")

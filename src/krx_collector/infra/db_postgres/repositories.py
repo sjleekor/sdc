@@ -7,7 +7,7 @@ using ``psycopg2`` against the schema defined in ``sql/postgres_ddl.sql``.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -1687,12 +1687,13 @@ class PostgresStorage:
     def get_krx_security_flow_metric_max_dates(
         self,
         metric_codes: list[str],
-        source: Source,
+        sources: Sequence[Source],
     ) -> dict[str, date]:
-        """Return latest stored trade_date by KRX security-flow metric code."""
-        if not metric_codes:
+        """Return latest stored trade_date by security-flow metric code."""
+        if not metric_codes or not sources:
             return {}
 
+        source_values = [source.value for source in sources]
         with get_connection(self._dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -1700,12 +1701,45 @@ class PostgresStorage:
                     SELECT metric_code, MAX(trade_date)
                     FROM krx_security_flow_raw
                     WHERE metric_code = ANY(%s)
-                      AND source = %s
+                      AND source = ANY(%s)
                     GROUP BY metric_code
                     """,
-                    (metric_codes, source.value),
+                    (metric_codes, source_values),
                 )
                 return {row[0]: row[1] for row in cur.fetchall() if row[1] is not None}
+
+    def get_krx_security_flow_ticker_metric_coverage(
+        self,
+        start: date,
+        end: date,
+        tickers: list[str],
+        metric_codes: list[str],
+        sources: Sequence[Source],
+    ) -> dict[tuple[str, str], tuple[int, date]]:
+        """Return ``(session_count, latest_date)`` per ``(ticker, metric_code)``."""
+        if not tickers or not metric_codes or not sources:
+            return {}
+
+        source_values = [source.value for source in sources]
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT ticker, metric_code, COUNT(DISTINCT trade_date), MAX(trade_date)
+                    FROM krx_security_flow_raw
+                    WHERE trade_date BETWEEN %s AND %s
+                      AND ticker = ANY(%s)
+                      AND metric_code = ANY(%s)
+                      AND source = ANY(%s)
+                    GROUP BY ticker, metric_code
+                    """,
+                    (start, end, tickers, metric_codes, source_values),
+                )
+                return {
+                    (row[0], row[1]): (int(row[2]), row[3])
+                    for row in cur.fetchall()
+                    if row[3] is not None
+                }
 
     def upsert_operating_source_documents(
         self,

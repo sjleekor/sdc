@@ -8,7 +8,7 @@ touching core logic.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import date
 from typing import Protocol, runtime_checkable
 
@@ -287,9 +287,32 @@ class Storage(Protocol):
     def get_krx_security_flow_metric_max_dates(
         self,
         metric_codes: list[str],
-        source: Source,
+        sources: Sequence[Source],
     ) -> dict[str, date]:
-        """Return latest stored trade_date by KRX security-flow metric code."""
+        """Return latest stored trade_date by security-flow metric code.
+
+        ``sources`` is a list rather than one source because the metric is the
+        thing being tracked, not its provenance. Scoping the cursor to a single
+        source means the day the collector moves from KRX to KIS the cursor
+        reads empty and the incremental start point vanishes.
+        """
+        ...
+
+    def get_krx_security_flow_ticker_metric_coverage(
+        self,
+        start: date,
+        end: date,
+        tickers: list[str],
+        metric_codes: list[str],
+        sources: Sequence[Source],
+    ) -> dict[tuple[str, str], tuple[int, date]]:
+        """Return ``(session_count, latest_date)`` per ``(ticker, metric_code)``.
+
+        The per-ticker checkpoint for ticker-shaped collectors. A bulk
+        collector fails a whole ``(date, market)`` slice, which the aggregate
+        counters describe well enough; a per-ticker collector leaves holes in
+        individual names, and only this tells you which.
+        """
         ...
 
     def upsert_operating_source_documents(

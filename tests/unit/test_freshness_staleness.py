@@ -19,8 +19,11 @@ import pytest
 
 from krx_collector.domain.enums import Source
 from krx_collector.service.freshness import (
+    FLOW_SOURCES,
+    TRADING_DAY_SOURCES,
     CommonSeriesFreshness,
     FreshnessReport,
+    build_freshness_report,
     evaluate_staleness,
 )
 
@@ -159,3 +162,56 @@ def test_describe_names_the_domain_and_both_dates() -> None:
     assert "daily_ohlcv" in message
     assert "2026-08-13" in message
     assert "2026-08-14" in message
+
+
+def test_the_flow_cursor_asks_about_both_krx_and_kis() -> None:
+    # `flows` moved from KRX scraping to KIS on 2026-08. A KRX-scoped cursor
+    # would report the flow domain as frozen on changeover day and fire this
+    # gate every morning on data that is in fact current.
+    class RecordingStorage:
+        def __init__(self) -> None:
+            self.flow_sources: tuple[Source, ...] = ()
+
+        def get_krx_security_flow_metric_max_dates(self, metric_codes, sources):
+            self.flow_sources = tuple(sources)
+            return {metric: FRIDAY for metric in metric_codes}
+
+        def get_common_feature_series(self, active_only=True):
+            return []
+
+        def get_common_feature_observation_max_dates(self, series_ids):
+            return {}
+
+        def get_table_bsns_year_range(self, table_name):
+            return None
+
+        def get_latest_daily_price_date(self):
+            return FRIDAY
+
+        def get_latest_market_cap_date(self):
+            return FRIDAY
+
+        def get_running_ingestion_runs(self, limit=20):
+            return []
+
+    storage = RecordingStorage()
+    report = build_freshness_report(storage)
+
+    assert storage.flow_sources == FLOW_SOURCES
+    assert Source.KRX in storage.flow_sources
+    assert Source.KIS in storage.flow_sources
+    assert report.flow_group_latest_dates["investor"] == FRIDAY
+
+
+def test_kis_is_treated_as_a_trading_day_source() -> None:
+    # KIS publishes on KRX sessions, so it gets the trading-day budget rather
+    # than the 14-day calendar budget that ECOS/FRED need.
+    assert Source.KIS in TRADING_DAY_SOURCES
+
+    stale = [
+        CommonSeriesFreshness(
+            series_id="kospi_flow", source=Source.KIS, latest_observation_date=THURSDAY
+        )
+    ]
+    findings = _evaluate(_report(common=stale))
+    assert [finding.cadence for finding in findings] == ["trading"]

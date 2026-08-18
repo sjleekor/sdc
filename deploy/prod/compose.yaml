@@ -26,7 +26,15 @@ services:
         condition: service_healthy
     env_file:
       - .env
+    # Every collector run is a fresh `docker compose run --rm` container. The
+    # KIS access token lasts a day and *every issuance sends the account holder
+    # a KakaoTalk notification*, so a cache inside the container would mean one
+    # notification per scheduled job. This is the only reason the service has a
+    # volume at all.
+    volumes:
+      - ./state:/state
     environment:
+      KIS_TOKEN_CACHE_PATH: /state/kis_token.json
       DB_DSN: ""
       DB_HOST: db
       DB_PORT: 5432
