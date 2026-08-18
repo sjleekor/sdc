@@ -1030,6 +1030,96 @@ def _handle_dart_sync_share_info(args: argparse.Namespace) -> None:
     _exit_if_opendart_key_exhausted(result, "OpenDART share info sync")
 
 
+def _handle_dart_sync_periodic_extras(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector dart sync-periodic-extras``."""
+    settings = get_settings()
+    bsns_years = list(range(args.start_year, args.end_year + 1))
+    reprt_codes = [value.strip() for value in args.reprt_codes.split(",") if value.strip()]
+    tickers = [value.strip() for value in args.tickers.split(",")] if args.tickers else None
+
+    from krx_collector.domain.enums import PeriodicExtraStatement
+    from krx_collector.service.sync_dart_periodic_extras import (
+        DEFAULT_STATEMENTS,
+        resolve_target_years,
+        sync_dart_periodic_extras,
+    )
+
+    if args.statements:
+        try:
+            statements = [
+                PeriodicExtraStatement(value.strip())
+                for value in args.statements.split(",")
+                if value.strip()
+            ]
+        except ValueError as exc:
+            print(f"❌ Unknown statement type: {exc}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        statements = list(DEFAULT_STATEMENTS)
+
+    print(
+        f"→ dart sync-periodic-extras: years={args.start_year}..{args.end_year}, "
+        f"statements={[s.value for s in statements]}, reprt_codes={reprt_codes}, "
+        f"tickers={tickers}, scope={args.universe_scope}, force={args.force}"
+    )
+    # The year thinning is the difference between 162,000 calls and 83,700, so
+    # print it rather than leaving the operator to infer it from the totals.
+    for statement in statements:
+        years = resolve_target_years(statement, bsns_years)
+        print(f"   - {statement.value}: {len(years)} of {len(bsns_years)} years -> {years}")
+
+    from krx_collector.adapters.opendart_periodic_extras.provider import (
+        OpenDartPeriodicExtrasProvider,
+    )
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+
+    try:
+        request_executor = _build_opendart_request_executor()
+    except Exception as exc:
+        print(f"❌ OpenDART periodic extras sync failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    provider = OpenDartPeriodicExtrasProvider(request_executor=request_executor)
+    storage = PostgresStorage(settings.db_dsn)
+
+    result = sync_dart_periodic_extras(
+        provider=provider,
+        storage=storage,
+        bsns_years=bsns_years,
+        reprt_codes=reprt_codes,
+        statements=statements,
+        tickers=tickers,
+        rate_limit_seconds=args.rate_limit_seconds,
+        force=args.force,
+        scope=UniverseScope(args.universe_scope),
+    )
+
+    if result.errors:
+        print(
+            f"⚠ Periodic extras sync completed with {len(result.errors)} errors.",
+            file=sys.stderr,
+        )
+    else:
+        print("✅ OpenDART periodic extras sync completed.")
+
+    print(f"   - Targets processed: {result.targets_processed}")
+    print(f"   - Requests attempted: {result.requests_attempted}")
+    print(f"   - Requests skipped: {result.requests_skipped}")
+    print(f"   - Rows upserted: {result.rows_upserted}")
+    print(f"   - No-data requests: {result.no_data_requests}")
+    print(
+        "   - Slices: "
+        f"pending={result.slices_pending} "
+        f"complete={result.slices_skipped_complete} "
+        f"no_data={result.slices_skipped_no_data} "
+        f"retrying={result.slices_retrying}"
+    )
+    if result.errors:
+        for request_key, error in list(result.errors.items())[:10]:
+            print(f"   - Error {request_key}: {error}")
+    _exit_if_opendart_key_exhausted(result, "OpenDART periodic extras sync")
+
+
 def _handle_dart_sync_xbrl(args: argparse.Namespace) -> None:
     """Handle ``krx-collector dart sync-xbrl``."""
     settings = get_settings()
@@ -2931,6 +3021,68 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     dart_sync_share_info.set_defaults(handler=_handle_dart_sync_share_info)
+
+    dart_sync_periodic_extras = dart_sub.add_parser(
+        "sync-periodic-extras",
+        help="Sync DS002 periodic-report extras (employees, control, audit opinion).",
+    )
+    dart_sync_periodic_extras.add_argument(
+        "--start-year",
+        type=int,
+        default=2015,
+        help="First business year to cover (default: 2015).",
+    )
+    dart_sync_periodic_extras.add_argument(
+        "--end-year",
+        type=int,
+        required=True,
+        help="Last business year to cover.",
+    )
+    dart_sync_periodic_extras.add_argument(
+        "--reprt-codes",
+        default="11011",
+        help=(
+            "Comma-separated report codes (default: 11011). Headcount, control "
+            "and audit opinion barely move within a year, so the annual report "
+            "is enough; hyslrChgSttus carries change_on for exact event dates."
+        ),
+    )
+    dart_sync_periodic_extras.add_argument(
+        "--statements",
+        default=None,
+        help=(
+            "Comma-separated statement types "
+            "(employee, executive, major_shareholder, major_change, audit_opinion). "
+            "Default excludes 'executive': 32,400 calls for one thin candidate."
+        ),
+    )
+    dart_sync_periodic_extras.add_argument(
+        "--tickers",
+        default=None,
+        help="Optional comma-separated ticker allowlist.",
+    )
+    dart_sync_periodic_extras.add_argument(
+        "--rate-limit-seconds",
+        type=float,
+        default=0.2,
+        help="Seconds between OpenDART requests (default: 0.2).",
+    )
+    dart_sync_periodic_extras.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-collect every slice, ignoring the ledger. The ledger is still written.",
+    )
+    dart_sync_periodic_extras.add_argument(
+        "--universe-scope",
+        choices=["current", "historical"],
+        default="historical",
+        help=(
+            "Which universe to target (default: historical). An adverse audit "
+            "opinion is mostly about companies that later delisted, so "
+            "'current' would bias the feature this package exists for."
+        ),
+    )
+    dart_sync_periodic_extras.set_defaults(handler=_handle_dart_sync_periodic_extras)
 
     dart_sync_xbrl = dart_sub.add_parser(
         "sync-xbrl",

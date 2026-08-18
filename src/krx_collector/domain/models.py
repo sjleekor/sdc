@@ -24,6 +24,7 @@ from decimal import Decimal
 from krx_collector.domain.enums import (
     ListingStatus,
     Market,
+    PeriodicExtraStatement,
     RunStatus,
     RunType,
     SliceStatus,
@@ -223,6 +224,33 @@ class DartFinancialStatementLine:
     ord: int | None
     currency: str
     rcept_no: str
+    source: Source
+    fetched_at: datetime
+    raw_payload: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class DartPeriodicExtraLine:
+    """One raw row from a DS002 periodic-report disclosure (N6).
+
+    The response row is kept whole in ``raw_payload`` rather than decomposed
+    into columns.  Five endpoints share this shape and their fields have little
+    in common, so a decomposed schema would be mostly NULL; and which fields
+    matter is still being decided (`07` §6), which is exactly when a raw
+    payload is worth more than a guess at the right columns.
+
+    ``rcept_no`` is part of the unique key, so a corrected report adds rows
+    instead of overwriting the earlier ones — for audit opinions and changes of
+    control, the correction is itself the signal.
+    """
+
+    corp_code: str
+    ticker: str
+    bsns_year: int
+    reprt_code: str
+    rcept_no: str
+    statement_type: PeriodicExtraStatement
+    row_ordinal: int
     source: Source
     fetched_at: datetime
     raw_payload: dict[str, object]
@@ -1022,6 +1050,46 @@ class DartShareInfoSyncResult:
     shareholder_return_rows_upserted: int = 0
     capital_change_rows_upserted: int = 0
     no_data_requests: int = 0
+    errors: dict[str, str] = field(default_factory=dict)
+    opendart_exhaustion_reason: str | None = None
+
+
+@dataclass(slots=True)
+class DartPeriodicExtraResult:
+    """Result of fetching one DS002 periodic-report disclosure payload."""
+
+    corp_code: str = ""
+    ticker: str = ""
+    bsns_year: int = 0
+    reprt_code: str = ""
+    statement_type: PeriodicExtraStatement | None = None
+    records: list[DartPeriodicExtraLine] = field(default_factory=list)
+    #: Rows the response carried, before any were dropped.  Compared against
+    #: what storage wrote so the slice ledger can tell a complete slice from a
+    #: half-written one (L-1).
+    response_rows: int = 0
+    no_data: bool = False
+    error: str | None = None
+    status_code: str | None = None
+    retryable: bool = False
+    retry_after_seconds: float | None = None
+    exhaustion_reason: str | None = None
+
+
+@dataclass(slots=True)
+class DartPeriodicExtrasSyncResult:
+    """Outcome of syncing DS002 periodic-report extras."""
+
+    upsert: UpsertResult = field(default_factory=UpsertResult)
+    targets_processed: int = 0
+    requests_attempted: int = 0
+    requests_skipped: int = 0
+    rows_upserted: int = 0
+    no_data_requests: int = 0
+    slices_pending: int = 0
+    slices_skipped_complete: int = 0
+    slices_skipped_no_data: int = 0
+    slices_retrying: int = 0
     errors: dict[str, str] = field(default_factory=dict)
     opendart_exhaustion_reason: str | None = None
 

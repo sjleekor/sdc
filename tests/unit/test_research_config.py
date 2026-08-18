@@ -80,7 +80,8 @@ def test_table_glob_unknown_raises() -> None:
 def test_table_sets_disjoint_and_expected_counts() -> None:
     assert set(RAW_TABLES).isdisjoint(CANONICAL_TABLES)
     assert set(RAW_TABLES).isdisjoint(CONFIG_TABLES)
-    assert len(RAW_TABLES) == 15  # +daily_market_cap (N1)
+    # +daily_market_cap (N1), +dart_employee_raw / dart_governance_raw (N6)
+    assert len(RAW_TABLES) == 17
     assert CONFIG_TABLES == ("common_feature_series",)
     assert len(CANONICAL_TABLES) == 5
 

@@ -317,6 +317,54 @@ DART_CAPITAL_CHANGE_RAW = TableProfileSpec(
     domain_checks=("capital_change_direction_balance",),
 )
 
+DART_EMPLOYEE_RAW = TableProfileSpec(
+    table="dart_employee_raw",
+    weight=ProfileWeight.FULL,
+    role=ProfileTableRole.RAW,
+    entity_key="corp_code",
+    time_col="bsns_year",
+    natural_key=(
+        "corp_code",
+        "bsns_year",
+        "reprt_code",
+        "statement_type",
+        "rcept_no",
+        "row_ordinal",
+    ),
+    numeric_cols=("row_ordinal",),
+    category_cols=("reprt_code", "statement_type", "source"),
+    top_n_cols=("statement_type",),
+    null_cols=("ticker",),
+    ingest_col="fetched_at",
+    cost_class=CostClass.CHEAP,
+    sampling=SamplingPolicy(sample_pct=None),
+    domain_checks=(),
+)
+
+DART_GOVERNANCE_RAW = TableProfileSpec(
+    table="dart_governance_raw",
+    weight=ProfileWeight.FULL,
+    role=ProfileTableRole.RAW,
+    entity_key="corp_code",
+    time_col="bsns_year",
+    natural_key=(
+        "corp_code",
+        "bsns_year",
+        "reprt_code",
+        "statement_type",
+        "rcept_no",
+        "row_ordinal",
+    ),
+    numeric_cols=("row_ordinal",),
+    category_cols=("reprt_code", "statement_type", "source"),
+    top_n_cols=("statement_type",),
+    null_cols=("ticker",),
+    ingest_col="fetched_at",
+    cost_class=CostClass.CHEAP,
+    sampling=SamplingPolicy(sample_pct=None),
+    domain_checks=(),
+)
+
 DART_FILING_RECEIPT_RAW = TableProfileSpec(
     table="dart_filing_receipt_raw",
     weight=ProfileWeight.FULL,
@@ -474,6 +522,8 @@ _CATALOG: tuple[TableProfileSpec, ...] = (
     DART_SHAREHOLDER_RETURN_RAW,
     DART_SHARE_COUNT_RAW,
     DART_CAPITAL_CHANGE_RAW,
+    DART_EMPLOYEE_RAW,
+    DART_GOVERNANCE_RAW,
     DART_FILING_RECEIPT_RAW,
     DART_XBRL_DOCUMENT,
     # Wave 3: masters / config (light weight)

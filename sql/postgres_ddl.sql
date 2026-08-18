@@ -792,6 +792,66 @@ CREATE INDEX IF NOT EXISTS ix_common_feature_observation_date
 CREATE INDEX IF NOT EXISTS ix_common_feature_observation_sync_cursor
     ON common_feature_observation_raw (fetched_at, raw_id);
 
+-- 21) dart_employee_raw ─ DS002 empSttus / exctvSttus (직원·임원 현황)
+-- 22) dart_governance_raw ─ DS002 hyslrSttus / hyslrChgSttus / 감사의견
+--
+-- Two tables for five endpoints, split by what a row describes rather than by
+-- which endpoint produced it: people and pay on one side, control and audit on
+-- the other. `statement_type` + `raw_payload` follows dart_shareholder_return_raw.
+--
+-- `rcept_no` is NOT NULL *and* part of the UNIQUE key, and that is the point of
+-- the design. A corrected periodic report gets a new receipt number, so leaving
+-- it out would let the correction overwrite the row and destroy the earlier
+-- value. For audit opinions and changes of control the correction IS the signal.
+--
+-- `row_ordinal` rather than a natural key: one response carries several rows
+-- (by division and gender for employees, by related party for shareholders) and
+-- those labels are rewritten between years, so a natural-key join silently
+-- breaks. Response order was verified stable across repeated requests (N6 PoC).
+CREATE TABLE IF NOT EXISTS dart_employee_raw (
+    raw_id          BIGSERIAL   PRIMARY KEY,
+    corp_code       TEXT        NOT NULL,
+    ticker          TEXT,
+    bsns_year       INT         NOT NULL,
+    reprt_code      TEXT        NOT NULL,
+    rcept_no        TEXT        NOT NULL,
+    statement_type  TEXT        NOT NULL,
+    row_ordinal     INT         NOT NULL,
+    source          TEXT        NOT NULL,
+    fetched_at      TIMESTAMPTZ NOT NULL,
+    raw_payload     JSONB       NOT NULL,
+    CONSTRAINT uq_dart_employee_raw
+        UNIQUE (corp_code, bsns_year, reprt_code, statement_type, rcept_no, row_ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS ix_dart_employee_raw_lookup
+    ON dart_employee_raw (ticker, bsns_year, reprt_code, statement_type);
+
+CREATE INDEX IF NOT EXISTS ix_dart_employee_raw_sync_cursor
+    ON dart_employee_raw (fetched_at, raw_id);
+
+CREATE TABLE IF NOT EXISTS dart_governance_raw (
+    raw_id          BIGSERIAL   PRIMARY KEY,
+    corp_code       TEXT        NOT NULL,
+    ticker          TEXT,
+    bsns_year       INT         NOT NULL,
+    reprt_code      TEXT        NOT NULL,
+    rcept_no        TEXT        NOT NULL,
+    statement_type  TEXT        NOT NULL,
+    row_ordinal     INT         NOT NULL,
+    source          TEXT        NOT NULL,
+    fetched_at      TIMESTAMPTZ NOT NULL,
+    raw_payload     JSONB       NOT NULL,
+    CONSTRAINT uq_dart_governance_raw
+        UNIQUE (corp_code, bsns_year, reprt_code, statement_type, rcept_no, row_ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS ix_dart_governance_raw_lookup
+    ON dart_governance_raw (ticker, bsns_year, reprt_code, statement_type);
+
+CREATE INDEX IF NOT EXISTS ix_dart_governance_raw_sync_cursor
+    ON dart_governance_raw (fetched_at, raw_id);
+
 -- =============================================================================
 -- Future extension: intraday_ohlcv (OUT OF SCOPE)
 -- =============================================================================

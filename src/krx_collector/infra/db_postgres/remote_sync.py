@@ -109,6 +109,8 @@ PIPELINE_FULL_REFRESH_TABLE_NAMES: tuple[str, ...] = (
     "dart_shareholder_return_raw",
     "dart_capital_change_raw",
     "dart_filing_receipt_raw",
+    "dart_employee_raw",
+    "dart_governance_raw",
     "dart_xbrl_document",
     "dart_xbrl_fact_raw",
     # model-facing common feature layer. Only the raw observations + the shared
@@ -655,6 +657,98 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
             "LIMIT 1"
         ),
         cursor_indexes=(15, 0),
+        json_columns=("raw_payload",),
+        preserve_remote_surrogate_columns=("raw_id",),
+        copy_merge_enabled=True,
+    ),
+    TableSyncSpec(
+        name="dart_employee_raw",
+        select_list=(
+            "raw_id, corp_code, ticker, bsns_year, reprt_code, rcept_no, "
+            "statement_type, row_ordinal, source, fetched_at, raw_payload"
+        ),
+        from_clause="dart_employee_raw",
+        order_columns=("fetched_at", "raw_id"),
+        insert_columns=(
+            "raw_id",
+            "corp_code",
+            "ticker",
+            "bsns_year",
+            "reprt_code",
+            "rcept_no",
+            "statement_type",
+            "row_ordinal",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        conflict_columns=(
+            "corp_code",
+            "bsns_year",
+            "reprt_code",
+            "statement_type",
+            "rcept_no",
+            "row_ordinal",
+        ),
+        update_columns=(
+            "ticker",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        local_cursor_sql=(
+            "SELECT fetched_at, raw_id "
+            "FROM dart_employee_raw "
+            "ORDER BY fetched_at DESC, raw_id DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(9, 0),
+        json_columns=("raw_payload",),
+        preserve_remote_surrogate_columns=("raw_id",),
+        copy_merge_enabled=True,
+    ),
+    TableSyncSpec(
+        name="dart_governance_raw",
+        select_list=(
+            "raw_id, corp_code, ticker, bsns_year, reprt_code, rcept_no, "
+            "statement_type, row_ordinal, source, fetched_at, raw_payload"
+        ),
+        from_clause="dart_governance_raw",
+        order_columns=("fetched_at", "raw_id"),
+        insert_columns=(
+            "raw_id",
+            "corp_code",
+            "ticker",
+            "bsns_year",
+            "reprt_code",
+            "rcept_no",
+            "statement_type",
+            "row_ordinal",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        conflict_columns=(
+            "corp_code",
+            "bsns_year",
+            "reprt_code",
+            "statement_type",
+            "rcept_no",
+            "row_ordinal",
+        ),
+        update_columns=(
+            "ticker",
+            "source",
+            "fetched_at",
+            "raw_payload",
+        ),
+        local_cursor_sql=(
+            "SELECT fetched_at, raw_id "
+            "FROM dart_governance_raw "
+            "ORDER BY fetched_at DESC, raw_id DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(9, 0),
         json_columns=("raw_payload",),
         preserve_remote_surrogate_columns=("raw_id",),
         copy_merge_enabled=True,

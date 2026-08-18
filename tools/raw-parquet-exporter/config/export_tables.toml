@@ -80,6 +80,26 @@ output_partitions = ["bsns_year", "reprt_code"]
 order_by = ["raw_id"]
 jsonb_columns = ["raw_payload"]
 
+[[tables]]
+name = "dart_employee_raw"
+priority = "P1"
+extract_strategy = "raw_id_range"
+extract_key = "raw_id"
+chunk_rows = 500000
+output_partitions = ["bsns_year", "reprt_code"]
+order_by = ["raw_id"]
+jsonb_columns = ["raw_payload"]
+
+[[tables]]
+name = "dart_governance_raw"
+priority = "P1"
+extract_strategy = "raw_id_range"
+extract_key = "raw_id"
+chunk_rows = 500000
+output_partitions = ["bsns_year", "reprt_code"]
+order_by = ["raw_id"]
+jsonb_columns = ["raw_payload"]
+
 # No bsns_year/reprt_code on this table — the receipt history is keyed by
 # (corp_code, rcept_no) with a calendar receipt date — so raw_id_range (which
 # requires the bsns_year/reprt_code partition pair) does not apply. ~1.2M small

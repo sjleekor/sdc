@@ -17,6 +17,7 @@ import psycopg2.extras
 from krx_collector.domain.enums import (
     ListingStatus,
     Market,
+    PeriodicExtraStatement,
     RunStatus,
     RunType,
     SliceStatus,
@@ -35,6 +36,7 @@ from krx_collector.domain.models import (
     DartCorp,
     DartFilingReceiptLine,
     DartFinancialStatementLine,
+    DartPeriodicExtraLine,
     DartShareCountLine,
     DartShareholderReturnLine,
     DartXbrlDocument,
@@ -55,6 +57,16 @@ from krx_collector.infra.db_postgres.connection import get_connection
 from krx_collector.util.time import now_kst
 
 logger = logging.getLogger(__name__)
+
+#: Which raw table each DS002 statement type lands in (N6).  Five endpoints,
+#: two tables: people and pay in one, control and audit in the other.
+PERIODIC_EXTRA_TABLES: dict[PeriodicExtraStatement, str] = {
+    PeriodicExtraStatement.EMPLOYEE: "dart_employee_raw",
+    PeriodicExtraStatement.EXECUTIVE: "dart_employee_raw",
+    PeriodicExtraStatement.MAJOR_SHAREHOLDER: "dart_governance_raw",
+    PeriodicExtraStatement.MAJOR_CHANGE: "dart_governance_raw",
+    PeriodicExtraStatement.AUDIT_OPINION: "dart_governance_raw",
+}
 
 
 def _execute_values_counted(
@@ -1316,6 +1328,102 @@ class PostgresStorage:
                         isu_dcrs_mstvdv_fval_amount = EXCLUDED.isu_dcrs_mstvdv_fval_amount,
                         isu_dcrs_mstvdv_fval_amount2 = EXCLUDED.isu_dcrs_mstvdv_fval_amount2,
                         stlm_dt = EXCLUDED.stlm_dt,
+                        source = EXCLUDED.source,
+                        fetched_at = EXCLUDED.fetched_at,
+                        raw_payload = EXCLUDED.raw_payload
+                    """,
+                    args,
+                    page_size=1000,
+                )
+
+        return result
+
+    def upsert_dart_periodic_extras_raw(
+        self,
+        records: list[DartPeriodicExtraLine],
+    ) -> UpsertResult:
+        """Upsert DS002 periodic-report extras, routing by statement type.
+
+        Two tables, one entry point.  Which table a statement belongs to is a
+        schema fact, so it is resolved here rather than at every call site.
+        """
+        if not records:
+            return UpsertResult()
+
+        by_table: dict[str, list[DartPeriodicExtraLine]] = {}
+        for record in records:
+            table = PERIODIC_EXTRA_TABLES.get(record.statement_type)
+            if table is None:
+                raise ValueError(
+                    f"No raw table is registered for statement type {record.statement_type!r}"
+                )
+            by_table.setdefault(table, []).append(record)
+
+        result = UpsertResult()
+        for table, table_records in by_table.items():
+            partial = self._upsert_periodic_extras_table(table, table_records)
+            result.updated += partial.updated
+            result.errors += partial.errors
+        return result
+
+    def _upsert_periodic_extras_table(
+        self,
+        table: str,
+        records: list[DartPeriodicExtraLine],
+    ) -> UpsertResult:
+        result = UpsertResult()
+        # Deduplicate on the unique key so one response carrying a repeated
+        # ordinal cannot make execute_values raise mid-batch.
+        deduped_records = {
+            (
+                record.corp_code,
+                record.bsns_year,
+                record.reprt_code,
+                record.statement_type.value,
+                record.rcept_no,
+                record.row_ordinal,
+            ): record
+            for record in records
+        }
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        record.corp_code,
+                        record.ticker,
+                        record.bsns_year,
+                        record.reprt_code,
+                        record.rcept_no,
+                        record.statement_type.value,
+                        record.row_ordinal,
+                        record.source.value,
+                        record.fetched_at,
+                        psycopg2.extras.Json(record.raw_payload),
+                    )
+                    for record in deduped_records.values()
+                ]
+
+                result.updated = _execute_values_counted(
+                    cur,
+                    f"""
+                    INSERT INTO {table} (
+                        corp_code,
+                        ticker,
+                        bsns_year,
+                        reprt_code,
+                        rcept_no,
+                        statement_type,
+                        row_ordinal,
+                        source,
+                        fetched_at,
+                        raw_payload
+                    )
+                    VALUES %s
+                    ON CONFLICT (
+                        corp_code, bsns_year, reprt_code, statement_type, rcept_no, row_ordinal
+                    )
+                    DO UPDATE SET
+                        ticker = EXCLUDED.ticker,
                         source = EXCLUDED.source,
                         fetched_at = EXCLUDED.fetched_at,
                         raw_payload = EXCLUDED.raw_payload

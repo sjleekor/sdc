@@ -422,6 +422,44 @@ mechanical action과 구분하는 데 사용합니다.
 canonical-compatible `stock_metric_fact`는 `bin/parquet-compute-all.sh`가 raw parquet 위에서
 DuckDB derived mart로 재계산합니다.
 
+### 14b. `dart_employee_raw` · `dart_governance_raw`
+
+OpenDART 정기보고서 주요정보(DS002) 5종의 raw 저장용 테이블 **둘**입니다(N6).
+엔드포인트는 다섯인데 테이블은 둘입니다 — 행이 무엇을 설명하는지로 갈랐습니다.
+사람과 보수는 `dart_employee_raw`(`empSttus`·`exctvSttus`), 지배구조와 감사는
+`dart_governance_raw`(`hyslrSttus`·`hyslrChgSttus`·`accnutAdtorNmNdAdtOpinion`)입니다.
+새 테이블 하나는 6곳에 등록해야 하고, 조회 패턴도 API 표면이 아니라 이 구분을 따릅니다.
+
+| 컬럼명           | 타입              | 비고                                                   |
+|------------------|-------------------|--------------------------------------------------------|
+| `raw_id`         | BIGSERIAL PK      | 내부 surrogate key                                     |
+| `corp_code`      | TEXT NOT NULL     | OpenDART 기업 고유번호                                 |
+| `ticker`         | TEXT              | 6자리 KRX 종목 코드                                    |
+| `bsns_year`      | INT NOT NULL      | 사업연도                                               |
+| `reprt_code`     | TEXT NOT NULL     | 보고서 코드 (기본 `11011` 사업보고서)                  |
+| `rcept_no`       | TEXT NOT NULL     | 접수번호 — **고유키에 포함**                           |
+| `statement_type` | TEXT NOT NULL     | `employee`·`executive` / `major_shareholder`·`major_change`·`audit_opinion` |
+| `row_ordinal`    | INT NOT NULL      | 응답 배열 안의 순서                                    |
+| `source`         | TEXT NOT NULL     | `OPENDART`                                             |
+| `fetched_at`     | TIMESTAMPTZ       | 수집 시각                                              |
+| `raw_payload`    | JSONB NOT NULL    | 응답 행 원본                                           |
+
+**고유키(Unique):** `(corp_code, bsns_year, reprt_code, statement_type, rcept_no, row_ordinal)`
+**인덱스(Index):** `(ticker, bsns_year, reprt_code, statement_type)` · `(fetched_at, raw_id)`
+
+**`rcept_no`가 고유키에 들어간 것이 이 설계의 핵심입니다.** 정기보고서가 정정되면
+새 접수번호가 붙는데, 고유키에서 빼면 **정정본이 원래 행을 덮어써 이전 값이 사라집니다.**
+감사의견과 최대주주 변동에서는 정정 자체가 신호입니다.
+
+**`row_ordinal`을 쓰는 이유.** 한 응답에 여러 행이 옵니다(직원은 사업부문·성별, 최대주주는
+특수관계인별). 그 라벨은 연도마다 표기가 바뀌므로 자연키로 조인하면 조용히 깨집니다.
+같은 요청을 두 번 보내 순서가 안정적인 것을 확인했습니다.
+
+**한계 — final-vintage입니다.** DS002는 요청 인자에 `rcept_no`가 없습니다. 오늘 FY2016을
+요청하면 **당시 원본이 아니라 정정까지 반영된 최종본**이 옵니다. `rcept_no`를 저장해두면
+앞으로의 정정은 관측되지만 과거 구간에는 소급할 수 없습니다.
+**부실 신호 피쳐는 이 위에서 결론 내지 않습니다.**
+
 ### 15. `krx_security_flow_raw`
 
 KRX MDC 기반 수급 raw 저장용 테이블입니다.

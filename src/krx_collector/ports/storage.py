@@ -26,6 +26,7 @@ from krx_collector.domain.models import (
     DartCorp,
     DartFilingReceiptLine,
     DartFinancialStatementLine,
+    DartPeriodicExtraLine,
     DartShareCountLine,
     DartShareholderReturnLine,
     DartXbrlDocument,
@@ -205,6 +206,18 @@ class Storage(Protocol):
         records: list[DartShareholderReturnLine],
     ) -> UpsertResult:
         """Upsert OpenDART dividend / treasury-stock raw rows."""
+        ...
+
+    def upsert_dart_periodic_extras_raw(
+        self,
+        records: list[DartPeriodicExtraLine],
+    ) -> UpsertResult:
+        """Upsert DS002 periodic-report extras, routing by statement type.
+
+        The two destination tables are an implementation detail of the split
+        between people-and-pay and control-and-audit rows, so callers pass one
+        list and the repository routes it.
+        """
         ...
 
     def get_existing_dart_capital_change_keys(

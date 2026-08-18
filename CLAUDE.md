@@ -39,6 +39,7 @@ Top-level subcommands (see `src/krx_collector/cli/app.py`, where the argparse tr
   `prices market-cap-backfill` — daily market cap / trading value / listed shares, plus the unadjusted OHLC the Open API returns in the same response. `--source krx-openapi` (default, needs `AUTH_KEYS`) or `pykrx` (scrapes; kept only for comparison until K-5).
 - `dart sync-corp | sync-financials | sync-share-info | sync-xbrl` — OpenDART raw ingestion.
   `sync-share-info` also collects `dart_capital_change_raw` (irdsSttus) in the same run.
+  `dart sync-periodic-extras` — DS002 정기보고서 주요정보 (직원 현황, 최대주주 현황/변동, 감사의견) into `dart_employee_raw` / `dart_governance_raw`. Defaults to `--universe-scope historical` and resumes from the **slice ledger** (`collection_slice_state`), not from `ingestion_runs.params` — the backfill spans several exit-75 stops. It thins the requested years per statement (`hyslrChgSttus` returns accumulated history, audit opinions arrive three years at a time), which is what takes the backfill from 162,000 calls to 83,700.
   `dart sync-filings` (raw disclosure-receipt history, list.json) runs as the last stage of
   `bin/dart-backfill-all-years.sh`, on its own *calendar receipt year* range (up to the current
   year, not `end_year`). `dart backfill-xbrl-receipts` (explicit receipt-targeted XBRL refetch,

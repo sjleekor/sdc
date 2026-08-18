@@ -106,6 +106,7 @@ class RunType(StrEnum):
     DART_SHARE_INFO_SYNC = "dart_share_info_sync"
     DART_CAPITAL_CHANGE_SYNC = "dart_capital_change_sync"
     DART_FILING_RECEIPT_SYNC = "dart_filing_receipt_sync"
+    DART_PERIODIC_EXTRAS_SYNC = "dart_periodic_extras_sync"
     XBRL_RECEIPT_BACKFILL = "xbrl_receipt_backfill"
     METRIC_NORMALIZE = "metric_normalize"
     KRX_FLOW_SYNC = "krx_flow_sync"
@@ -143,3 +144,28 @@ class SliceStatus(StrEnum):
     SUCCESS = "success"
     NO_DATA = "no_data"
     FAILED = "failed"
+
+
+class PeriodicExtraStatement(StrEnum):
+    """Which DS002 periodic-report disclosure a raw row came from (N6).
+
+    Five endpoints, two tables. The split is by what the row describes — people
+    and pay versus control and audit — rather than by endpoint, because the
+    registration cost of a new raw table is six places (`01` §1) and the query
+    patterns follow the split, not the API surface.
+
+    ``EXECUTIVE`` is defined but not collected by default: its only candidate
+    feature is a management-turnover rate, the same T3 axis ``MAJOR_CHANGE``
+    covers far better, and it would cost 32,400 of the 83,700 calls (PoC §3③).
+    """
+
+    #: empSttus — headcount, tenure, per-head pay. → dart_employee_raw
+    EMPLOYEE = "employee"
+    #: exctvSttus — officers. → dart_employee_raw. Excluded from the backfill.
+    EXECUTIVE = "executive"
+    #: hyslrSttus — largest shareholder and related parties. → dart_governance_raw
+    MAJOR_SHAREHOLDER = "major_shareholder"
+    #: hyslrChgSttus — changes of largest shareholder, with ``change_on``.
+    MAJOR_CHANGE = "major_change"
+    #: accnutAdtorNmNdAdtOpinion — auditor and opinion. → dart_governance_raw
+    AUDIT_OPINION = "audit_opinion"
