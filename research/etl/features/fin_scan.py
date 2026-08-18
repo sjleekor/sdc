@@ -51,7 +51,17 @@ CROSS_SECTION_WITH_INDUSTRY = "trade_date, market, industry_group"
 #            ">= 2 valid components" rule actually binds (10_known_issues.md I1).
 #   fin_v3 — same-day metric candidates resolve to the latest fiscal period
 #            instead of scan order (10_known_issues.md I12).
-FIN_FEATURE_FORMULA_VERSION = "fin_v3"
+#   fin_v4 — I7. The canonical metric rules gained an XBRL fallback for the
+#            financial-statement metrics, and the vintage mart now takes an
+#            XBRL candidate's fs_basis from the rule instead of hardcoding ''.
+#            revenue goes from 8,103 rows to ~148,000, so fin_sales_to_price
+#            and fin_gross_profitability change by more than any tweak this
+#            fingerprint has covered before. The mapping rules live in
+#            krx_collector.definitions and are covered by neither config_hash
+#            (the scan YAML) nor phase_b_code_hash (the analysis modules), so
+#            without this bump a re-run would reuse the old Phase B artifact
+#            under an identical fingerprint while producing different numbers.
+FIN_FEATURE_FORMULA_VERSION = "fin_v4"
 
 # Metrics interval-joined onto the daily panel; total_assets additionally
 # carries its own value_lag_4q (B-3) for avg_assets / asset growth.
