@@ -362,6 +362,45 @@ metadata에는 이 키가 없으므로 **legacy로 인정해 통과**시킨다 �
   I3과 같은 종류의 표기 변형 누락이다. 다만 수정 대상이
   `src/krx_collector/definitions/`(수집기 canonical 층)이고 `xbrl_sourced_rows`가 전
   연도 0이라는 별도 문제가 겹쳐 있어, 연구 마트 수정과 성격이 다르다.
+
+  > ### I7 재측정 (2026-08-18) — **표기 변형 문제가 아니었다**
+  >
+  > 착수하려고 2026-08-12 lake의 `dart_xbrl_fact_raw`를 직접 세어봤다.
+  > **원인이 위에 적은 것보다 크다.**
+  >
+  > `ifrs_` 변형이 빠진 게 아니라 **재무제표 metric에 XBRL 규칙이 하나도 없다.**
+  > `default_metric_mapping_rules()`의 `xbrl_specs`는 가중평균주식수·감가상각비 등
+  > 11개뿐이고, `revenue`·`cogs`·`gross_profit`을 포함한 `financial_specs` 24개는
+  > **전부 `dart_financial_statement_raw`만 본다.** fallback이 약한 게 아니라 없다.
+  >
+  > | metric | `ifrs-full_` | `ifrs_` | XBRL 규칙 |
+  > |---|---:|---:|---|
+  > | `revenue` | 555,934 | 184,846 | **없음** |
+  > | `gross_profit` | 365,230 | 178,829 | **없음** |
+  > | `cogs` | 372,390 | 179,396 | **없음** |
+  > | `net_income` | 1,127,150 | 445,815 | **없음** |
+  > | `total_equity` | 1,648,380 | 826,986 | **없음** |
+  >
+  > `dart_` 계열도 XBRL에 다 있다 — `dart_OperatingIncomeLoss` 613,076,
+  > `dart_TotalSellingGeneralAdministrativeExpenses` 552,900.
+  >
+  > **그런데 규칙만 추가하면 안 된다 — 실제로 해보고 확인했다.**
+  > `metric_vintages.py`가 XBRL 후보에 **`'' AS fs_basis`를 하드코딩**한다(486행 부근).
+  > winner 창이 `PARTITION BY ticker, metric_code, statement_period_end, fs_basis, rcept_no`라
+  > **재무제표 후보(`CFS`)와 XBRL 후보(`''`)가 다른 파티션에 떨어진다.**
+  > 우선순위를 100으로 둬도 경쟁 자체가 없다 — **빈 곳을 채우는 게 아니라 행이 두 개가 된다.**
+  > `test_baseline_identity_transform_no_receipt_history`가 정확히 여기서 깨졌다.
+  >
+  > **그래서 I7은 definitions 한 줄이 아니라 마트 수정을 포함한다.**
+  > dim으로 `fs_basis`를 유도하는 건 어렵지 않다
+  > (`ConsolidatedMember`→CFS · `SeparateMember`→OFS, `_XBRL_RANK_SQL`이 이미 읽는다).
+  > 문제는 **기존 XBRL 출처 metric(가중평균주식수·감가상각비)이 지금 `fs_basis=''`에
+  > 있다**는 것이다. 그대로 바꾸면 그 행들이 옮겨가 **I7 범위 밖의 parity가 깨진다.**
+  > 새 fallback 규칙에만 적용하려면 마트가 규칙 종류를 구분해야 한다.
+  >
+  > **남은 결정 둘** — ① XBRL 후보의 `fs_basis`를 규칙별로 나눌 것인가
+  > ② golden parity 재기준선과 Phase A/B 재실행을 언제 묶을 것인가.
+  > **둘 다 정하기 전에는 코드를 넣지 않는다** (넣었다가 되돌렸다).
 - **문헌형 순발행 family** — config YAML 변경이라 `config_hash`가 바뀌고 **Phase A
   재실행(약 4시간 40분)을 유발한다.** I7과 함께 다음 라운드로 묶는 편이 비용이 낮다.
 

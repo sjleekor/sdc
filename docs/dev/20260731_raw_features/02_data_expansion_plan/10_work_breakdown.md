@@ -99,7 +99,7 @@ N6-5의 대상 집합이 N3에서 **S-1**으로 바뀌었으므로 **N6은 KRX�
 | 2 | **S-1 잔여** (financials·share-info·xbrl) | OpenDART만. **약 1,300 상폐 법인.** `--include-delisted` 구현돼 있어 실행만 남았다 | — |
 | 3 | **L-1 ledger** | 순수 코드. 지금의 tombstone이 임시판이다 | — |
 | 4 | **N6** (스키마 2 + 어댑터 + 8.4만 호출) | OpenDART만 | S-1 · L-1 |
-| 5 | **I7** XBRL fallback 보강 | 순수 코드 + 기존 raw. **N7 축소안의 유일한 선행** | — |
+| 5 | **I7** XBRL fallback 보강 | ~~순수 코드~~ → **definitions + 마트 둘 다 고쳐야 한다** (2026-08-18 재측정). **N7 축소안의 유일한 선행** | 결정 2건 |
 | 6 | ~~공공데이터포털로 K-2를 우회~~ → **필요 없어졌다** (08-18 오후). KRX 승인이 났고 이력이 2014-06까지 닿는다. `DATAGO_KEY`는 대조 검증용으로만 남긴다 | — | — |
 | 7 | **D-8 lake 갱신 → N2-10 V6** | 로컬 | — |
 | 8 | **N2-9** 업종 중립 variant | 로컬, 진단 전용 | — |
@@ -510,9 +510,24 @@ N6은 대상 집합이 N3에서 S-1으로 바뀌었으므로(N6-5) **이제 KRX 
 
 ## 3차 — ledger · N6 · N7 · N8
 
-- [ ] **L-1 `collection_slice_state` ledger 공통 컴포넌트** (`01` §2.4)
-      — **N6 착수 전에 만든다.** 패키지마다 따로 만들지 않는다
-  - [ ] 현재 한계 확인: `no_data_request_keys` run당 1,000개 절단, negative cache 최근 20 run
+- [x] **L-1 `collection_slice_state` ledger 공통 컴포넌트 — 완료** (2026-08-18, `01` §2.4).
+      **N6 착수 전에 만든다**는 조건을 지켰다. 패키지마다 따로 만들지 않는다
+  - [x] 현재 한계 확인: `no_data_request_keys`는 run당 절단되고 negative cache는 최근
+        20 run만 읽는다 → **며칠짜리 백필이 자기 진행 상태를 복원하지 못한다.**
+        N6이 정확히 그 경우다(8.4만 호출 · 약 3일)
+  - [x] **`(source, endpoint, slice_key)` PK.** `endpoint`가 키에 있어야 한 원천을
+        쓰는 두 수집기가 slice_key에서 충돌하지 않는다
+  - [x] **`expected_rows` vs `actual_rows` 대조.** "행이 있으면 완료"가 아니다 —
+        응답이 반만 저장된 채 죽으면 그 슬라이스는 영구히 skip된다.
+        불일치는 `failed`로 기록해 다음 run이 다시 받는다
+  - [x] **`running`은 완료가 아니다** — 죽은 프로세스가 남긴 행이 영구 구멍이 되지 않는다
+  - [x] **`no_data`만 TTL로 만료된다.** 거래정지 종목은 살아나고 정정 공시도 나온다.
+        `success`는 만료되지 않는다
+  - [x] `attempt_count`는 **SQL에서 증가**시킨다 — 같은 endpoint를 도는 두 run이
+        서로의 시도 횟수를 덮어쓰면 "계속 실패하는 슬라이스"를 못 본다
+  - [x] `SliceStatus`를 `RunStatus`와 분리 — run은 `partial`일 수 있지만 슬라이스는 아니다
+  - [x] `--force`도 ledger를 쓴다. 안 쓰면 escape hatch가 영구 우회가 된다
+  - [x] 테스트 20건 + 로컬 DB 실검증(재실패 시 `attempt_count=2`, plan 4분류). 전체 **1,188 통과**
 
 ### N6. 직원·임원·최대주주·감사의견
 
