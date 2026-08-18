@@ -3,7 +3,8 @@
 - 조사일: 2026-08-16
 - 계기: 2026-08-16 sj2-server IP가 KRX Data Marketplace에서 차단됐다.
   안내문이 **원인을 명시**했다 — 페이싱 문제가 아니라 **이용약관 위반**이다.
-- 상태: **인증키 신청 완료, 승인 대기.** 아래 §4의 응답 필드는 아직 미확정이다.
+- 상태: **인증키 발급 + 엔드포인트 16건 승인 완료** (2026-08-18).
+  실호출 10건으로 사양을 확정했다 → **§4.1c**. 이제 K-4 구현이 유일하게 남은 단계다.
 
 ---
 
@@ -125,10 +126,10 @@ KRX Open API는 "공식 경로"라는 이유로 그냥 통과시켰다.
 
 | 우리 수요 | 현재 경로 | Open API | 판정 |
 |---|---|---|---|
-| **N1** 시총·거래대금·상장주식수 | pykrx → KRX | 일별매매정보 | **필드 확인 필요** |
+| **N1** 시총·거래대금·상장주식수 | pykrx → KRX | 일별매매정보 | ✅ **실호출 확정** (§4.1c) |
 | **N3** PIT 유니버스 | pykrx → KRX | 같은 호출 | ✅ 별도 호출 불필요 |
-| `daily_ohlcv` | naver 수정주가 | 같은 호출 | ✅ 단 **미수정 주가** |
-| `stock_master` (일 유니버스) | **FDR → KRX MDC** | 종목기본정보 | **필드 확인 필요** |
+| `daily_ohlcv` | naver 수정주가 | 같은 호출 | ✅ **원주가 4필드 확정** → K-7 |
+| `stock_master` (일 유니버스) | **FDR → KRX MDC** | 종목기본정보 | ✅ 12필드 확정 (§4.1c) |
 | common 지수 시세 | MDC | 시리즈 일별시세정보 | ✅ |
 | common 등락종목수·거래대금 | MDC (`MDCSTAT01501`) | ? | 확인 필요 |
 | **`flows` 투자자 순매수** | MDC | **없음** | ❌ |
@@ -159,6 +160,84 @@ KRX Open API는 "공식 경로"라는 이유로 그냥 통과시켰다.
 > FDR은 `MDCSTAT01501`을 치지 않는다
 > ([`krx_access_inventory.md`](krx_access_inventory.md) §2.1·§7).
 > 위 표는 그 근거와 무관하게 공식 스키마에서 나왔다.
+
+### 4.1c 실호출 확정 (2026-08-18, 10요청)
+
+**엔드포인트 16건이 승인됐고 전부 200으로 답한다.** 아래는 추정이 아니라 응답 원본이다.
+키 2개 모두 같은 결과를 준다.
+
+**`sto/stk_bydd_trd` · `sto/ksq_bydd_trd` — 15필드**
+
+```
+BAS_DD ISU_CD ISU_NM MKT_NM SECT_TP_NM
+TDD_CLSPRC CMPPREVDD_PRC FLUC_RT TDD_OPNPRC TDD_HGPRC TDD_LWPRC
+ACC_TRDVOL ACC_TRDVAL MKTCAP LIST_SHRS
+```
+
+실측 행 (`basDd=20260814`, KOSPI):
+
+```json
+{"BAS_DD":"20260814","ISU_CD":"095570","ISU_NM":"AJ네트웍스","MKT_NM":"KOSPI",
+ "SECT_TP_NM":"","TDD_CLSPRC":"4520","CMPPREVDD_PRC":"100","FLUC_RT":"2.26",
+ "TDD_OPNPRC":"4435","TDD_HGPRC":"4545","TDD_LWPRC":"4435",
+ "ACC_TRDVOL":"74511","ACC_TRDVAL":"334258460",
+ "MKTCAP":"204542470680","LIST_SHRS":"45252759"}
+```
+
+**`sto/stk_isu_base_info` — 12필드**
+
+```
+ISU_CD ISU_SRT_CD ISU_NM ISU_ABBRV ISU_ENG_NM LIST_DD
+MKT_TP_NM SECUGRP_NM SECT_TP_NM KIND_STKCERT_TP_NM PARVAL LIST_SHRS
+```
+
+**`idx/kospi_dd_trd` — 12필드**, 지수 51종
+
+```
+BAS_DD IDX_CLSS IDX_NM CLSPRC_IDX CMPPREVDD_IDX FLUC_RT
+OPNPRC_IDX HGPRC_IDX LWPRC_IDX ACC_TRDVOL ACC_TRDVAL MKTCAP
+```
+
+#### 확정된 것 — 여섯
+
+1. **K-2가 닫혔다.** `MKTCAP`·`LIST_SHRS`·`ACC_TRDVAL`이 실제 값으로 온다.
+   embedded schema 판독이 맞았다.
+
+2. **N1 · N3 · 원주가가 한 호출에 다 있다.** 예상은 N1+N3였는데
+   **`TDD_OPNPRC`·`HGPRC`·`LWPRC`·`CLSPRC`까지 같이 온다.**
+   이건 **KRX 미수정 원주가**이므로 **K-7의 재료가 별도 수집 없이 따라온다.**
+   N1-8 백필을 돌리면 원주가 시계열이 공짜로 생긴다.
+
+3. **휴장일은 `rows=0`이다 — pykrx와 정반대다.** `basDd=20260817`(광복절 대체공휴일)이
+   빈 배열을 줬다. pykrx는 휴장일에 **0으로 채워진 전종목 행**을 주기 때문에
+   N1-3이 `alternative=False`를 명시하고 캘린더로 선필터해야 했다.
+   **Open API에서는 그 방어가 필요 없다.** 캘린더 선필터는 호출을 아끼는 최적화로만 남는다.
+
+4. **이력이 표본 시작일을 덮는다.** `basDd=20140602`가 KOSPI 907행 · KOSDAQ 1,009행으로 온다.
+   N3-5b 1차 실행의 실측(2014-06 KOSPI 885~907 · KOSDAQ 1,010)과 **맞는다** —
+   독립된 두 경로가 같은 수를 준다.
+
+5. **행 수가 우리 유니버스와 맞는다.** 2026-08-14 KOSPI 942 + KOSDAQ 1,821 = **2,763**.
+   K-6f의 KIS 운영 계산에 쓴 종목 수와 정확히 같다.
+
+6. **유량 제한이 안 보인다.** 10요청을 무휴식으로 보냈고 거부 0.
+   응답 1.3~1.7초(KOSPI 하루치 ≈ 293KB). **6,000 호출 ≈ 2.5시간**이고
+   키가 둘이라 한도는 하루 20,000회 — **N1-8 전량 백필이 하루 안에 끝난다.**
+
+#### 어댑터가 조심할 것 — 셋
+
+- **`SECT_TP_NM`은 업종이 아니다.** KOSDAQ 소속부(`벤처기업부`·`중견기업부`)이고
+  KOSPI는 빈 문자열이다. N2의 `induty_code`(KSIC)나 N4의 KRX 업종과 **다른 축이다.**
+- **`idx` 응답에 빈 문자열이 섞인다.** `코스피 (외국주포함)`은 `CLSPRC_IDX`가 `""`인데
+  `MKTCAP`·`ACC_TRDVAL`은 값이 있다. 숫자 파싱이 `""`에서 죽지 않아야 한다.
+- **모든 값이 문자열로 온다.** 숫자 변환은 우리가 한다.
+
+#### 아직 모르는 것 — 둘
+
+- **한도가 키 단위인가 계정 단위인가.** 실측하려면 10,000회를 써야 알 수 있다.
+  **키당으로 가정하지 말고**, 소진 응답을 만나면 그때 확정한다(K-4의 exit 75 경로).
+- **`common`의 등락종목수·거래대금 8건**(`MDCSTAT01501`)에 대응하는 서비스가 있는가.
+  지수 3건은 `idx` 그룹으로 옮길 수 있다.
 
 ### 4.1b 그리고 이 질문을 우회하는 문이 하나 더 있다
 

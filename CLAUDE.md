@@ -43,6 +43,10 @@ Top-level subcommands (see `src/krx_collector/cli/app.py`, where the argparse tr
   `--targets-file`) stays manual — picking the target receipts is a separate analysis.
 - `common seed | sync` — seed `common_feature_series` config + sync market/macro raw observations.
 - `flows sync` — KRX MDC security-flow raw (investor net-buy, short-selling).
+  `flows sync-kis` — the same metric codes from KIS Developers (K-6f), covering 6 of the 7
+  (`short_selling_balance_quantity` is KRX-only). Per-ticker/date-range shaped rather than
+  per-market-day, so it has its own service, its own `RunType`, and per-ticker checkpoints.
+  `--plan-only` resolves the work without issuing a token or sending a request.
 - `ops freshness-report` — read-only raw freshness status.
 - `validate` — data-quality checks.
 
@@ -87,7 +91,12 @@ Strict **ports & adapters (hexagonal)**. The dependency rule is the key invarian
 
 Settings load from `.env` (template: `.env.example`) via pydantic-settings. DB via `DB_DSN` or `DB_HOST/PORT/NAME/USER/PASSWORD`. OpenDART keys as above. KRX MDC login fallback uses `KRX_ID`/`KRX_PW`. `db sync-remote` reads remote DB creds from `/Users/whishaw/wss_p/stock_data_collector_secrets/db_info` by default.
 
-`KIS_APP_KEY`/`KIS_APP_SECRET` (한국투자증권 오픈API) are provisioned in the **local `.env` only** as of 2026-08-16 — prod does not have them yet, and no code reads them yet. They exist for the KRX-replacement work (K 묶음): KRX restricted this host's IP on 2026-08-16 for a ToS violation, so the scraping path is being replaced by KRX Open API (N1/N3) plus KIS (`flows`). See `docs/operations.md` "KRX 접근 제한". Note the secrets directory holds **connection metadata** (`db_info`, `cronicle_info`) — API keys always go in `.env`, not there.
+`KIS_APP_KEY`/`KIS_APP_SECRET` (한국투자증권 오픈API) are in the **local `.env` only** as of 2026-08-16 — **prod does not have them yet**, so `flows sync-kis` cannot run there until someone adds them. They serve the KRX-replacement work (K 묶음): KRX restricted this host's IP on 2026-08-16 for a ToS violation, so the scraping path is being replaced by KRX Open API (N1/N3) plus KIS (`flows`). See `docs/operations.md` "KRX 접근 제한". Note the secrets directory holds **connection metadata** (`db_info`, `cronicle_info`) — API keys always go in `.env`, not there.
+
+`AUTH_KEYS` (KRX Open API, comma-separated — two keys as of 2026-08-18) and `DATAGO_KEY` (공공데이터포털) are also local-only. Both are wired into `Settings` (`krx_openapi_auth_keys`, `datago_api_key`) but **no adapter reads them yet** — that adapter is K-4, the next piece of work. The KRX keys plus 16 approved endpoints were verified live on 2026-08-18; the response spec lives in `docs/dev/20260731_raw_features/02_data_expansion_plan/poc/krx_open_api.md` §4.1c. Two things to know before writing that adapter: a key alone is not enough (each endpoint needs its own 이용 신청, and an unapproved one returns `401 Unauthorized API Call` — distinct from a bad key's `Unauthorized Key`), and one `sto/stk_bydd_trd` call returns a whole market-day including **unadjusted OHLC**, so N1, N3, and K-7 collapse into a single request. Anything added to `.env` must get a `Settings` field: pydantic-settings forbids extras, so an undeclared key does not fail at first use — it fails *every* command.
+
+Two KIS facts that are easy to get wrong, both measured live rather than read from docs:
+**every access-token issuance sends the account holder a KakaoTalk notification**, so the token is cached on a host volume (`./state:/state`, `KIS_TOKEN_CACHE_PATH`) — the only volume the `collector` service has; and the **effective rate limit is 1 req/s, not the documented 20/s**, with throttle rejections arriving as *HTTP 500 carrying `EGW00201`* rather than 429.
 
 ## Docs & deploy
 
