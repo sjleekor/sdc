@@ -6,6 +6,12 @@ KRX 정규장 시간: 09:00–15:30 KST. 당일의 온전한 데이터를 확보
 
 ### 권장 크론탭(cron) 스케줄 (KST 기준)
 
+> **prod은 이 표대로 돌지 않는다.** sj2-server는 crontab이 아니라 **Cronicle**을 쓰고,
+> 체인 셋으로 나뉜다 — **18:30** FDR Universe → Prices → KRX Flows → KRX Common,
+> **20:30** ECOS/FRED/FDR common, **04:00** OpenDART Corp → Financials → Share Info → XBRL.
+> 아래는 이 저장소를 새로 배포하는 사람을 위한 최소 예시다. 실제 prod 스케줄은
+> Cronicle API로 확인한다(`sj2-server` 스킬).
+
 ```cron
 # ┌───── 분 (min)
 # │ ┌───── 시 (hour)
@@ -22,6 +28,8 @@ KRX 정규장 시간: 09:00–15:30 KST. 당일의 온전한 데이터를 확보
 
 # 일별 시가총액·거래대금·상장주식수 — 매일 16:45 KST (평일)
 # prices backfill과 같은 KRX 원천이므로 시간대를 겹치지 않게 둡니다 (exit 75 lock).
+# 원천(KRX Open API)이 T+1이라 이 실행이 가져오는 것은 **전 거래일**입니다.
+# 당일치를 기대하지 마십시오 — 날짜를 안 넘기면 갭 탐지가 밀린 세션을 알아서 채웁니다.
   45 16  *  *  1-5  cd /opt/krx-data-pipeline && uv run krx-collector prices market-cap-backfill --market all
 
 # 데이터 정합성 검증 — 매일 17:00 KST (평일)
@@ -29,6 +37,8 @@ KRX 정규장 시간: 09:00–15:30 KST. 당일의 온전한 데이터를 확보
 
 # 월말 유니버스 스냅샷 — 매월 1일 05:00 KST
 # 전월 말일까지의 스냅샷을 채웁니다. 이미 있는 날짜는 건너뜁니다.
+# prod에서는 돌리지 않습니다 — daily_market_cap이 일별 PIT 유니버스를 대신합니다
+# (04_w1_pit_universe.md §3.6). 감사·교차검증이 필요할 때만 씁니다.
   0   5  1  *  *    cd /opt/krx-data-pipeline && uv run krx-collector universe backfill-snapshots
 
 # 기업개황 refresh — 매월 1일 05:30 KST
@@ -38,6 +48,8 @@ KRX 정규장 시간: 09:00–15:30 KST. 당일의 온전한 데이터를 확보
 # freshness 게이트 — 매일 23:00 KST
 # 저녁 수집 창이 끝난 뒤에 돌아야 합니다. --fail-if-stale이 없으면 출력만 하고
 # 항상 exit 0이라, 스케줄에 넣어도 알람이 되지 않습니다.
+# 주의: 지금 이대로 켜면 daily_market_cap 때문에 **매일** 실패합니다 (원천이 T+1).
+#       등록 전에 그 도메인을 제외해야 합니다 — 아래 "KRX Open API 일별매매정보는 T+1이다".
   0  23  *  *  *    cd /opt/krx-data-pipeline && uv run krx-collector ops freshness-report --fail-if-stale
 ```
 
@@ -549,7 +561,7 @@ bin/parquet-compute-all.sh --from-step reports --required-coverage-ratio 0.0
 | 경로 | 문 | 상태 |
 |---|---|---|
 | `universe sync --source fdr` | **익명** (MDC 메타데이터 2요청 × 시장) | 매일 18:30 — **prod에 `AUTH_KEYS`가 들어오면 `--source krx-openapi`로 바꾼다** |
-| `flows sync` | MDC 로그인 | 매일 (체인) — **키는 들어왔다(2026-08-18). 하루 병행 뒤 끈다** |
+| `flows sync` | MDC 로그인 | 매일 (체인) — **병행 2일차까지 유지.** 1일차 대조에서 커버리지는 통과했으나 `foreign_holding_shares` 값이 갈렸다 (아래 "KRX ↔ KIS 병행 대조") |
 | `common sync --sources krx` | MDC 로그인 | 매일 (체인) — 대체재 없음 |
 | ~~`prices backfill`~~ | ~~pykrx 로그인~~ | **닫혔다.** naver 직접 어댑터가 기본값 |
 | ~~`prices market-cap-backfill`~~ (N1) | ~~pykrx 로그인~~ | **닫혔다.** Open API가 기본값 (K-4) |
@@ -599,20 +611,94 @@ KRX 안내문이 제시한 공식 경로는 셋이다 — **Open API**, 화면 �
 **`공매도 잔고 수량` 하나만 갈 곳이 없다.** KRX만 만드는 데이터다.
 → 아래 "KIS flows 수집" · [`poc/flows_alternatives.md`](dev/20260731_raw_features/02_data_expansion_plan/poc/flows_alternatives.md)
 
-### 진행 중인 일회성 백필 (2026-08-18 밤 시작)
+### 백필 이벤트 (2026-08-19 저녁 기준)
 
-Cronicle 일회성 이벤트 셋이 돌고 있다. **끝나면 삭제한다** — 남겨두면 다음 사람이
-스케줄을 읽을 때 무엇이 정기 작업인지 흐려진다.
+Cronicle 일회성 이벤트는 **끝나면 삭제한다** — 남겨두면 다음 사람이 스케줄을 읽을 때
+무엇이 정기 작업인지 흐려진다.
 
-| 이벤트 | 내용 | 중단·재개 |
-|---|---|---|
-| `sdc_backfill_n1_marketcap` | N1-8. `daily_market_cap`이 prod에서 0행이었다. Open API로 (세션, 시장) 슬라이스당 1요청, 약 5,980회 | 저장된 슬라이스는 skip. 중단 후 재트리거하면 이어간다 |
-| `sdc_backfill_s1_remainder` | S-1 잔여. 상폐 약 1,300 법인의 financials·share-info·XBRL. `bin/dart-backfill-all-years.sh`가 `--universe-scope`를 안 넘겨 `current`로 돌았던 구간이다 | **`STOP_BEFORE=03:30`** 벽시계 가드. exit 75면 멈추고 재트리거로 재개 |
-| `sdc_kis_flows_trial` | 내일 18:30 1회. KRX Flows(18:36)보다 **6분 먼저** 출발해야 한다 — KRX가 채운 세션은 KIS가 skip한다 | 대조 끝나면 삭제 |
+| 이벤트 | 상태 |
+|---|---|
+| `sdc_backfill_n1_marketcap` | **완료** (08-18 23:19~00:43, 84분, 6,292요청). 7,060,600행 / 2014-06-02~2026-08-18. 삭제 대상 |
+| `sdc_backfill_s1_remainder` | **진행 중, 반복으로 전환** — 아래 |
+| `sdc_kis_flows_trial` | 08-19 18:30 1회. 대조 끝나면 삭제 |
+| `SDC Backfill DART Corp Profile` | 완료 (08-15). 삭제 대상 |
+| `SDC Backfill S-1 DART Filings` | 완료 (08-16). 3,490/3,959 법인 — 접수 이력이 2015-01부터라 그 전에 상폐된 법인은 원래 없다. 삭제 대상 |
+| `SDC Backfill N3 Universe Snapshots` | **중단된 채 방치.** 2019~2025 7년치가 비어 있다. **재개하지 않는다** — 아래 |
+| `SDC Common Backfill 2015` | 완료 (07-04). 삭제 대상 |
 
 **lock 도메인이 겹치지 않게 짰다.** N1-8은 `krx_marketdata`, S-1은 `opendart`, KIS flows는
 `kis`다. 일일 잡은 lock을 **900초 기다린 뒤 실패**하므로, 백필이 프로덕션 슬롯을 물면
-그날 수집이 통째로 빠진다. S-1의 `STOP_BEFORE`가 04:00 DART 체인(04:00~04:08)을 피하는 이유다.
+그날 수집이 통째로 빠진다.
+
+#### S-1 잔여는 반복 이벤트다 (2026-08-18 전환)
+
+일회성이었을 때는 사람이 재트리거해야 해서 **하루 15시간 넘게 OpenDART 할당량을 놀렸다.**
+지금은 **00:10**(일일 한도 리셋)과 **05:10**(블랙아웃 종료)에 뜬다.
+
+**작업 단위를 쪼개야 가드가 동작한다.** 원래 가드는 연도와 연도 사이에서만 시계를 봤는데,
+한 사업연도 financials가 3,959법인 × 4보고서 × 2기준 ≈ 31,700요청이고 실측이 초당 2건이라
+**한 단위가 4.4시간**이었다. 04:00 체인 앞에서 멈출 방법이 없었고, 08-18 밤 실행이 실제로
+그리로 달리고 있었다. 지금 단위는 `(연도, 스테이지, 보고서코드, CFS/OFS)` — 약 4,000요청,
+35분이라 **02:30~05:00 블랙아웃**이 실제로 잡는다. 08-19 새벽에 02:43 정지 → 04:00 체인
+정상 완주로 확인했다.
+
+`max_children=2` + 스크립트 안의 non-blocking flock 자체 가드라, 실행 중에 들어온 트리거는
+빨간 에러가 아니라 1초짜리 초록으로 끝난다. `max_children=1`로 두면 매일 밤
+"Maximum concurrent jobs reached"가 하나씩 쌓인다.
+
+**커버리지가 3,959에 닿으면 이벤트를 지워야 한다.** 멈추는 장치가 그것뿐이다.
+
+#### N3 월말 스냅샷은 재개하지 않는다 (2026-08-19 판정)
+
+백필이 세 번 다 중단돼 **2019~2025년 84개 월말이 비어 있다.** 그런데
+[`04_w1_pit_universe.md`](dev/20260731_raw_features/02_data_expansion_plan/04_w1_pit_universe.md) §3.5가
+이미 N3의 역할을 축소해뒀다 — 일별 PIT 유니버스는 N1 행이 맡는다. 조건이었던
+**N3-PR1 전제 검증을 2026-08-19에 마쳤고 통과했다.** 상세는 그 문서 §3.6.
+
+KRX 접근이 제한된 상황에서 7년치를 다시 긁을 이유가 없다. 감사·교차검증용으로
+2014~2018 구간은 남아 있다.
+
+### 일일 잡이 없는 raw 테이블 둘 (2026-08-19 확인)
+
+`daily_market_cap`과 `dart_filing_receipt_raw`는 **일회성 백필로만 채워졌다.** Cronicle 이벤트
+19개의 wrapper를 전부 대조해서 확인했다 — `prices-market-cap-backfill.sh`와
+`dart-sync-filings.sh`는 어떤 정기 이벤트에도 걸려 있지 않다. 백필이 끝나는 순간부터
+두 표는 그냥 멈춘다.
+
+둘 다 피처의 입력이다. 시가총액은 규모·밸류 분모·유동성으로, 공시 접수는
+`feat_filing_activity`(N5-7)로 들어간다.
+
+**막는 것은 없다.** compute 게이트(`reports.freshness_violations`)는 `common_feature_series`만
+본다. `daily_market_cap`을 보는 것은 `evaluate_staleness`인데, 이건
+`ops freshness-report --fail-if-stale`에서만 돌고 어떤 Cronicle 이벤트에도 안 걸려 있다.
+그리고 갭은 백필로 복구된다 — 12년치를 84분에 채웠다. **급한 것이 아니라 빠진 것이다.**
+
+**공시 접수는 그냥 붙일 수 없다.** skip-if-present가 `(corp_code, year)` 단위라 현재 연도가
+이미 "완료"로 잡혀 있어서, 그대로 돌리면 한 건도 안 가져온다. `--force`가 필요하고 그러면
+하루 2,763콜이 S-1과 같은 할당량을 쓴다. **S-1이 끝난 뒤에 붙인다.**
+
+#### KRX Open API 일별매매정보는 T+1이다
+
+`sto/stk_bydd_trd`는 **당일치를 그날 안에 내놓지 않는다.** 문서를 읽은 게 아니라 실측이다.
+
+| 시각 | 요청 날짜 | 결과 |
+|---|---|---|
+| 2026-08-19 00:43 | 2026-08-18 | 빈 응답 |
+| 2026-08-19 19:31 | 2026-08-18 | 2,763행 |
+| 2026-08-19 19:31 | 2026-08-19 | 빈 응답 |
+
+둘이 따라 나온다.
+
+- **일일 시가총액 잡은 T-1이 대상이다.** 갭 탐지가 기본이라 날짜를 안 넘기면 밀린 세션을
+  알아서 채운다. 18:30 체인 꼬리에 붙여도 그날치가 아니라 전날치를 가져온다
+- **`daily_market_cap`은 `max_lag_trading_days=1` 게이트를 만족할 수 없다.** 그 게이트는
+  가장 최근 세션이 저장돼 있기를 요구하는데 원천이 하루 늦다. 등록하면 **매일** 실패한다.
+  [`10_work_breakdown.md`](dev/20260731_raw_features/02_data_expansion_plan/10_work_breakdown.md)
+  12번의 "`daily_market_cap` 제외하고 등록" 판단은 그대로 유효하지만, 이유는
+  "아직 비어 있어서"가 아니라 **"원천이 T+1이라서"**다
+
+`daily_ohlcv`(naver)는 당일 저녁에 들어온다. **둘의 최신 날짜는 정상 상태에서도 하루
+어긋난다** — 어긋났다고 사고가 아니다.
 
 ### KIS 자격증명 (2026-08-16 발급)
 
@@ -628,9 +714,12 @@ Cronicle 일회성 이벤트 셋이 돌고 있다. **끝나면 삭제한다** �
 | `KIS_REQUESTS_PER_SECOND` | 기본 **1.0** (아래 참조) |
 | `KIS_TOKEN_REFRESH_MARGIN_SECONDS` | 기본 3600 |
 
-**현재 상태: 로컬 `.env`에만 있다.** prod(`/home/whi/apps/sdc/.env`)에는 **아직 넣지 않았다.**
-`flows sync-kis`를 prod에서 돌리기 전에 사람이 넣어야 한다.
-prod compose의 `collector`는 `env_file: - .env`라 **키만 넣으면 컨테이너로 들어간다.**
+**prod에 들어갔다 (2026-08-18).** `/home/whi/apps/sdc/.env`에 로컬과 같은 값을 넣었고,
+`collector`가 `env_file: - .env`라 컨테이너로 그대로 들어간다. 08-19 18:30 전량 실행으로
+동작을 확인했다.
+
+> `collector` 서비스에는 `profiles: ["manual"]`이 걸려 있어 `docker compose pull`이
+> **건너뛴다.** 이미지 갱신은 `pull-image.sh`가 따로 한다.
 
 시세조회에는 **계좌번호가 필요 없다.** 앱키·시크릿·토큰만 쓴다(계좌번호는 주문·잔고용).
 
@@ -710,6 +799,41 @@ krx-collector flows sync-kis --exclude-groups foreign_holding
 **인증·유량 실패는 항목 오류가 아니라 run 실패다.** 계속 돌면 남은 종목 전부를
 거부하는 서버에 던지게 되고, KIS는 인증 재시도마다 알림톡이 나간다.
 유량 소진은 종료 코드 **75**(OpenDART 전례), 인증 실패는 **1**이다.
+
+### KRX ↔ KIS 병행 대조 (1일차 2026-08-19)
+
+전량 실행 8,289요청 / 2시간 18분 / **오류 0 · no_data 0** · 137,118행.
+
+**커버리지는 통과다.** 6개 지표 전부 `(ticker)` 집합이 KRX와 **정확히 일치**했다 —
+KRX에만 있는 종목 0, KIS에만 있는 종목 0.
+
+**값은 지표마다 다르다.**
+
+| 지표 | 불일치 | 성격 |
+|---|---|---|
+| 개인·외국인·기관 순매수 (3종) | **0건** | 완전 일치 |
+| `short_selling_volume` · `_value` | 210 / 2,763 (7.6%) | **KIS가 항상 낮다.** 총량 기준 **-1.19%** |
+| `foreign_holding_shares` | 477 / 2,763 (17.3%) | **양방향.** 대형주는 1% 안, 소형주에서 최대 5배 |
+
+**공매도는 정의 차이로 확정했다.** `--lookback-days 14`가 11거래일을 같이 받아온 덕에
+세션별 불일치 건수를 볼 수 있었는데 197~227로 **일정하다.** 시간이 지나도 안 줄어드니
+정산 지연이 아니다. 210건이 전부 한 방향(KIS가 낮음)이므로 KIS가 어떤 부분집합을 빼고 준다.
+삼성전자 1,688,352 → 1,586,828(-6%), KT -18%.
+**교체하면 교체일에 계단이 생긴다** — 총량 -1.19% 규모다.
+
+**외국인 보유는 아직 모른다.** 이 지표는 **스냅샷이라 최신 세션 하나만 쌓인다.**
+공매도처럼 여러 세션으로 "일정한가"를 볼 수가 없어서, 지속적인 정의 차이인지
+08-19만의 것인지 가릴 수 없었다. 증자·분할도 원인이 아니다 — 이상치 6종목 중 5종목이
+7월 이후 상장주식수가 그대로였다.
+
+| 종목 | KRX | KIS | 차이 |
+|---|---|---|---|
+| 센서뷰 (321370) | 163,299 | 838,365 | +413% |
+| 세아메카닉스 (396300) | 586,015 | 141,461 | -76% |
+| 대한항공 (003490) | 84,521,094 | 83,874,120 | -0.77% |
+
+→ **2일차(08-20)를 이 질문에만 쓴다.** 세션이 둘이면 공매도처럼 갈라낼 수 있다.
+그때까지 `SDC KRX Flows`는 켜 둔다.
 
 ### K-5(KRX 경로 폐기) 전에 처리해야 할 것 하나
 

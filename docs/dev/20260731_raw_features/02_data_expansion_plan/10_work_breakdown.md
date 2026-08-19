@@ -38,6 +38,11 @@
 > N1·N3는 **한 호출로 합쳐지고**, KRX 원주가까지 같이 와서 **K-7 재료가 따라온다.**
 > 남은 단계는 **K-4 어댑터 하나**다. 사양은 [`poc/krx_open_api.md`](poc/krx_open_api.md) §4.1c.
 >
+> **2026-08-19 — 그 한 단계가 끝났다.** K-4 어댑터가 나왔고 N1-8이 **7,060,600행**으로
+> 완주했다. 위 "멈춘 것" 다섯 중 **N1-8·N3-5b·S-2 셋이 실제로 풀렸고**, V-1b는
+> 원주가가 따라온 덕에 **불필요 판정 쪽으로 기운다**(K-7). N4만 닫힌 채로 남는다.
+> `flows`는 KIS 병행 2일차 대조를 기다린다.
+>
 > 다만 **약관 게이트(K-0c)는 그대로 남는다.** 공식 엔드포인트라는 사실이
 > 장기 보관과 파생물 이용 권한을 주지 않는다 — 이번에도 같은 실수를 하지 않는다.
 
@@ -106,7 +111,7 @@ N6-5의 대상 집합이 N3에서 **S-1**으로 바뀌었으므로 **N6은 KRX�
 | 9 | **N5-7** + 후순위 공시활동 피쳐 | 신규 수집 없음. 같은 원천이라 한 묶음 사전등록 | — |
 | 10 | **N8** (ECOS) | KRX와 무관 | N8-2 readiness 창 정렬 |
 | 11 | **N7 축소안** 횡단면 대조 | KIS `per`·`pbr`·`eps`·`bps` | I7 · C4/C5 처리 방침 |
-| 12 | **O-8/D-5 freshness 알람** | `daily_market_cap` **제외하고 등록하면 된다** | — |
+| 12 | **O-8/D-5 freshness 알람** | `daily_market_cap` **제외하고 등록한다.** 판단은 그대로인데 이유가 바뀌었다 — 비어 있어서가 아니라 원천(`sto/stk_bydd_trd`)이 **T+1**이라 `max_lag_trading_days=1`을 영원히 못 맞춘다 (2026-08-19 실측) | — |
 | 13 | 검정 트랙 `0-4` Phase C 인계 판단 | 수집과 독립 | — |
 | 14 | **K-0c 약관 게이트** · K-6c KIS 약관 | 문서 판단 | 사람 |
 
@@ -114,15 +119,22 @@ N6-5의 대상 집합이 N3에서 **S-1**으로 바뀌었으므로 **N6은 KRX�
 
 1. **`flows` 교체 완주가 먼저다.** K-0b 안 B가 "교체가 끝난 경로는 **즉시** 끈다,
    병행 운영 기간을 두지 않는다"인데 지금 양쪽이 다 돈다. 조건의 시계가 이미 돌고 있다.
-   그리고 **K-6f 코드가 아직 커밋도 안 됐다** — 워킹트리에만 있다
-2. **K-4가 그 다음이다.** 사양이 실호출로 다 나왔고 **포트 변경이 없다** —
-   `MarketCapProvider`·`HistoricalUniverseProvider`가 이미 `(trade_date, market)`
-   슬라이스 단위라 어댑터만 갈아끼운다. **뒤에 걸린 게 가장 많다**
-3. **`S-1 → L-1 → N6`은 K-4와 병행한다.** OpenDART만 쓰므로 서로 안 막는다
+   → **2026-08-19 갱신:** K-6f는 커밋·릴리즈됐고(v0.11.0/v0.11.1) prod에서 돈다.
+   병행 1일차 대조에서 **커버리지는 통과, `foreign_holding_shares` 값이 갈렸다.**
+   2일차(08-20)가 그 하나에 답한다 → `docs/operations.md` "KRX ↔ KIS 병행 대조"
+2. ~~**K-4가 그 다음이다.**~~ → **완료 (2026-08-18~19).** `market_data_krx_openapi`가
+   `prices market-cap-backfill`와 `universe sync --source krx-openapi`를 받치고,
+   N1-8 백필이 7,060,600행으로 끝났다. **뒤에 걸려 있던 것들이 풀렸다** —
+   N1-9 V1 통과, N3-5b 흡수·N3-7 전제 검증 완료, K-7 재료(원주가) 100% 확보
+3. **`S-1 → L-1 → N6`은 병행한다.** OpenDART만 쓰므로 서로 안 막는다.
+   S-1은 2026-08-18부터 반복 이벤트로 돈다 (00:10 / 05:10)
 
 **K-4 이후 순서에 걸린 것.** N1-8 → N1-9 → (N3-5b는 N1-8에 흡수) → S-2 → S-3/S-4.
+**2026-08-19 기준 여기까지 왔다** — N1-8 완주, N1-9는 **V1만 통과**(V2~V8 남음),
+N3-5b 흡수·N3-7 전제 검증 완료, **S-2는 선행 조건이 사라져 바로 실행 가능**하다.
 **V 묶음 전에 K-7을 먼저 본다** — 원주가가 N1-8에 따라오므로
 `listed_shares` 차분과 합치면 **V-1b 전량 재수집이 통째로 불필요**해진다.
+**그 재료는 이제 실제로 있다**: `source_open/high/low` 전 연도 채움률 100%.
 
 **N4는 막힌 게 아니라 닫혔다** (2026-08-18 오후). 업종분류 현황 대체안의 분기점 ②
 (KSIC↔KRX crosswalk)를 실측으로 판정했고 **실패했다** — 안정적 1:1 대응이 종목의 36%뿐이다.
@@ -245,11 +257,20 @@ N6은 대상 집합이 N3에서 S-1으로 바뀌었으므로(N6-5) **이제 KRX 
   - [x] **결정 3** 회전율 = **`거래대금 / 시가총액`**. 같은 응답·같은 원천이라 정합성이 구조적
   - [x] **결정 4 (신규)** `daily_ohlcv` corporate action 재수집 —
         [`poc/n1_adjusted_price_vintage.md`](poc/n1_adjusted_price_vintage.md)
-- [ ] **N1-8 백필 실행** — 2024~현재 먼저, 검증 후 2014-06-02~2023.
-      **원천이 pykrx가 아니라 KRX Open API다**(K-4 선행). 약 6,000 호출 ≈ **2.5시간**,
-      하루 한도 안에서 끝난다. **N3-5b 잔여가 여기에 흡수된다** — 같은 호출이다
+- [x] **N1-8 백필 실행 완료** (2026-08-18 23:19 ~ 08-19 00:43, **84분**) —
+      Cronicle `sdc_backfill_n1_marketcap`. 계획은 "2024~현재 먼저"였으나 한 번에 전량 돌렸고
+      끊길 이유가 없었다. **6,292요청 / 슬라이스 6,290 시도·5,990 완료 / 오류 0 /
+      7,060,600행**, 2014-06-02~2026-08-18, 2,996 거래일 · 3,323 종목.
+      완료 못 한 300 슬라이스는 달력에 없는 휴장일이다(`holidays_krx.csv`가 46건뿐).
+      **N3-5b가 여기에 흡수됐다** — 같은 호출이다
+  - [x] **08-18 세션은 이 실행에 안 들어왔다** — 원천이 T+1이라 그 시점에 아직 없었다.
+        08-19 19:31에 따로 채웠다(2,763행). 상세는 `operations.md` "KRX Open API … T+1"
 - [ ] **N1-9 검증 V1~V8** → `poc/n1_validation.md`
-  - [x] **V1** `market_cap` vs `source_close × listed_shares` — **PoC에서 6,904행 100% 일치**
+  - [x] **V1** `market_cap` vs `source_close × listed_shares` — PoC 6,904행 100% 일치 →
+        **전량 재확인 (2026-08-19): 7,060,600행 위반 0건, 널 0건.** 12년 전체에서 항등식이
+        정확히 성립한다. 규모·밸류 분모·유동성이 전부 이 값에 걸려 있어 가장 먼저 봤다
+  - [x] **(V 묶음 밖, K-7 재료) `source_open`/`high`/`low` 채움률 전 연도 100%** —
+        2014~2026 어느 해도 빠짐이 없다. K-7이 요구하는 원주가가 완전하다
   - [ ] V2 `source_close`(KRX 미수정) vs `daily_ohlcv.close`(naver 수정) 비율 — 전 종목
   - [ ] V3 · V4 · V6
   - [ ] V5 `종가×거래량` vs 실제 거래대금 rank 상관 — **낮으면 `px_amihud_20d` 재검정**
@@ -408,7 +429,16 @@ N6은 대상 집합이 N3에서 S-1으로 바뀌었으므로(N6-5) **이제 KRX 
   - [ ] 상폐 직전 60거래일 데이터 보유율
   - [ ] 후속 판단 기록: 상폐 종목 가격 백필이 필요한가
 - [ ] **N3-7 마트 PIT 유니버스 variant** — 기존 경로 유지.
-      **PoC 판정에 따라 `04` §6 안 1(일별, `daily_market_cap` 행 기준)로 간다**
+      **`04` §6 안 1(일별, `daily_market_cap` 행 기준)로 간다 — 전제 검증 완료**
+  - [x] **전제 검증 (2026-08-19, 호출 0건)** — N1-8 백필이 끝나서 `daily_market_cap` 대
+        `daily_ohlcv` 집합 대조로 확인했다. 상세 [`04_w1_pit_universe.md`](04_w1_pit_universe.md) §3.6
+  - [x] `daily_ohlcv`에만 있는 종목은 **전부 KONEX 시절 이력**이다 (2016-06-30의 37개 전수 확인).
+        `daily_market_cap` 첫 등장일 = 코스닥 이전상장일. KOSPI/KOSDAQ 범위에 구멍은 없다
+  - [x] 반대 방향은 초기 **324개** — `daily_ohlcv`가 상폐 종목을 그만큼 놓치고 있다.
+        **이 수가 생존편향의 크기다** (N3-6의 답을 일부 선취한다)
+  - [x] **덤: `daily_ohlcv`에 KONEX 구간이 섞여 있다.** 안 1로 옮기면 같이 빠진다 —
+        안 1의 이득이 §3.5에 적어둔 것보다 하나 많다
+  - [ ] Cronicle `SDC Backfill N3 Universe Snapshots` 이벤트 **삭제** (2019~2025 공백은 방치가 아니라 판정)
 - [x] **N3-8 §3.5 판정 기록** — **일별 유니버스를 N1 행으로 쓸 수 있다.**
       네 시점 차집합 0. N3는 감사·교차검증 역할로 축소 확정
 
@@ -431,9 +461,28 @@ N6은 대상 집합이 N3에서 S-1으로 바뀌었으므로(N6-5) **이제 KRX 
 - [ ] **D-4** Cronicle **일회성 백필 이벤트** 등록 → **끝나면 삭제** (`common-backfill-2015` 사례)
   - [x] `SDC Backfill DART Corp Profile (one-time)` — `emsugdoe907` (N2-7b)
   - [x] `SDC Backfill N3 Universe Snapshots (one-time)` — `emsugmrjp0a` (N3-5b)
-  - [ ] V-1b / N1-8 / S-2 이벤트
-  - [ ] **검증 끝나면 전부 삭제.** 선례 `emr0r4xgb0h`가 2026-07-04 완료 후 아직 남아 있다
+  - [x] `SDC Backfill N1 Market Cap (one-time)` — `sdc_backfill_n1_marketcap` (N1-8). **완료**
+  - [x] `SDC Backfill S-1 DART Filings (one-time)` — `emsuia7tg0e`. **완료**
+  - [x] `SDC Backfill S-1 Remainder` — `sdc_backfill_s1_remainder`. **일회성이 아니라 반복으로
+        바뀌었다** (2026-08-18). 3,959 도달 시 삭제 → `operations.md` "S-1 잔여는 반복 이벤트다"
+  - [ ] V-1b / S-2 이벤트
+  - [ ] **검증 끝나면 전부 삭제.** 2026-08-19 저녁 기준 **삭제 대기 6개**:
+        `emr0r4xgb0h`(07-04 완료) · `emsugdoe907` · `emsuia7tg0e` · `emsugmrjp0a`(재개 안 함) ·
+        `sdc_backfill_n1_marketcap` · `sdc_kis_flows_trial`(2일차 후)
 - [ ] **D-5** Cronicle **정기 증분 이벤트** 추가 — N1 일별, N4 월별, N2·N5 주기적 refresh
+  - [x] **2026-08-19 실태 확인 — 지금 raw 표 둘이 일회성 백필로만 채워진다.**
+        Cronicle 이벤트 19개의 wrapper를 전부 대조했다. `prices-market-cap-backfill.sh`와
+        `dart-sync-filings.sh`가 **어떤 정기 이벤트에도 안 걸려 있다.** 백필이 끝나는
+        순간부터 `daily_market_cap`·`dart_filing_receipt_raw`가 멈춘다
+  - [ ] **N1 일별** — 18:30 체인 꼬리(KRX Common 뒤)에 붙인다. `krx_marketdata` 락을 같은
+        체인 안에서 직렬로 쓰고, 하루 2요청이다. **가져오는 건 T-1이다**(원천이 T+1).
+        날짜를 안 넘기면 갭 탐지가 알아서 채운다
+  - [ ] **공시 접수(N5-7 입력)** — 그냥 못 붙인다. skip-if-present가 `(corp_code, year)`
+        단위라 현재 연도가 이미 "완료"로 잡혀 한 건도 안 가져온다. `--force`가 필요하고
+        그러면 하루 2,763콜이 **S-1과 같은 할당량**을 쓴다 → **S-1 완주 후**
+  - [x] **막는 것은 없다** — compute 게이트(`reports.freshness_violations`)는
+        `common_feature_series`만 본다. 갭은 백필로 복구된다(12년치 84분).
+        **급한 게 아니라 빠진 것이다**
 - [x] **D-6** **KRX 계열 동시 실행 차단** (2026-08-15) — 계획은 "시간대 분리"였으나
       **락 자체가 꺼져 있었다.** `SDC_DAILY_USE_SOURCE_LOCK`이 opt-in이고 prod은 켠 적이
       없다 — `.env`에도, 호스트 env에도, Cronicle 이벤트 스크립트에도 없다.
@@ -865,26 +914,26 @@ KRX 안내문이 이유를 명시한다 — **약관 제10조 제2호는 자동�
         54%만 덮었는데, KRX가 2014-06을 준다. `DATAGO_KEY`는 대조 검증용으로만 남긴다
   - [ ] **한도가 키 단위인지 계정 단위인지는 모른다.** 실측하려면 10,000회를 써야 한다.
         **키당으로 가정하지 않고** 소진 응답을 만나면 그때 확정한다 (K-4)
-- [ ] **K-4 `adapters/market_data_krx_openapi/` 구현** — K-2 확정 후
-  - [ ] **포트 변경이 없다.** `MarketCapProvider`·`HistoricalUniverseProvider`가 이미
-        `(trade_date, market)` 슬라이스 단위라 어댑터만 갈아끼우면 된다
+- [x] **K-4 `adapters/market_data_krx_openapi/` 구현 완료** (2026-08-18, v0.11.x) —
+      `prices market-cap-backfill --source krx-openapi`(기본값)와
+      `universe sync --source krx-openapi`를 받친다. N1-8 전량 백필로 실증됐다
+  - [x] **포트 변경이 없었다.** `MarketCapProvider`·`HistoricalUniverseProvider`가 이미
+        `(trade_date, market)` 슬라이스 단위라 어댑터만 갈아끼웠다
   - [x] 인증키는 `.env` → `get_settings()`. `KRX_ID`/`KRX_PW`와 다른 축이다
     - [x] **배선 완료** (2026-08-18) — `AUTH_KEYS` → `settings.krx_openapi_auth_keys`
           (콤마 구분 tuple, OpenDART 다중키와 같은 모양). `DATAGO_KEY` →
           `settings.datago_api_key`도 같이 넣었다. 어댑터는 아직 없다
-  - [ ] **다중키 로테이션** — 키가 2개다. OpenDART `opendart_common` 실행기가
-        하는 일과 같으므로 그쪽을 복제한다
+  - [x] **다중키 로테이션** — OpenDART 실행기와 같은 모양으로 복제했다
   - [ ] 한도 소진 시 종료 코드 — OpenDART의 `75` 전례를 따른다.
         **한도가 키 단위인지 계정 단위인지 모르므로**(K-3) 로테이션이 소진을
         못 피할 수 있다. 그 경우도 정상 종료 경로여야 한다
   - [ ] **파서가 지킬 것 셋** (§4.1c 실측) — 값이 전부 **문자열**이고,
         `idx` 응답에는 **빈 문자열**이 섞이며(`코스피 (외국주포함)`의 `CLSPRC_IDX`),
         **휴장일은 `rows=0`**이다. 마지막 항목 덕에 `alternative=False` 방어는 불필요하다
-  - [ ] **N1과 N3를 한 서비스로 합친다** — 같은 호출이 시총·상장주식수·거래대금과
-        그날의 종목 집합을 함께 준다. `backfill_market_cap`과
-        `backfill_universe_snapshots`를 따로 돌릴 이유가 없어진다
-  - [ ] **원주가 4필드를 어디에 쓸지 정한다** — `TDD_OPNPRC`·`HGPRC`·`LWPRC`·`CLSPRC`가
-        같이 온다. `daily_market_cap`에 넣을지 별도 테이블로 뺄지가 **K-7의 입구다**
+  - [x] **합쳐졌다** — 한 호출이 시총·상장주식수·거래대금과 그날의 종목 집합을 함께 준다.
+        `backfill_universe_snapshots`는 더 이상 정기 실행 대상이 아니다 (N3-7 참조)
+  - [x] **`daily_market_cap`에 넣었다** — `source_open`/`source_high`/`source_low`
+        (+ 기존 `source_close`). 전 연도 채움률 100%. **K-7의 입구가 열렸다**
 - [~] **K-5 스크래핑 경로 폐기** — 2026-08-18 **pykrx 문은 닫았다.** 남은 둘은 prod 자격증명 대기
   - [x] **(K-6f에서 발견) `shorting` 그룹 freshness를 먼저 손봐야 한다.**
         그룹 최신일은 metric 3개의 최솟값인데 그중 `short_selling_balance_quantity`는
@@ -1220,9 +1269,13 @@ KRX 안내문이 이유를 명시한다 — **약관 제10조 제2호는 자동�
         `evaluate_staleness`가 각 raw 도메인의 최신 행을 KRX 거래일 달력과 비교한다
   - [x] 거래일 예산(`daily_ohlcv`·`daily_market_cap`·flow 그룹·KRX/FDR/PYKRX common)과
         달력 예산(ECOS·FRED)을 분리. **매일 걸리는 게이트는 아무도 안 본다**
-  - [x] `daily_market_cap`도 게이트에 포함 — 일별 잡이 될 예정이라 빼면 같은 구멍을
-        한 칸 옆에 다시 만든다. 빈 테이블은 stale로 센다 → **N1-8 이후에 스케줄**
-  - [ ] Cronicle 이벤트 등록 (23:00, 저녁 수집 창 종료 후)
+  - [x] ~~`daily_market_cap`도 게이트에 포함~~ → **뒤집혔다 (2026-08-19).** 당시 근거는
+        "일별 잡이 될 예정"이었는데, 원천(`sto/stk_bydd_trd`)이 **T+1**이라는 게 실측으로
+        나왔다. `max_lag_trading_days=1`은 가장 최근 세션을 요구하므로 **이 도메인은
+        영원히 못 맞춘다.** 매일 걸리는 게이트는 아무도 안 본다 — 같은 원칙이 이번엔
+        반대 결론을 낸다. **제외하고 등록한다** (109행 12번과 일치)
+  - [ ] Cronicle 이벤트 등록 (23:00, 저녁 수집 창 종료 후) —
+        **`daily_market_cap` 제외가 등록의 선행 조건이다**
   - [ ] `profile`을 정기 스케줄에 편입 — 지금 수동 wrapper뿐
 - [x] **O-9 원천 차단 정지 조건 `ConsecutiveFailureGuard`** (2026-08-15, v0.9.4) —
       탐지가 아니라 **정지**다. 모든 수집기가 실패를 항목 오류로 기록하고 넘어가서,
@@ -1397,9 +1450,13 @@ pykrx가 상폐 종목 OHLCV를 상폐일까지 준다(5종목 중 4종목 확�
         복구 행은 항상 `DELISTED` — master에 없다는 건 라이브 sync가 본 적 없다는
         적극적 증거다. `sync_universe`는 `get_active_stocks`로 diff하므로 영향 없다
     - [x] 한계 명시: 월말 스냅샷은 **한 달 안에 상장·상폐된 종목을 못 본다**
-  - [ ] 실행 — **N3 완료가 선행 조건.** N3가 60/152에서 멈췄으므로 **K-4 → N1-8까지 대기**한다.
-        지금 돌리면 2019년 이후 상폐 종목이 통째로 빠진 master가 만들어진다.
-        **2026-08-18: 그 대기가 "무기한"에서 "K-4 구현 기간"으로 바뀌었다**
+  - [ ] 실행 — ~~N3 완료가 선행 조건~~ → **막힌 것이 풀렸다 (2026-08-19).** N3 월말
+        스냅샷은 2019~2025가 여전히 비어 있지만 **더 이상 선행 조건이 아니다** —
+        N1-8이 2014-06-02~2026-08-18의 일별 종목 집합을 통째로 주고, 그게 월말보다
+        해상도가 30배 높다. 원래 걱정이던 "2019년 이후 상폐 종목이 빠진 master"는
+        `daily_market_cap`으로 오히려 더 잘 잡힌다 — 같은 세션에서 `daily_ohlcv`보다
+        종목이 최대 **324개 많고**, 그 차이가 곧 `daily_ohlcv`의 생존편향이다
+        (`04_w1_pit_universe.md` §3.6). **이제 바로 돌릴 수 있다**
 - [ ] **S-3 상폐 시점 확정** — N3 월말 스냅샷 diff + `daily_ohlcv` 마지막 거래일
 - [ ] **S-4 편향 크기 측정** — 같은 피쳐를 편향 표본과 복구 표본으로 각각 돌린 IC 차이.
       **이게 생존편향의 크기 그 자체다**
