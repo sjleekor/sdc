@@ -169,6 +169,7 @@ def _build_features(con, cfg: LakeConfig) -> None:
     from research.etl.features import common as cf_feat
     from research.etl.features import fin_pit
     from research.etl.features.flow import materialize_flow
+    from research.etl.features.market_cap import materialize_market_cap
     from research.etl.features.price import materialize_price
     from research.etl.labels import materialize_label_scan
     from research.etl.quality import QUALITY_TABLE, materialize_price_quality
@@ -179,8 +180,19 @@ def _build_features(con, cfg: LakeConfig) -> None:
         materialize_named_universes,
     )
 
-    register_views(con, cfg, tables=["krx_security_flow_raw"])
+    # daily_market_cap / dart_filing_receipt_raw are not among the smf/cf raw
+    # inputs registered in run(), and feat_market_cap needs both — the first for
+    # the exchange's listed share count, the second for the 권리락 dates its mask
+    # is built from.
+    register_views(
+        con,
+        cfg,
+        tables=["krx_security_flow_raw", "daily_market_cap", "dart_filing_receipt_raw"],
+    )
     materialize_stock_pit(con, cfg, force=False)
+    # feat_market_cap carries its own mask (권리락 window), so it registers the
+    # distortion view itself rather than relying on build order here.
+    materialize_market_cap(con, cfg, force=False)
     materialize_price_quality(con, cfg, pit_view=PIT_TABLE, force=False)
     materialize_named_universes(con, cfg, force=False)
     materialize_price(con, cfg, quality_view=QUALITY_TABLE, force=False)
