@@ -56,7 +56,10 @@ def _con(
         "INSERT INTO daily_market_cap VALUES (?, ?, ?, ?, ?, ?)",
         [(d, ticker, MARKET, c, s, c * s) for d, c, s in rows],
     )
-    con.execute("CREATE TABLE dart_filing_receipt_raw(ticker VARCHAR, rcept_dt DATE, report_nm VARCHAR)")
+    con.execute(
+        "CREATE TABLE dart_filing_receipt_raw("
+        "ticker VARCHAR, rcept_dt DATE, report_nm VARCHAR)"
+    )
     if receipts:
         con.executemany(
             "INSERT INTO dart_filing_receipt_raw VALUES (?, ?, ?)",

@@ -23,6 +23,7 @@ from krx_collector.util.pipeline import (
     should_retry_opendart_result,
 )
 from krx_collector.util.time import now_kst
+from tests.helpers.fake_slice_storage import FakeSliceStorageMixin
 
 
 @dataclass(slots=True)
@@ -115,9 +116,10 @@ class ExhaustedFinancialProvider:
         )
 
 
-class PartialFinancialStorage(RecordingStorage):
+class PartialFinancialStorage(RecordingStorage, FakeSliceStorageMixin):
     def __init__(self) -> None:
-        super().__init__()
+        RecordingStorage.__init__(self)
+        FakeSliceStorageMixin.__init__(self)
         self.upserts: list[DartFinancialStatementLine] = []
 
     def get_dart_corp_master(
@@ -316,6 +318,7 @@ def test_sync_dart_financial_statements_marks_partial_run() -> None:
         "requests_skipped": 0,
         "rows_upserted": 1,
         "no_data_requests": 0,
+        "slices_skipped_no_data": 0,
         "error_count": 1,
         "partial_failure_count": 1,
         "completed_request_count": 1,

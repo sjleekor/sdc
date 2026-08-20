@@ -5,7 +5,7 @@ from krx_collector.adapters.opendart_financials.provider import (
     OpenDartFinancialStatementProvider,
     parse_fnltt_singl_acnt_all_response,
 )
-from krx_collector.domain.enums import Market, RunStatus, RunType, Source
+from krx_collector.domain.enums import Market, RunStatus, RunType, Source, UniverseScope
 from krx_collector.domain.models import (
     DartCorp,
     DartFinancialStatementLine,
@@ -16,6 +16,7 @@ from krx_collector.domain.models import (
 from krx_collector.service.sync_dart_financials import sync_dart_financial_statements
 from krx_collector.util.time import now_kst
 from tests.helpers.fake_opendart_executor import FakeOpenDartExecutor
+from tests.helpers.fake_slice_storage import FakeSliceStorageMixin
 
 
 def _sample_corp() -> DartCorp:
@@ -200,8 +201,9 @@ class MockFinancialProvider:
         )
 
 
-class MockFinancialStorage:
+class MockFinancialStorage(FakeSliceStorageMixin):
     def __init__(self) -> None:
+        super().__init__()
         self.runs: list[IngestionRun] = []
         self.upserts: list[DartFinancialStatementLine] = []
         self.existing_financial_requests: set[tuple[str, int, str, str]] = set()
@@ -396,3 +398,36 @@ def test_sync_dart_financial_statements_force_bypasses_existing_check() -> None:
     assert result.requests_attempted == 1
     assert result.requests_skipped == 0
     assert provider.calls == 1
+
+
+def test_sync_dart_financial_statements_persists_and_skips_no_data() -> None:
+    storage = MockFinancialStorage()
+    provider = MockFinancialProvider()
+
+    first = sync_dart_financial_statements(
+        provider=provider,
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        fs_divs=["OFS"],
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+        scope=UniverseScope.HISTORICAL,
+    )
+    second = sync_dart_financial_statements(
+        provider=provider,
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        fs_divs=["OFS"],
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+        scope=UniverseScope.HISTORICAL,
+    )
+
+    assert first.no_data_requests == 1
+    assert second.requests_attempted == 0
+    assert second.requests_skipped == 1
+    assert provider.calls == 1
+    state = storage.slice_states[(Source.OPENDART, "fnlttSinglAcntAll", "00126380:2025:11011:OFS")]
+    assert state.status.value == "no_data"

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from krx_collector.adapters.opendart_common.client import OpenDartRequestExecutor
-from krx_collector.domain.enums import RunStatus, RunType, UniverseScope
+from krx_collector.domain.enums import RunStatus, RunType, Source, UniverseScope
 from krx_collector.domain.models import DartShareInfoSyncResult, IngestionRun
 from krx_collector.ports.share_info import (
     CapitalChangeProvider,
@@ -24,9 +24,28 @@ from krx_collector.util.pipeline import (
     should_retry_opendart_result,
     sleep_with_jitter,
 )
+from krx_collector.util.slice_ledger import DEFAULT_NO_DATA_TTL_DAYS, SliceLedger
 from krx_collector.util.time import now_kst
 
 logger = logging.getLogger(__name__)
+
+LEDGER_ENDPOINTS = {
+    "share_count": "stockTotqySttus",
+    "dividend": "alotMatter",
+    "treasury_stock": "tesstkAcqsDspsSttus",
+    "capital_change": "irdsSttus",
+}
+LEDGER_FLUSH_EVERY = 200
+
+
+def _slice_key(corp_code: str, bsns_year: int, reprt_code: str) -> str:
+    """Return the stable ledger key shared by the four DS002 endpoints."""
+    return f"{corp_code}:{bsns_year}:{reprt_code}"
+
+
+def _flush_ledgers(ledgers: dict[str, SliceLedger]) -> None:
+    for ledger in ledgers.values():
+        ledger.flush()
 
 
 def _get_executor(provider: object) -> OpenDartRequestExecutor | None:
@@ -55,6 +74,12 @@ def sync_dart_share_info(
     (증자·감자 현황) request is skipped entirely so existing callers that
     only need share-count/shareholder-return keep working unchanged.
     """
+    no_data_ttl_days = (
+        None if scope is UniverseScope.HISTORICAL else DEFAULT_NO_DATA_TTL_DAYS
+    )
+    ledger_kinds = ["share_count", "dividend", "treasury_stock"]
+    if capital_change_provider is not None:
+        ledger_kinds.append("capital_change")
     run = IngestionRun(
         run_type=RunType.DART_SHARE_INFO_SYNC,
         started_at=now_kst(),
@@ -65,6 +90,9 @@ def sync_dart_share_info(
             "tickers": tickers,
             "rate_limit_seconds": rate_limit_seconds,
             "force": force,
+            "universe_scope": scope.value,
+            "slice_ledger_endpoints": [LEDGER_ENDPOINTS[kind] for kind in ledger_kinds],
+            "no_data_ttl_days": no_data_ttl_days,
             "allowed_year_report_pairs": (
                 [f"{year}:{code}" for year, code in sorted(allowed_year_report_pairs)]
                 if allowed_year_report_pairs is not None
@@ -85,6 +113,17 @@ def sync_dart_share_info(
     result = DartShareInfoSyncResult()
     no_data_request_keys: list[str] = []
     skip_request_keys = set() if force else (skip_request_keys or set())
+    ledgers = {
+        kind: SliceLedger(
+            storage,
+            source=Source.OPENDART,
+            endpoint=LEDGER_ENDPOINTS[kind],
+            no_data_ttl_days=no_data_ttl_days,
+        )
+        for kind in ledger_kinds
+    }
+    ledger_pending: dict[str, set[str]] = {kind: set() for kind in ledger_kinds}
+    slices_skipped_no_data = 0
     try:
         targets = resolve_dart_targets(storage, scope, tickers)
         if not targets:
@@ -121,6 +160,19 @@ def sync_dart_share_info(
                 else set()
             )
 
+        ledger_keys = [
+            _slice_key(corp.corp_code, bsns_year, reprt_code)
+            for corp in targets
+            for bsns_year in bsns_years
+            for reprt_code in reprt_codes
+            if allowed_year_report_pairs is None
+            or (bsns_year, reprt_code) in allowed_year_report_pairs
+        ]
+        for kind, ledger in ledgers.items():
+            plan = ledger.plan(ledger_keys, force=force)
+            ledger_pending[kind] = set(plan.pending)
+            slices_skipped_no_data += len(plan.skipped_no_data)
+
         for corp in targets:
             result.targets_processed += 1
             for bsns_year in bsns_years:
@@ -129,13 +181,19 @@ def sync_dart_share_info(
                         allowed_year_report_pairs is not None
                         and (bsns_year, reprt_code) not in allowed_year_report_pairs
                     ):
-                        result.requests_skipped += 3
+                        result.requests_skipped += len(ledger_kinds)
                         continue
                     request_prefix = f"{corp.ticker}:{bsns_year}:{reprt_code}"
+                    ledger_key = _slice_key(corp.corp_code, bsns_year, reprt_code)
                     attempted_any = False
 
                     share_count_key = f"{request_prefix}:share_count"
-                    if (corp.corp_code, bsns_year, reprt_code) in existing_share_count_keys:
+                    if ledger_key not in ledger_pending["share_count"]:
+                        logger.debug(
+                            "Skipping ledger-complete share_count request %s", request_prefix
+                        )
+                        result.requests_skipped += 1
+                    elif (corp.corp_code, bsns_year, reprt_code) in existing_share_count_keys:
                         logger.debug("Skipping existing share_count request %s", request_prefix)
                         result.requests_skipped += 1
                     elif share_count_key in skip_request_keys:
@@ -168,14 +226,24 @@ def sync_dart_share_info(
                         elif share_count_result.no_data:
                             result.no_data_requests += 1
                             no_data_request_keys.append(share_count_key)
+                            ledgers["share_count"].record_no_data(ledger_key)
                         elif share_count_result.records:
                             upsert = storage.upsert_dart_share_count_raw(share_count_result.records)
                             result.share_count_upsert.updated += upsert.updated
                             result.share_count_upsert.errors += upsert.errors
                             result.share_count_rows_upserted += upsert.updated
+                        else:
+                            result.no_data_requests += 1
+                            no_data_request_keys.append(share_count_key)
+                            ledgers["share_count"].record_no_data(ledger_key)
 
                     dividend_key = f"{request_prefix}:dividend"
-                    if (
+                    if ledger_key not in ledger_pending["dividend"]:
+                        logger.debug(
+                            "Skipping ledger-complete dividend request %s", request_prefix
+                        )
+                        result.requests_skipped += 1
+                    elif (
                         corp.corp_code,
                         bsns_year,
                         reprt_code,
@@ -209,6 +277,7 @@ def sync_dart_share_info(
                         elif dividend_result.no_data:
                             result.no_data_requests += 1
                             no_data_request_keys.append(dividend_key)
+                            ledgers["dividend"].record_no_data(ledger_key)
                         elif dividend_result.records:
                             upsert = storage.upsert_dart_shareholder_return_raw(
                                 dividend_result.records
@@ -216,9 +285,19 @@ def sync_dart_share_info(
                             result.shareholder_return_upsert.updated += upsert.updated
                             result.shareholder_return_upsert.errors += upsert.errors
                             result.shareholder_return_rows_upserted += upsert.updated
+                        else:
+                            result.no_data_requests += 1
+                            no_data_request_keys.append(dividend_key)
+                            ledgers["dividend"].record_no_data(ledger_key)
 
                     treasury_key = f"{request_prefix}:treasury_stock"
-                    if (
+                    if ledger_key not in ledger_pending["treasury_stock"]:
+                        logger.debug(
+                            "Skipping ledger-complete treasury_stock request %s",
+                            request_prefix,
+                        )
+                        result.requests_skipped += 1
+                    elif (
                         corp.corp_code,
                         bsns_year,
                         reprt_code,
@@ -256,6 +335,7 @@ def sync_dart_share_info(
                         elif treasury_result.no_data:
                             result.no_data_requests += 1
                             no_data_request_keys.append(treasury_key)
+                            ledgers["treasury_stock"].record_no_data(ledger_key)
                         elif treasury_result.records:
                             upsert = storage.upsert_dart_shareholder_return_raw(
                                 treasury_result.records
@@ -263,10 +343,20 @@ def sync_dart_share_info(
                             result.shareholder_return_upsert.updated += upsert.updated
                             result.shareholder_return_upsert.errors += upsert.errors
                             result.shareholder_return_rows_upserted += upsert.updated
+                        else:
+                            result.no_data_requests += 1
+                            no_data_request_keys.append(treasury_key)
+                            ledgers["treasury_stock"].record_no_data(ledger_key)
 
                     if capital_change_provider is not None:
                         capital_change_key = f"{request_prefix}:capital_change"
-                        if (
+                        if ledger_key not in ledger_pending["capital_change"]:
+                            logger.debug(
+                                "Skipping ledger-complete capital_change request %s",
+                                request_prefix,
+                            )
+                            result.requests_skipped += 1
+                        elif (
                             corp.corp_code,
                             bsns_year,
                             reprt_code,
@@ -306,6 +396,7 @@ def sync_dart_share_info(
                             elif capital_change_result.no_data:
                                 result.no_data_requests += 1
                                 no_data_request_keys.append(capital_change_key)
+                                ledgers["capital_change"].record_no_data(ledger_key)
                             elif capital_change_result.records:
                                 upsert = storage.upsert_dart_capital_change_raw(
                                     capital_change_result.records
@@ -313,10 +404,21 @@ def sync_dart_share_info(
                                 result.capital_change_upsert.updated += upsert.updated
                                 result.capital_change_upsert.errors += upsert.errors
                                 result.capital_change_rows_upserted += upsert.updated
+                            else:
+                                result.no_data_requests += 1
+                                no_data_request_keys.append(capital_change_key)
+                                ledgers["capital_change"].record_no_data(ledger_key)
+
+                    if (
+                        sum(ledger.pending_write_count for ledger in ledgers.values())
+                        >= LEDGER_FLUSH_EVERY
+                    ):
+                        _flush_ledgers(ledgers)
 
                     if attempted_any:
                         sleep_with_jitter(rate_limit_seconds)
 
+        _flush_ledgers(ledgers)
         complete_run(
             storage,
             run,
@@ -328,6 +430,7 @@ def sync_dart_share_info(
                 shareholder_return_rows_upserted=result.shareholder_return_rows_upserted,
                 capital_change_rows_upserted=result.capital_change_rows_upserted,
                 no_data_requests=result.no_data_requests,
+                slices_skipped_no_data=slices_skipped_no_data,
                 **(executor.snapshot_metrics() if executor is not None else {}),
             ),
             errors=result.errors,
@@ -339,12 +442,14 @@ def sync_dart_share_info(
         return result
     except OpenDartKeyExhaustedError as exc:
         logger.warning("OpenDART share info sync stopped: %s", exc)
+        _flush_ledgers(ledgers)
         fail_run(storage, run, exc)
         result.opendart_exhaustion_reason = "all_rate_limited"
         result.errors["pipeline"] = str(exc)
         return result
     except Exception as exc:
         logger.exception("OpenDART share info sync failed")
+        _flush_ledgers(ledgers)
         fail_run(storage, run, exc)
         result.errors["pipeline"] = str(exc)
         return result

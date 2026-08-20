@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from krx_collector.adapters.opendart_common.client import OpenDartRequestExecutor
-from krx_collector.domain.enums import RunStatus, RunType, UniverseScope
+from krx_collector.domain.enums import RunStatus, RunType, Source, UniverseScope
 from krx_collector.domain.models import DartXbrlSyncResult, IngestionRun, XbrlBackfillTarget
 from krx_collector.ports.storage import Storage
 from krx_collector.ports.xbrl import XbrlProvider
@@ -20,9 +20,20 @@ from krx_collector.util.pipeline import (
     should_retry_opendart_result,
     sleep_with_jitter,
 )
+from krx_collector.util.slice_ledger import DEFAULT_NO_DATA_TTL_DAYS, SliceLedger
 from krx_collector.util.time import now_kst
 
 logger = logging.getLogger(__name__)
+
+LEDGER_ENDPOINT = "fnlttXbrl"
+LEDGER_FLUSH_EVERY = 200
+
+
+def _slice_key(
+    corp_code: str, bsns_year: int, reprt_code: str, rcept_no: str
+) -> str:
+    """Return the stable ledger key for one XBRL receipt request."""
+    return f"{corp_code}:{bsns_year}:{reprt_code}:{rcept_no}"
 
 
 def _get_executor(provider: object) -> OpenDartRequestExecutor | None:
@@ -44,6 +55,9 @@ def sync_dart_xbrl(
     scope: UniverseScope = UniverseScope.CURRENT,
 ) -> DartXbrlSyncResult:
     """Synchronise parsed XBRL ZIP data for filings already present in financial raw."""
+    no_data_ttl_days = (
+        None if scope is UniverseScope.HISTORICAL else DEFAULT_NO_DATA_TTL_DAYS
+    )
     run = IngestionRun(
         run_type=RunType.XBRL_PARSE,
         started_at=now_kst(),
@@ -54,6 +68,9 @@ def sync_dart_xbrl(
             "tickers": tickers,
             "rate_limit_seconds": rate_limit_seconds,
             "force": force,
+            "universe_scope": scope.value,
+            "slice_ledger_endpoint": LEDGER_ENDPOINT,
+            "no_data_ttl_days": no_data_ttl_days,
             "allowed_year_report_pairs": (
                 [f"{year}:{code}" for year, code in sorted(allowed_year_report_pairs)]
                 if allowed_year_report_pairs is not None
@@ -70,6 +87,14 @@ def sync_dart_xbrl(
     result = DartXbrlSyncResult()
     no_data_request_keys: list[str] = []
     skip_request_keys = set() if force else (skip_request_keys or set())
+    ledger = SliceLedger(
+        storage,
+        source=Source.OPENDART,
+        endpoint=LEDGER_ENDPOINT,
+        no_data_ttl_days=no_data_ttl_days,
+    )
+    ledger_pending: set[str] = set()
+    slices_skipped_no_data = 0
 
     try:
         corp_rows = resolve_dart_targets(storage, scope, tickers)
@@ -107,6 +132,15 @@ def sync_dart_xbrl(
                 corp_codes=[corp.corp_code for corp in corp_by_ticker.values()],
             )
 
+        ledger_keys = [
+            _slice_key(corp.corp_code, bsns_year, reprt_code, rcept_no)
+            for ticker, bsns_year, reprt_code, rcept_no in request_targets.values()
+            if (corp := corp_by_ticker.get(ticker)) is not None
+        ]
+        ledger_plan = ledger.plan(ledger_keys, force=force)
+        ledger_pending = set(ledger_plan.pending)
+        slices_skipped_no_data = len(ledger_plan.skipped_no_data)
+
         result.targets_processed = len(request_targets)
         for ticker, bsns_year, reprt_code, rcept_no in request_targets.values():
             corp = corp_by_ticker.get(ticker)
@@ -114,6 +148,11 @@ def sync_dart_xbrl(
                 continue
 
             request_key = f"{ticker}:{bsns_year}:{reprt_code}:{rcept_no}"
+            ledger_key = _slice_key(corp.corp_code, bsns_year, reprt_code, rcept_no)
+            if ledger_key not in ledger_pending:
+                logger.debug("Skipping ledger-complete XBRL document %s", request_key)
+                result.requests_skipped += 1
+                continue
             if (corp.corp_code, bsns_year, reprt_code, rcept_no) in existing_doc_keys:
                 logger.debug("Skipping existing XBRL document %s", request_key)
                 result.requests_skipped += 1
@@ -146,6 +185,7 @@ def sync_dart_xbrl(
             elif fetch_result.no_data:
                 result.no_data_requests += 1
                 no_data_request_keys.append(request_key)
+                ledger.record_no_data(ledger_key)
             else:
                 if fetch_result.document is not None:
                     upsert_document = storage.upsert_dart_xbrl_documents([fetch_result.document])
@@ -159,8 +199,17 @@ def sync_dart_xbrl(
                     result.fact_upsert.errors += upsert_facts.errors
                     result.facts_upserted += upsert_facts.updated
 
+                if fetch_result.document is None and not fetch_result.facts:
+                    result.no_data_requests += 1
+                    no_data_request_keys.append(request_key)
+                    ledger.record_no_data(ledger_key)
+
+            if ledger.pending_write_count >= LEDGER_FLUSH_EVERY:
+                ledger.flush()
+
             sleep_with_jitter(rate_limit_seconds)
 
+        ledger.flush()
         complete_run(
             storage,
             run,
@@ -171,6 +220,7 @@ def sync_dart_xbrl(
                 documents_upserted=result.documents_upserted,
                 facts_upserted=result.facts_upserted,
                 no_data_requests=result.no_data_requests,
+                slices_skipped_no_data=slices_skipped_no_data,
                 **(executor.snapshot_metrics() if executor is not None else {}),
             ),
             errors=result.errors,
@@ -182,12 +232,14 @@ def sync_dart_xbrl(
         return result
     except OpenDartKeyExhaustedError as exc:
         logger.warning("OpenDART XBRL sync stopped: %s", exc)
+        ledger.flush()
         fail_run(storage, run, exc)
         result.opendart_exhaustion_reason = "all_rate_limited"
         result.errors["pipeline"] = str(exc)
         return result
     except Exception as exc:
         logger.exception("OpenDART XBRL sync failed")
+        ledger.flush()
         fail_run(storage, run, exc)
         result.errors["pipeline"] = str(exc)
         return result
@@ -218,6 +270,8 @@ def sync_dart_xbrl_receipt_targeted(
             "target_count": len(targets),
             "rate_limit_seconds": rate_limit_seconds,
             "force": force,
+            "slice_ledger_endpoint": LEDGER_ENDPOINT,
+            "no_data_ttl_days": None,
         },
     )
     executor = _get_executor(provider)
@@ -226,6 +280,14 @@ def sync_dart_xbrl_receipt_targeted(
     storage.record_run(run)
 
     result = DartXbrlSyncResult()
+    ledger = SliceLedger(
+        storage,
+        source=Source.OPENDART,
+        endpoint=LEDGER_ENDPOINT,
+        no_data_ttl_days=None,
+    )
+    ledger_pending: set[str] = set()
+    slices_skipped_no_data = 0
     try:
         if not targets:
             raise RuntimeError("No receipt-targeted XBRL backfill targets were supplied.")
@@ -248,6 +310,19 @@ def sync_dart_xbrl_receipt_targeted(
                 corp_codes=[target.corp_code for target in targets],
             )
 
+        ledger_keys = [
+            _slice_key(
+                target.corp_code,
+                target.bsns_year,
+                target.reprt_code,
+                target.rcept_no,
+            )
+            for target in targets
+        ]
+        ledger_plan = ledger.plan(ledger_keys, force=force)
+        ledger_pending = set(ledger_plan.pending)
+        slices_skipped_no_data = len(ledger_plan.skipped_no_data)
+
         result.targets_processed = len(targets)
         for target in targets:
             corp = corp_by_ticker.get(target.ticker)
@@ -260,6 +335,16 @@ def sync_dart_xbrl_receipt_targeted(
             request_key = (
                 f"{target.ticker}:{target.bsns_year}:{target.reprt_code}:{target.rcept_no}"
             )
+            ledger_key = _slice_key(
+                target.corp_code,
+                target.bsns_year,
+                target.reprt_code,
+                target.rcept_no,
+            )
+            if ledger_key not in ledger_pending:
+                logger.debug("Skipping ledger-complete XBRL receipt %s", request_key)
+                result.requests_skipped += 1
+                continue
             if (
                 corp.corp_code,
                 target.bsns_year,
@@ -294,6 +379,7 @@ def sync_dart_xbrl_receipt_targeted(
                 result.errors[request_key] = fetch_result.error
             elif fetch_result.no_data:
                 result.no_data_requests += 1
+                ledger.record_no_data(ledger_key)
             else:
                 if fetch_result.document is not None:
                     upsert_document = storage.upsert_dart_xbrl_documents([fetch_result.document])
@@ -307,8 +393,16 @@ def sync_dart_xbrl_receipt_targeted(
                     result.fact_upsert.errors += upsert_facts.errors
                     result.facts_upserted += upsert_facts.updated
 
+                if fetch_result.document is None and not fetch_result.facts:
+                    result.no_data_requests += 1
+                    ledger.record_no_data(ledger_key)
+
+            if ledger.pending_write_count >= LEDGER_FLUSH_EVERY:
+                ledger.flush()
+
             sleep_with_jitter(rate_limit_seconds)
 
+        ledger.flush()
         complete_run(
             storage,
             run,
@@ -319,6 +413,7 @@ def sync_dart_xbrl_receipt_targeted(
                 documents_upserted=result.documents_upserted,
                 facts_upserted=result.facts_upserted,
                 no_data_requests=result.no_data_requests,
+                slices_skipped_no_data=slices_skipped_no_data,
                 **(executor.snapshot_metrics() if executor is not None else {}),
             ),
             errors=result.errors,
@@ -327,12 +422,14 @@ def sync_dart_xbrl_receipt_targeted(
         return result
     except OpenDartKeyExhaustedError as exc:
         logger.warning("OpenDART XBRL receipt-targeted backfill stopped: %s", exc)
+        ledger.flush()
         fail_run(storage, run, exc)
         result.opendart_exhaustion_reason = "all_rate_limited"
         result.errors["pipeline"] = str(exc)
         return result
     except Exception as exc:
         logger.exception("OpenDART XBRL receipt-targeted backfill failed")
+        ledger.flush()
         fail_run(storage, run, exc)
         result.errors["pipeline"] = str(exc)
         return result

@@ -8,7 +8,7 @@ from krx_collector.adapters.opendart_share_info.provider import (
     parse_stock_count_response,
     parse_treasury_stock_response,
 )
-from krx_collector.domain.enums import Market, RunStatus, Source
+from krx_collector.domain.enums import Market, RunStatus, Source, UniverseScope
 from krx_collector.domain.models import (
     DartCapitalChangeLine,
     DartCapitalChangeResult,
@@ -23,6 +23,7 @@ from krx_collector.domain.models import (
 from krx_collector.service.sync_dart_share_info import sync_dart_share_info
 from krx_collector.util.time import now_kst
 from tests.helpers.fake_opendart_executor import FakeOpenDartExecutor
+from tests.helpers.fake_slice_storage import FakeSliceStorageMixin
 
 
 def _sample_corp() -> DartCorp:
@@ -386,8 +387,9 @@ class MockShareInfoProvider:
         )
 
 
-class MockShareInfoStorage:
+class MockShareInfoStorage(FakeSliceStorageMixin):
     def __init__(self) -> None:
+        super().__init__()
         self.runs: list[IngestionRun] = []
         self.share_count_rows: list[DartShareCountLine] = []
         self.return_rows: list[DartShareholderReturnLine] = []
@@ -633,3 +635,38 @@ def test_sync_dart_share_info_skips_existing_capital_change_request() -> None:
     assert result.requests_attempted == 3
     assert result.requests_skipped == 1
     assert provider.capital_change_calls == 0
+
+
+def test_sync_dart_share_info_persists_and_skips_each_no_data_endpoint() -> None:
+    storage = MockShareInfoStorage()
+    provider = MockShareInfoProvider()
+
+    first = sync_dart_share_info(
+        share_count_provider=provider,
+        shareholder_return_provider=provider,
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+        scope=UniverseScope.HISTORICAL,
+    )
+    treasury_calls = provider.treasury_stock_calls
+    second = sync_dart_share_info(
+        share_count_provider=provider,
+        shareholder_return_provider=provider,
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+        scope=UniverseScope.HISTORICAL,
+    )
+
+    assert first.no_data_requests == 1
+    assert provider.treasury_stock_calls == treasury_calls
+    assert second.requests_skipped >= 1
+    state = storage.slice_states[
+        (Source.OPENDART, "tesstkAcqsDspsSttus", "00126380:2025:11011")
+    ]
+    assert state.status.value == "no_data"

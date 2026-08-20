@@ -25,28 +25,30 @@ reprt_codes="${DART_HISTORICAL_REPRT_CODES:-11011,11012,11013,11014}"
 fs_divs="${DART_HISTORICAL_FS_DIVS:-CFS,OFS}"
 scope="${DART_HISTORICAL_SCOPE:-historical}"
 stages="${DART_HISTORICAL_STAGES:-financials share_info xbrl}"
+rate_limit_seconds="${DART_HISTORICAL_RATE_LIMIT_SECONDS:-0.1}"
 
 status=0
 for stage in $stages; do
   case "$stage" in
     financials)
       args=(dart sync-financials --bsns-years "$year" --reprt-codes "$reprt_codes"
-            --fs-divs "$fs_divs" --universe-scope "$scope")
+            --fs-divs "$fs_divs" --universe-scope "$scope"
+            --rate-limit-seconds "$rate_limit_seconds")
       ;;
     share_info)
       args=(dart sync-share-info --bsns-years "$year" --reprt-codes "$reprt_codes"
-            --universe-scope "$scope")
+            --universe-scope "$scope" --rate-limit-seconds "$rate_limit_seconds")
       ;;
     xbrl)
       args=(dart sync-xbrl --bsns-years "$year" --reprt-codes "$reprt_codes"
-            --universe-scope "$scope")
+            --universe-scope "$scope" --rate-limit-seconds "$rate_limit_seconds")
       ;;
     *)
       echo "unknown stage: $stage" >&2
       exit 2
       ;;
   esac
-  sdc_log "S-1 remainder: year=${year} stage=${stage} scope=${scope}"
+  sdc_log "S-1 remainder: year=${year} stage=${stage} scope=${scope} rate_limit=${rate_limit_seconds}s"
   if ! sdc_run_daily_collector opendart "${args[@]}"; then
     rc=$?
     sdc_log "S-1 remainder: year=${year} stage=${stage} FAILED rc=${rc}"

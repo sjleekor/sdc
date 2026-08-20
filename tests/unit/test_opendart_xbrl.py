@@ -7,7 +7,7 @@ from krx_collector.adapters.opendart_xbrl.provider import (
     OpenDartXbrlProvider,
     parse_xbrl_zip_response,
 )
-from krx_collector.domain.enums import Market, RunStatus, RunType, Source
+from krx_collector.domain.enums import Market, RunStatus, RunType, Source, UniverseScope
 from krx_collector.domain.models import (
     DartCorp,
     DartFinancialStatementLine,
@@ -21,6 +21,7 @@ from krx_collector.domain.models import (
 from krx_collector.service.sync_dart_xbrl import sync_dart_xbrl, sync_dart_xbrl_receipt_targeted
 from krx_collector.util.time import now_kst
 from tests.helpers.fake_opendart_executor import FakeOpenDartExecutor
+from tests.helpers.fake_slice_storage import FakeSliceStorageMixin
 
 
 def _sample_corp() -> DartCorp:
@@ -218,8 +219,9 @@ class MockXbrlProvider:
         )
 
 
-class MockXbrlStorage:
+class MockXbrlStorage(FakeSliceStorageMixin):
     def __init__(self) -> None:
+        super().__init__()
         self.runs: list[IngestionRun] = []
         self.documents: list[DartXbrlDocument] = []
         self.facts: list[DartXbrlFactLine] = []
@@ -367,6 +369,44 @@ def test_sync_dart_xbrl_force_bypasses_existing_check() -> None:
     assert result.requests_skipped == 0
     assert provider.calls == 1
     assert len(storage.documents) == 1
+
+
+def test_sync_dart_xbrl_persists_and_skips_no_data() -> None:
+    class NoDataProvider(MockXbrlProvider):
+        def fetch_xbrl(self, corp, bsns_year, reprt_code, rcept_no):
+            self.calls += 1
+            return DartXbrlResult(no_data=True)
+
+    storage = MockXbrlStorage()
+    provider = NoDataProvider()
+
+    first = sync_dart_xbrl(
+        provider=provider,
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+        scope=UniverseScope.HISTORICAL,
+    )
+    second = sync_dart_xbrl(
+        provider=provider,
+        storage=storage,
+        bsns_years=[2025],
+        reprt_codes=["11011"],
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+        scope=UniverseScope.HISTORICAL,
+    )
+
+    assert first.no_data_requests == 1
+    assert second.requests_attempted == 0
+    assert second.requests_skipped == 1
+    assert provider.calls == 1
+    state = storage.slice_states[
+        (Source.OPENDART, "fnlttXbrl", "00126380:2025:11011:20260310002820")
+    ]
+    assert state.status.value == "no_data"
 
 
 def test_sync_dart_xbrl_receipt_targeted_fetches_explicit_targets() -> None:

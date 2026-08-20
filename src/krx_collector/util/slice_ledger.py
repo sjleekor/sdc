@@ -82,7 +82,8 @@ class SliceLedger:
         source: Upstream system.
         endpoint: Endpoint name within that source. Two collectors reading the
             same source must not share one, or they collide on slice keys.
-        no_data_ttl_days: How long a ``no_data`` verdict stands.
+        no_data_ttl_days: How long a ``no_data`` verdict stands. ``None`` keeps it
+            indefinitely.
     """
 
     def __init__(
@@ -91,12 +92,17 @@ class SliceLedger:
         *,
         source: Source,
         endpoint: str,
-        no_data_ttl_days: int = DEFAULT_NO_DATA_TTL_DAYS,
+        no_data_ttl_days: int | None = DEFAULT_NO_DATA_TTL_DAYS,
     ) -> None:
         self._storage = storage
         self._source = source
         self._endpoint = endpoint
-        self._no_data_ttl_days = max(0, no_data_ttl_days)
+        # ``None`` is reserved for immutable historical slices: once an old
+        # report has answered no-data, normal reruns must not spend quota asking
+        # the identical question again. ``force=True`` still bypasses it.
+        self._no_data_ttl_days = (
+            None if no_data_ttl_days is None else max(0, no_data_ttl_days)
+        )
         self._pending_writes: list[CollectionSliceState] = []
 
     def plan(self, slice_keys: Sequence[str], *, force: bool = False) -> SlicePlan:
@@ -120,7 +126,11 @@ class SliceLedger:
         states = self._storage.get_collection_slice_states(
             self._source, self._endpoint, list(slice_keys)
         )
-        cutoff = now_kst() - timedelta(days=self._no_data_ttl_days)
+        cutoff = (
+            None
+            if self._no_data_ttl_days is None
+            else now_kst() - timedelta(days=self._no_data_ttl_days)
+        )
 
         for key in slice_keys:
             state = states.get(key)
@@ -147,7 +157,9 @@ class SliceLedger:
                 continue
 
             if state.status is SliceStatus.NO_DATA:
-                if state.updated_at is not None and state.updated_at >= cutoff:
+                if cutoff is None or (
+                    state.updated_at is not None and state.updated_at >= cutoff
+                ):
                     plan.skipped_no_data.append(key)
                 else:
                     plan.pending.append(key)

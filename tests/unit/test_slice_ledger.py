@@ -133,6 +133,17 @@ def test_a_stale_no_data_verdict_expires() -> None:
     assert plan.skipped_no_data == []
 
 
+def test_no_data_never_expires_when_ttl_is_none() -> None:
+    storage = _FakeStorage(
+        [_state("a", SliceStatus.NO_DATA, updated_at=now_kst() - timedelta(days=3650))]
+    )
+
+    plan = _ledger(storage, no_data_ttl_days=None).plan(["a"])
+
+    assert plan.pending == []
+    assert plan.skipped_no_data == ["a"]
+
+
 def test_success_never_expires_the_way_no_data_does() -> None:
     storage = _FakeStorage(
         [

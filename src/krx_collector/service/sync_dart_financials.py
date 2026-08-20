@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from krx_collector.adapters.opendart_common.client import OpenDartRequestExecutor
-from krx_collector.domain.enums import RunStatus, RunType, UniverseScope
+from krx_collector.domain.enums import RunStatus, RunType, Source, UniverseScope
 from krx_collector.domain.models import DartFinancialSyncResult, IngestionRun
 from krx_collector.ports.financials import FinancialStatementProvider
 from krx_collector.ports.storage import Storage
@@ -20,9 +20,18 @@ from krx_collector.util.pipeline import (
     should_retry_opendart_result,
     sleep_with_jitter,
 )
+from krx_collector.util.slice_ledger import DEFAULT_NO_DATA_TTL_DAYS, SliceLedger
 from krx_collector.util.time import now_kst
 
 logger = logging.getLogger(__name__)
+
+LEDGER_ENDPOINT = "fnlttSinglAcntAll"
+LEDGER_FLUSH_EVERY = 200
+
+
+def _slice_key(corp_code: str, bsns_year: int, reprt_code: str, fs_div: str) -> str:
+    """Return the stable ledger key for one financial-statement request."""
+    return f"{corp_code}:{bsns_year}:{reprt_code}:{fs_div}"
 
 
 def _get_executor(provider: object) -> OpenDartRequestExecutor | None:
@@ -45,6 +54,9 @@ def sync_dart_financial_statements(
     scope: UniverseScope = UniverseScope.CURRENT,
 ) -> DartFinancialSyncResult:
     """Synchronise OpenDART financial raw rows into local storage."""
+    no_data_ttl_days = (
+        None if scope is UniverseScope.HISTORICAL else DEFAULT_NO_DATA_TTL_DAYS
+    )
     run = IngestionRun(
         run_type=RunType.DART_FINANCIAL_SYNC,
         started_at=now_kst(),
@@ -57,6 +69,8 @@ def sync_dart_financial_statements(
             "rate_limit_seconds": rate_limit_seconds,
             "force": force,
             "universe_scope": scope.value,
+            "slice_ledger_endpoint": LEDGER_ENDPOINT,
+            "no_data_ttl_days": no_data_ttl_days,
             "allowed_year_report_pairs": (
                 [f"{year}:{code}" for year, code in sorted(allowed_year_report_pairs)]
                 if allowed_year_report_pairs is not None
@@ -73,6 +87,14 @@ def sync_dart_financial_statements(
     result = DartFinancialSyncResult()
     no_data_request_keys: list[str] = []
     skip_request_keys = set() if force else (skip_request_keys or set())
+    ledger = SliceLedger(
+        storage,
+        source=Source.OPENDART,
+        endpoint=LEDGER_ENDPOINT,
+        no_data_ttl_days=no_data_ttl_days,
+    )
+    ledger_pending: set[str] = set()
+    slices_skipped_no_data = 0
 
     try:
         targets = resolve_dart_targets(storage, scope, tickers)
@@ -92,6 +114,19 @@ def sync_dart_financial_statements(
                 corp_codes=[corp.corp_code for corp in targets],
             )
 
+        ledger_keys = [
+            _slice_key(corp.corp_code, bsns_year, reprt_code, fs_div)
+            for corp in targets
+            for bsns_year in bsns_years
+            for reprt_code in reprt_codes
+            if allowed_year_report_pairs is None
+            or (bsns_year, reprt_code) in allowed_year_report_pairs
+            for fs_div in fs_divs
+        ]
+        ledger_plan = ledger.plan(ledger_keys, force=force)
+        ledger_pending = set(ledger_plan.pending)
+        slices_skipped_no_data = len(ledger_plan.skipped_no_data)
+
         for corp in targets:
             result.targets_processed += 1
 
@@ -105,6 +140,15 @@ def sync_dart_financial_statements(
                         continue
                     for fs_div in fs_divs:
                         request_key = f"{corp.ticker}:{bsns_year}:{reprt_code}:{fs_div}"
+                        ledger_key = _slice_key(
+                            corp.corp_code, bsns_year, reprt_code, fs_div
+                        )
+                        if ledger_key not in ledger_pending:
+                            logger.debug(
+                                "Skipping ledger-complete financial request %s", request_key
+                            )
+                            result.requests_skipped += 1
+                            continue
                         if request_key in skip_request_keys:
                             logger.debug(
                                 "Skipping negative-cached financial request %s", request_key
@@ -142,6 +186,7 @@ def sync_dart_financial_statements(
                         elif fetch_result.no_data:
                             result.no_data_requests += 1
                             no_data_request_keys.append(request_key)
+                            ledger.record_no_data(ledger_key)
                         elif fetch_result.records:
                             upsert_result = storage.upsert_dart_financial_statement_raw(
                                 fetch_result.records
@@ -149,9 +194,19 @@ def sync_dart_financial_statements(
                             result.upsert.updated += upsert_result.updated
                             result.upsert.errors += upsert_result.errors
                             result.rows_upserted += upsert_result.updated
+                        else:
+                            # A successful response with no rows is the same
+                            # durable no-data verdict as OpenDART status 013.
+                            result.no_data_requests += 1
+                            no_data_request_keys.append(request_key)
+                            ledger.record_no_data(ledger_key)
+
+                        if ledger.pending_write_count >= LEDGER_FLUSH_EVERY:
+                            ledger.flush()
 
                         sleep_with_jitter(rate_limit_seconds)
 
+        ledger.flush()
         complete_run(
             storage,
             run,
@@ -161,6 +216,7 @@ def sync_dart_financial_statements(
                 requests_skipped=result.requests_skipped,
                 rows_upserted=result.rows_upserted,
                 no_data_requests=result.no_data_requests,
+                slices_skipped_no_data=slices_skipped_no_data,
                 **(executor.snapshot_metrics() if executor is not None else {}),
             ),
             errors=result.errors,
@@ -172,12 +228,14 @@ def sync_dart_financial_statements(
         return result
     except OpenDartKeyExhaustedError as exc:
         logger.warning("OpenDART financial sync stopped: %s", exc)
+        ledger.flush()
         fail_run(storage, run, exc)
         result.opendart_exhaustion_reason = "all_rate_limited"
         result.errors["pipeline"] = str(exc)
         return result
     except Exception as exc:
         logger.exception("OpenDART financial sync failed")
+        ledger.flush()
         fail_run(storage, run, exc)
         result.errors["pipeline"] = str(exc)
         return result
