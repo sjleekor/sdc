@@ -527,6 +527,16 @@ def main() -> None:
     ap.add_argument(
         "--force", action="store_true", help="allow re-running an already-written holdout result."
     )
+    ap.add_argument(
+        "--snapshot-date",
+        default=SNAPSHOT_DATE,
+        help=f"lake snapshot date (default: {SNAPSHOT_DATE})",
+    )
+    ap.add_argument(
+        "--source",
+        default=SOURCE,
+        help=f"lake source name (default: {SOURCE})",
+    )
     ap.add_argument("--memory-limit", default="6GB", help="DuckDB memory_limit (default 6GB).")
     ap.add_argument("--threads", type=int, default=4, help="DuckDB threads (default 4).")
     args = ap.parse_args()
@@ -538,8 +548,8 @@ def main() -> None:
     # the artifacts the official Phase A results and 06_grade_a_deep_dive/ rely on.
     horizon_scan_hash = load_config().config_hash
     cfg = LakeConfig(
-        snapshot_date=SNAPSHOT_DATE,
-        source=SOURCE,
+        snapshot_date=args.snapshot_date,
+        source=args.source,
         analysis_config_hash=horizon_scan_hash,
         engine=EngineOptions(
             threads=args.threads,
