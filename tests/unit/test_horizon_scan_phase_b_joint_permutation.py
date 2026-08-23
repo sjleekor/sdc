@@ -36,6 +36,15 @@ def _qualifying_frame() -> pl.DataFrame:
         {
             "event_formation_date": [date(2020, 1, 6)] * 3 + [date(2020, 1, 7)] * 3,
             "market": ["KOSPI"] * 6,
+            "ticker": ["T0", "T1", "T2", "T0", "T1", "T2"],
+            "original_rcept_no": [
+                "202001060",
+                "202001061",
+                "202001062",
+                "202001070",
+                "202001071",
+                "202001072",
+            ],
             "sue_pctrank": [0.1, 0.5, 0.9, 0.2, 0.6, 0.8],
             "excess_pctrank": [0.15, 0.45, 0.95, 0.25, 0.55, 0.85],
         }
@@ -95,6 +104,8 @@ def test_scan_sue_null_row_computes_ic_when_cohorts_survive() -> None:
                     {
                         "event_formation_date": d,
                         "market": market,
+                        "ticker": f"{market[:1]}{i}",
+                        "original_rcept_no": f"{d:%Y%m%d}{market[:1]}{i}",
                         "sue_pctrank": i / 15,
                         "excess_pctrank": i / 15,
                         "formation_session_idx": d_idx + 1,
@@ -128,6 +139,7 @@ def _seed_sue_cohort(con: duckdb.DuckDBPyConnection, days: list[date]) -> None:
     con.execute("""
         CREATE TABLE fin_sue_event (
             ticker VARCHAR, market VARCHAR, event_formation_date DATE,
+            original_rcept_no VARCHAR,
             bsns_year INTEGER, reprt_code VARCHAR,
             fin_sue DOUBLE, bucket_0_3_excess DOUBLE,
             is_primary_constant_sample BOOLEAN
@@ -137,8 +149,10 @@ def _seed_sue_cohort(con: duckdb.DuckDBPyConnection, days: list[date]) -> None:
     for d in days:
         for i in range(16):
             ticker = f"T{i}"
-            events.append((ticker, "KOSPI", d, 2020, "11013", float(i), float(i), True))
-    con.executemany("INSERT INTO fin_sue_event VALUES (?,?,?,?,?,?,?,?)", events)
+            events.append(
+                (ticker, "KOSPI", d, f"{d:%Y%m%d}{i}", 2020, "11013", float(i), float(i), True)
+            )
+    con.executemany("INSERT INTO fin_sue_event VALUES (?,?,?,?,?,?,?,?,?)", events)
 
 
 _SUE_ONLY_KWARGS = dict(

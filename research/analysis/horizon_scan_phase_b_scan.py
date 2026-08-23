@@ -63,6 +63,7 @@ from research.analysis.horizon_scan_runner import (
     apply_global_bh,
     assert_panel_join_preserves_keys,
     assert_rows_match_registry,
+    assert_unique_hypothesis_ids,
     run_registry_scan,
 )
 from research.etl.features.sue_event import _bucket_col
@@ -154,6 +155,7 @@ def run_phase_b_continuous_scan(
     min_names_for_spread: int,
     quantile_count: int,
     min_dates_per_cell: int,
+    scan_engine: str = "legacy",
 ) -> list[dict[str, Any]]:
     """Scan every ready continuous candidate cell via Phase A's own runner.
 
@@ -177,6 +179,7 @@ def run_phase_b_continuous_scan(
         min_names_for_spread=min_names_for_spread,
         quantile_count=quantile_count,
         min_dates_per_cell=min_dates_per_cell,
+        scan_engine=scan_engine,
     )
 
 
@@ -206,7 +209,8 @@ def build_event_cohort_frame_sql(
             FROM (SELECT DISTINCT trade_date FROM {calendar_view})
         )
         SELECT
-            e.ticker, e.event_formation_date, e.market, e.bsns_year, e.reprt_code,
+            e.ticker, e.original_rcept_no, e.event_formation_date, e.market,
+            e.bsns_year, e.reprt_code,
             c.session_idx AS formation_session_idx,
             e.{sue_col} AS sue_value,
             e.{excess_col} AS excess_value
@@ -217,6 +221,29 @@ def build_event_cohort_frame_sql(
           AND e.{sue_col} IS NOT NULL
           AND e.{excess_col} IS NOT NULL
     """
+
+
+def execute_event_cohort_frame(con: duckdb.DuckDBPyConnection, **kwargs: Any) -> pl.DataFrame:
+    """Fetch a SUE frame, with a deterministic fallback for old fixtures."""
+    sql = build_event_cohort_frame_sql(**kwargs)
+    try:
+        frame = con.execute(sql).pl()
+    except duckdb.BinderException as exc:
+        if "original_rcept_no" not in str(exc):
+            raise
+        frame = con.execute(sql.replace("e.original_rcept_no, ", "")).pl()
+    if "original_rcept_no" not in frame.columns:
+        frame = frame.with_columns(
+            pl.concat_str(
+                [
+                    pl.col("ticker"),
+                    pl.col("event_formation_date").cast(pl.Utf8),
+                    pl.col("market"),
+                ],
+                separator="|",
+            ).alias("original_rcept_no")
+        )
+    return frame
 
 
 def _empty_event_cohort_result(h_start: int, h_end: int) -> dict[str, Any]:
@@ -306,6 +333,9 @@ def _pool_qualifying_by_date(
     contribution floor or the rank columns themselves.
     """
     cohort_rows: list[tuple[Any, int, float, int]] = []
+    order_cols = ["formation_session_idx", "event_formation_date", "market"]
+    order_cols.extend(col for col in ("ticker", "original_rcept_no") if col in qualifying.columns)
+    qualifying = qualifying.sort(order_cols)
     by_date = qualifying.group_by(["event_formation_date"], maintain_order=True)
     for (formation_date,), grp in by_date:
         n_pooled = grp.height
@@ -318,7 +348,10 @@ def _pool_qualifying_by_date(
         rank_ic = float(np.corrcoef(sue_pct, excess_pct)[0, 1])
         if not math.isfinite(rank_ic):
             continue
-        session_idx = int(grp["formation_session_idx"][0])
+        session_values = grp["formation_session_idx"].unique().to_list()
+        if len(session_values) != 1:
+            raise ValueError("event_formation_date maps to multiple formation_session_idx values")
+        session_idx = int(session_values[0])
         cohort_rows.append((formation_date, session_idx, rank_ic, n_pooled))
     return cohort_rows
 
@@ -329,8 +362,11 @@ def _aggregate_cohort_rows(
     """IC/NW aggregate of an already-pooled cohort series — the tail half of
     §5.4 (steps 3-4), split out so bootstrap/permutation replicates can reuse
     it on a resampled ``cohort_rows`` without re-deriving the NW math."""
-    ic_arr = np.array([r[2] for r in cohort_rows], dtype=float)
-    session_arr = np.array([r[1] for r in cohort_rows], dtype=int)
+    ordered = sorted(cohort_rows, key=lambda r: (int(r[1]), r[0]))
+    ic_arr = np.array([r[2] for r in ordered], dtype=float)
+    session_arr = np.array([r[1] for r in ordered], dtype=int)
+    if session_arr.size > 1 and np.any(np.diff(session_arr) <= 0):
+        raise ValueError("cohort formation sessions must be strictly increasing")
     n_cohorts = len(cohort_rows)
     ic_mean = float(ic_arr.mean())
     ic_std = float(ic_arr.std(ddof=1)) if n_cohorts > 1 else float("nan")
@@ -372,7 +408,8 @@ def scan_event_cohort_cell(
     min_cohorts_required = max(min_event_cohorts, lag + 2)
     result = _empty_event_cohort_result(h_start, h_end)
 
-    sql = build_event_cohort_frame_sql(
+    frame = execute_event_cohort_frame(
+        con,
         event_view=event_view,
         calendar_view=calendar_view,
         sue_col=sue_col,
@@ -380,7 +417,6 @@ def scan_event_cohort_cell(
         h_end=h_end,
         sample_start=sample_start,
     )
-    frame = con.execute(sql).pl()
     if not frame.is_empty():
         frame = frame.filter(pl.col("sue_value").is_finite() & pl.col("excess_value").is_finite())
     if frame.is_empty():
@@ -572,7 +608,9 @@ def apply_combined_ab_bh(
     renamed so this combined pass never overwrites either phase's own
     single-population BH result under the same key.
     """
-    combined = apply_global_bh([*phase_a_ready_rows, *phase_b_ready_rows], q_threshold=q_threshold)
+    combined_rows = [*phase_a_ready_rows, *phase_b_ready_rows]
+    assert_unique_hypothesis_ids(combined_rows)
+    combined = apply_global_bh(combined_rows, q_threshold=q_threshold)
     renamed = []
     for row in combined:
         row = dict(row)

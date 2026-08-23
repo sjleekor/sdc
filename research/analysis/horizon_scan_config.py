@@ -12,6 +12,8 @@ from typing import Any
 import yaml
 
 CONFIG_PATH = Path(__file__).with_name("horizon_scan_config.yaml")
+SCAN_ENGINES = ("legacy", "polars_native_v1")
+DEFAULT_SCAN_ENGINE = "polars_native_v1"
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,17 @@ def bucket_primary_cells(family: dict[str, Any], buckets: list[list[int]]) -> li
 
 
 def _canonical_hash(raw: dict[str, Any]) -> str:
+    # The kernel is a runtime implementation choice, not a statistical
+    # contract. Keeping it out of the config hash lets legacy/native parity
+    # runs use the same replicate seeds and permutation mappings while the
+    # selected engine is still recorded in run_spec/checkpoint metadata.
+    hash_raw = dict(raw)
+    execution = raw.get("execution")
+    if isinstance(execution, dict) and "scan_engine" in execution:
+        hash_raw["execution"] = {
+            key: value for key, value in execution.items() if key != "scan_engine"
+        }
+
     def jsonable(value: Any) -> Any:
         if isinstance(value, (date, datetime)):
             return value.isoformat()
@@ -67,9 +80,15 @@ def _canonical_hash(raw: dict[str, Any]) -> str:
         return value
 
     encoded = json.dumps(
-        jsonable(raw), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        jsonable(hash_raw), ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def validate_scan_engine(scan_engine: str) -> str:
+    if scan_engine not in SCAN_ENGINES:
+        raise ValueError(f"unknown scan engine: {scan_engine!r}; expected one of {SCAN_ENGINES}")
+    return scan_engine
 
 
 _PHASE_A_FIXED_PROTOCOL_VALUES = {

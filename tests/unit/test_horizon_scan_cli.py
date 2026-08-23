@@ -35,6 +35,7 @@ def test_scan_kwargs_from_config_reads_the_real_config() -> None:
     assert kwargs["min_names_for_spread"] == int(config.raw["stats"]["min_names_for_spread"])
     assert kwargs["quantile_count"] == int(config.raw["stats"]["quantile_count"])
     assert kwargs["min_dates_per_cell"] == int(config.raw["stats"]["min_dates_per_cell"])
+    assert kwargs["scan_engine"] == "polars_native_v1"
 
 
 def test_delay_gate_required_for_cumulative_horizons() -> None:

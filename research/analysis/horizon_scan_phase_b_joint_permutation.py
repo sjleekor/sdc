@@ -33,6 +33,7 @@ does).
 from __future__ import annotations
 
 import math
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,12 @@ import duckdb
 import numpy as np
 import polars as pl
 
+from research.analysis.horizon_scan_mapping import (
+    JOINT_CS_MAPPING_CONTRACT,
+    apply_group_permutation,
+    build_and_apply_group_permutation,
+    build_group_permutation_mapping,
+)
 from research.analysis.horizon_scan_permutation import (
     _append_checkpoint,
     _load_checkpoint,
@@ -53,9 +60,9 @@ from research.analysis.horizon_scan_phase_b_scan import (
     _aggregate_cohort_rows,
     _pool_cohort_ranks,
     _pool_qualifying_by_date,
-    build_event_cohort_frame_sql,
+    execute_event_cohort_frame,
 )
-from research.analysis.horizon_scan_runner import apply_global_bh
+from research.analysis.horizon_scan_runner import apply_global_bh, assert_unique_hypothesis_ids
 from research.etl.metrics import choose_nw_lag
 
 
@@ -70,9 +77,19 @@ def _permute_qualifying_sue_ranks(qualifying: pl.DataFrame, *, seed: int) -> pl.
     real ``qualifying`` frame (from ``_pool_cohort_ranks``) is fetched once
     and reused across every replicate.
     """
+    required = {"event_formation_date", "market", "ticker", "original_rcept_no"}
+    missing = sorted(required - set(qualifying.columns))
+    if missing:
+        raise ValueError(f"SUE permutation frame is missing event grain columns: {missing}")
+    canonical = qualifying
+    grain = ["event_formation_date", "market", "ticker", "original_rcept_no"]
+    canonical = canonical.sort(grain)
+    if canonical.select(grain).is_duplicated().any():
+        raise ValueError("SUE event grain key is duplicated")
+
     rng = np.random.default_rng(seed)
     parts = []
-    for _, grp in qualifying.group_by(["event_formation_date", "market"], maintain_order=True):
+    for _, grp in canonical.group_by(["event_formation_date", "market"], maintain_order=True):
         shuffled = grp["sue_pctrank"].to_numpy()[rng.permutation(grp.height)]
         parts.append(grp.with_columns(pl.Series("sue_pctrank", shuffled)))
     return pl.concat(parts, how="vertical")
@@ -112,6 +129,127 @@ def _scan_sue_null_row(
     return row
 
 
+def validate_reused_phase_a_mapping_hashes(
+    frame: pl.DataFrame,
+    phase_a_cell_stats: list[dict[str, Any]],
+    *,
+    config_hash: str,
+    mapping_contract_version: str,
+) -> dict[int, tuple[dict[tuple[Any, Any], np.ndarray], str]]:
+    """Check A/B key-set identity before any Phase B null scan starts."""
+    mappings_by_replicate: dict[int, tuple[dict[tuple[Any, Any], np.ndarray], str]] = {}
+    expected = {
+        int(row["replicate"]): row["mapping_hash"]
+        for row in phase_a_cell_stats
+        if row.get("mapping_hash") is not None
+    }
+    for replicate, expected_hash in sorted(expected.items()):
+        mapping, actual_hash = build_group_permutation_mapping(
+            frame,
+            replicate_index=replicate,
+            config_hash=config_hash,
+            mapping_contract_version=mapping_contract_version,
+        )
+        if actual_hash != expected_hash:
+            raise ValueError(
+                f"Phase A/B mapping_hash mismatch for replicate {replicate}: "
+                f"{expected_hash!r} != {actual_hash!r}"
+            )
+        mappings_by_replicate[replicate] = (mapping, actual_hash)
+    return mappings_by_replicate
+
+
+def _compute_combined_replicate(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    replicate: int,
+    base_frame: pl.DataFrame | None,
+    combined_continuous_registry: list[dict[str, Any]],
+    ready_sue_cells: list[dict[str, Any]],
+    sue_qualifying_by_hid: dict[str, pl.DataFrame | None],
+    reused_rows: list[dict[str, Any]],
+    config_hash: str,
+    panel_view: str,
+    sample_start: str,
+    min_names: int,
+    min_names_for_spread: int,
+    quantile_count: int,
+    min_dates_per_cell: int,
+    min_events_per_cohort_total: int,
+    q_threshold: float,
+    scan_engine: str,
+    mapping_contract_version: str,
+    reused_mapping: tuple[dict[tuple[Any, Any], np.ndarray], str] | None = None,
+) -> dict[str, Any]:
+    continuous_rows: list[dict[str, Any]] = list(reused_rows)
+    seed = derive_replicate_seed(
+        placebo_kind="combined_cross_sectional", replicate_index=replicate, config_hash=config_hash
+    )
+    if base_frame is not None:
+        feature_cols = sorted({hyp["feature"] for hyp in combined_continuous_registry})
+        if mapping_contract_version == JOINT_CS_MAPPING_CONTRACT:
+            if reused_mapping is None:
+                permuted, mapping_hash = build_and_apply_group_permutation(
+                    base_frame,
+                    permute_cols=feature_cols,
+                    replicate_index=replicate,
+                    config_hash=config_hash,
+                    mapping_contract_version=mapping_contract_version,
+                )
+            else:
+                mapping, mapping_hash = reused_mapping
+                permuted = apply_group_permutation(
+                    base_frame, permute_cols=feature_cols, mappings=mapping
+                )
+        elif mapping_contract_version == "v1":
+            permuted = permute_within_groups(
+                base_frame,
+                group_cols=["trade_date", "market"],
+                permute_cols=feature_cols,
+                seed=seed,
+            )
+            mapping_hash = None
+        else:
+            raise ValueError(f"unknown mapping contract: {mapping_contract_version!r}")
+        continuous_rows = _scan_registry_once(
+            con,
+            combined_continuous_registry,
+            panel_view=panel_view,
+            sample_start=sample_start,
+            min_names=min_names,
+            min_names_for_spread=min_names_for_spread,
+            quantile_count=quantile_count,
+            min_dates_per_cell=min_dates_per_cell,
+            scan_engine=scan_engine,
+            frame=permuted,
+        )
+    else:
+        mapping_hash = None
+
+    sue_rows = [
+        _scan_sue_null_row(
+            cell,
+            sue_qualifying_by_hid.get(cell["hypothesis_id"]),
+            seed=derive_replicate_seed(
+                placebo_kind=f"combined_sue_rank_permutation:{cell['hypothesis_id']}",
+                replicate_index=replicate,
+                config_hash=config_hash,
+            ),
+            min_events_per_cohort_total=min_events_per_cohort_total,
+        )
+        for cell in ready_sue_cells
+    ]
+    combined_rows = continuous_rows + sue_rows
+    assert_unique_hypothesis_ids(combined_rows)
+    bh_rows = apply_global_bh(combined_rows, q_threshold=q_threshold)
+    return {
+        "replicate": replicate,
+        "seed": seed,
+        "mapping_hash": mapping_hash,
+        "n_discoveries": sum(1 for r in bh_rows if r["primary_discovery"]),
+    }
+
+
 def run_combined_cross_sectional_permutation(
     con: duckdb.DuckDBPyConnection,
     *,
@@ -131,6 +269,11 @@ def run_combined_cross_sectional_permutation(
     event_view: str = "fin_sue_event",
     calendar_view: str = "daily_ohlcv",
     checkpoint_path: Path | None = None,
+    scan_engine: str = "legacy",
+    mapping_contract_version: str = "v1",
+    checkpoint_fingerprint: dict[str, Any] | None = None,
+    reused_phase_a_cell_stats: list[dict[str, Any]] | None = None,
+    workers: int = 1,
 ) -> dict[str, Any]:
     """§6 B-8: ``n_replicates`` joint permutations across
     ``combined_continuous_registry`` (Phase A's 75 + Phase B's ready
@@ -142,6 +285,14 @@ def run_combined_cross_sectional_permutation(
     Resume-safe via ``checkpoint_path`` (JSONL, one row per replicate),
     same convention as every other null experiment in this repo.
     """
+    if reused_phase_a_cell_stats is not None:
+        phase_a_ids = {row["hypothesis_id"] for row in reused_phase_a_cell_stats}
+        combined_ids = {row["hypothesis_id"] for row in combined_continuous_registry}
+        if not phase_a_ids.issubset(combined_ids):
+            raise ValueError("reused Phase A permutation rows are outside the combined registry")
+        combined_continuous_registry = [
+            row for row in combined_continuous_registry if row["hypothesis_id"] not in phase_a_ids
+        ]
     feature_cols = sorted({hyp["feature"] for hyp in combined_continuous_registry})
     target_cols = _registry_target_columns(combined_continuous_registry)
     base_frame = (
@@ -154,10 +305,19 @@ def run_combined_cross_sectional_permutation(
         if combined_continuous_registry
         else None
     )
+    reused_mappings_by_replicate: dict[int, tuple[dict[tuple[Any, Any], np.ndarray], str]] = {}
+    if reused_phase_a_cell_stats is not None and base_frame is not None:
+        reused_mappings_by_replicate = validate_reused_phase_a_mapping_hashes(
+            base_frame,
+            reused_phase_a_cell_stats,
+            config_hash=config_hash,
+            mapping_contract_version=mapping_contract_version,
+        )
 
     sue_qualifying_by_hid: dict[str, pl.DataFrame | None] = {}
     for cell in ready_sue_cells:
-        sql = build_event_cohort_frame_sql(
+        frame = execute_event_cohort_frame(
+            con,
             event_view=event_view,
             calendar_view=calendar_view,
             sue_col=cell["feature"],
@@ -165,7 +325,6 @@ def run_combined_cross_sectional_permutation(
             h_end=cell["h_end"],
             sample_start=sample_start,
         )
-        frame = con.execute(sql).pl()
         if not frame.is_empty():
             frame = frame.filter(
                 pl.col("sue_value").is_finite() & pl.col("excess_value").is_finite()
@@ -177,57 +336,58 @@ def run_combined_cross_sectional_permutation(
         )
         sue_qualifying_by_hid[cell["hypothesis_id"]] = pooled["qualifying"]
 
-    checkpoint = _load_checkpoint(checkpoint_path)
+    checkpoint = _load_checkpoint(checkpoint_path, fingerprint=checkpoint_fingerprint)
     summaries: list[dict[str, Any]] = [checkpoint[i] for i in sorted(checkpoint)]
-    view_name = "_combined_cross_sectional_permuted_panel"
-    for i in range(n_replicates):
-        if i in checkpoint:
-            continue
-        continuous_rows: list[dict[str, Any]] = []
-        seed = derive_replicate_seed(
-            placebo_kind="combined_cross_sectional", replicate_index=i, config_hash=config_hash
+    reused_by_replicate: dict[int, list[dict[str, Any]]] = {}
+    if reused_phase_a_cell_stats is not None:
+        for row in reused_phase_a_cell_stats:
+            reused_by_replicate.setdefault(int(row["replicate"]), []).append(row)
+    if workers < 1:
+        raise ValueError("workers must be >= 1")
+    pending = [i for i in range(n_replicates) if i not in checkpoint]
+    kwargs = {
+        "base_frame": base_frame,
+        "combined_continuous_registry": combined_continuous_registry,
+        "ready_sue_cells": ready_sue_cells,
+        "sue_qualifying_by_hid": sue_qualifying_by_hid,
+        "config_hash": config_hash,
+        "panel_view": panel_view,
+        "sample_start": sample_start,
+        "min_names": min_names,
+        "min_names_for_spread": min_names_for_spread,
+        "quantile_count": quantile_count,
+        "min_dates_per_cell": min_dates_per_cell,
+        "min_events_per_cohort_total": min_events_per_cohort_total,
+        "q_threshold": q_threshold,
+        "scan_engine": scan_engine,
+        "mapping_contract_version": mapping_contract_version,
+    }
+
+    def _one(i: int) -> dict[str, Any]:
+        return _compute_combined_replicate(
+            con,
+            replicate=i,
+            reused_rows=reused_by_replicate.get(i, []),
+            reused_mapping=reused_mappings_by_replicate.get(i),
+            **kwargs,
         )
-        if base_frame is not None:
-            permuted = permute_within_groups(
-                base_frame,
-                group_cols=["trade_date", "market"],
-                permute_cols=feature_cols,
-                seed=seed,
-            )
-            con.register(view_name, permuted)
-            try:
-                continuous_rows = _scan_registry_once(
-                    con,
-                    combined_continuous_registry,
-                    panel_view=view_name,
-                    sample_start=sample_start,
-                    min_names=min_names,
-                    min_names_for_spread=min_names_for_spread,
-                    quantile_count=quantile_count,
-                    min_dates_per_cell=min_dates_per_cell,
-                )
-            finally:
-                con.unregister(view_name)
 
-        sue_rows = [
-            _scan_sue_null_row(
-                cell,
-                sue_qualifying_by_hid.get(cell["hypothesis_id"]),
-                seed=derive_replicate_seed(
-                    placebo_kind=f"combined_sue_rank_permutation:{cell['hypothesis_id']}",
-                    replicate_index=i,
-                    config_hash=config_hash,
-                ),
-                min_events_per_cohort_total=min_events_per_cohort_total,
-            )
-            for cell in ready_sue_cells
-        ]
-
-        bh_rows = apply_global_bh(continuous_rows + sue_rows, q_threshold=q_threshold)
-        n_discoveries = sum(1 for r in bh_rows if r["primary_discovery"])
-        summary = {"replicate": i, "seed": seed, "n_discoveries": n_discoveries}
-        _append_checkpoint(checkpoint_path, summary)
-        summaries.append(summary)
+    if workers == 1:
+        computed = (_one(i) for i in pending)
+        computed_rows = zip(pending, computed)
+    else:
+        # Keep the large frame in-process; Polars releases the GIL in the hot
+        # kernels and this avoids copying the frame into every process.
+        executor = ThreadPoolExecutor(max_workers=workers)
+        futures = [executor.submit(_one, i) for i in pending]
+        computed_rows = zip(pending, (future.result() for future in futures))
+    try:
+        for _replicate, summary in computed_rows:
+            _append_checkpoint(checkpoint_path, summary, fingerprint=checkpoint_fingerprint)
+            summaries.append(summary)
+    finally:
+        if workers > 1:
+            executor.shutdown(wait=True)
 
     summaries.sort(key=lambda s: s["replicate"])
     replicate_ids = {s["replicate"] for s in summaries}

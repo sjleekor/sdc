@@ -62,8 +62,25 @@ def per_date_market_rank_ic(
     date_col: str = "trade_date",
     market_col: str = "market",
     min_names: int = 2,
+    engine: str = "legacy",
 ) -> pl.DataFrame:
-    """Spearman IC at the preregistered ``(date, market)`` unit."""
+    """Spearman IC at the preregistered ``(date, market)`` unit.
+
+    ``legacy`` remains available as the parity reference.  The native engine
+    uses Polars' Rust expression path and fixes output order for downstream
+    gap-aware HAC calculations.
+    """
+    if engine == "polars_native_v1":
+        return _per_date_market_rank_ic_native(
+            df,
+            pred_col=pred_col,
+            realized_col=realized_col,
+            date_col=date_col,
+            market_col=market_col,
+            min_names=min_names,
+        )
+    if engine != "legacy":
+        raise ValueError(f"unknown rank IC engine: {engine!r}")
     clean = df.select([date_col, market_col, pred_col, realized_col]).drop_nulls()
     clean = clean.filter(pl.col(pred_col).is_finite() & pl.col(realized_col).is_finite())
     out: list[tuple[object, object, float, int]] = []
@@ -87,6 +104,50 @@ def per_date_market_rank_ic(
             "n": pl.Int64,
         },
         orient="row",
+    )
+
+
+def _per_date_market_rank_ic_native(
+    df: pl.DataFrame,
+    *,
+    pred_col: str,
+    realized_col: str,
+    date_col: str,
+    market_col: str,
+    min_names: int,
+) -> pl.DataFrame:
+    """Native date×market Spearman implementation used by Horizon Scan.
+
+    Polars' Spearman correlation uses average ranks for ties, matching
+    :func:`_spearman`.  Null/non-finite filtering is deliberately kept before
+    the group-by so the native and legacy paths have the same eligibility
+    contract.
+    """
+    clean = df.select([date_col, market_col, pred_col, realized_col]).drop_nulls()
+    clean = clean.filter(pl.col(pred_col).is_finite() & pl.col(realized_col).is_finite())
+    if clean.is_empty():
+        return pl.DataFrame(
+            {
+                date_col: pl.Series([], dtype=df.schema[date_col]),
+                market_col: pl.Series([], dtype=df.schema[market_col]),
+                "rank_ic": pl.Series([], dtype=pl.Float64),
+                "n": pl.Series([], dtype=pl.Int64),
+            }
+        )
+    return (
+        clean.group_by([date_col, market_col])
+        .agg(
+            pl.corr(pred_col, realized_col, method="spearman").alias("rank_ic"),
+            pl.len().alias("n"),
+        )
+        .filter(pl.col("n") >= min_names)
+        # The legacy path keeps degenerate groups as a row with NaN and lets
+        # callers decide whether to drop it. Match that contract instead of
+        # silently changing the valid date×market population in the native
+        # path (Polars represents the same correlation as null).
+        .with_columns(pl.col("rank_ic").fill_null(float("nan")))
+        .with_columns(pl.col("n").cast(pl.Int64))
+        .sort([date_col, market_col])
     )
 
 
@@ -208,7 +269,13 @@ def newey_west_tstat(
     session_index: np.ndarray | list[int],
     lag: int,
 ) -> float:
-    """HAC t-statistic using actual KRX session distances, not array offsets."""
+    """Gap-aware HAC t-statistic using a vectorized pair lookup.
+
+    The input contract is intentionally strict: after finite-value filtering,
+    session indices must be strictly increasing.  A duplicate session means a
+    daily/cohort grain violation and must not be silently folded into the
+    covariance estimate.
+    """
     x = np.asarray(values, dtype=float)
     idx = np.asarray(session_index, dtype=int)
     mask = np.isfinite(x) & np.isfinite(idx)
@@ -216,17 +283,14 @@ def newey_west_tstat(
     n = x.size
     if n < 2:
         return float("nan")
+    _validate_session_index(idx)
     mean = float(x.mean())
     centered = x - mean
     gamma0 = float(np.dot(centered, centered) / n)
     long_run = gamma0
-    if lag > 0:
-        for i in range(n):
-            distances = idx[i + 1 :] - idx[i]
-            valid = (distances > 0) & (distances <= lag)
-            for distance, product in zip(distances[valid], centered[i] * centered[i + 1 :][valid]):
-                gamma = float(product / n)
-                long_run += 2.0 * (1.0 - distance / (lag + 1.0)) * gamma
+    for distance, left, right in _hac_pair_indices(idx, lag):
+        gamma = float(np.dot(centered[left], centered[right]) / n)
+        long_run += 2.0 * (1.0 - distance / (lag + 1.0)) * gamma
     variance_mean = long_run / n
     if variance_mean <= 0 or not np.isfinite(variance_mean):
         return float("nan")
@@ -242,14 +306,57 @@ def n_hac_pairs(session_index: np.ndarray | list[int], lag: int) -> int:
     """
     idx = np.asarray(session_index, dtype=int)
     idx = idx[np.isfinite(idx)]
-    idx.sort()
-    if lag <= 0 or idx.size < 2:
+    if idx.size < 2:
         return 0
-    total = 0
-    for i in range(idx.size):
-        distances = idx[i + 1 :] - idx[i]
-        total += int(np.count_nonzero((distances > 0) & (distances <= lag)))
-    return total
+    _validate_session_index(idx)
+    return sum(int(left.size) for _distance, left, _right in _hac_pair_indices(idx, lag))
+
+
+def newey_west_tstat_legacy(
+    values: np.ndarray | list[float], session_index: np.ndarray | list[int], lag: int
+) -> float:
+    """Reference implementation retained for randomized parity tests."""
+    x = np.asarray(values, dtype=float)
+    idx = np.asarray(session_index, dtype=int)
+    mask = np.isfinite(x) & np.isfinite(idx)
+    x, idx = x[mask], idx[mask]
+    n = x.size
+    if n < 2:
+        return float("nan")
+    _validate_session_index(idx)
+    mean = float(x.mean())
+    centered = x - mean
+    long_run = float(np.dot(centered, centered) / n)
+    if lag > 0:
+        for i in range(n):
+            distances = idx[i + 1 :] - idx[i]
+            valid = (distances > 0) & (distances <= lag)
+            for distance, product in zip(distances[valid], centered[i] * centered[i + 1 :][valid]):
+                long_run += 2.0 * (1.0 - distance / (lag + 1.0)) * float(product / n)
+    variance_mean = long_run / n
+    if variance_mean <= 0 or not np.isfinite(variance_mean):
+        return float("nan")
+    return mean / float(np.sqrt(variance_mean))
+
+
+def _validate_session_index(idx: np.ndarray) -> None:
+    if idx.ndim != 1:
+        raise ValueError("session_index must be one-dimensional")
+    if idx.size > 1 and np.any(np.diff(idx) <= 0):
+        raise ValueError("session_index must be strictly increasing and duplicate-free")
+
+
+def _hac_pair_indices(idx: np.ndarray, lag: int) -> list[tuple[int, np.ndarray, np.ndarray]]:
+    """Return the exact pair positions shared by t-stat and diagnostics."""
+    if lag <= 0 or idx.size < 2:
+        return []
+    pairs: list[tuple[int, np.ndarray, np.ndarray]] = []
+    for distance in range(1, lag + 1):
+        left = np.arange(idx.size, dtype=np.intp)
+        right = np.searchsorted(idx, idx + distance, side="left")
+        valid = (right < idx.size) & (idx[right.clip(max=idx.size - 1)] == idx + distance)
+        pairs.append((distance, left[valid], right[valid]))
+    return [(distance, left, right) for distance, left, right in pairs if left.size]
 
 
 def exact_binomial_sign_test_p(n_success: int, n_trials: int) -> float:

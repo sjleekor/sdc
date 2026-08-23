@@ -7,6 +7,8 @@ from datetime import date, timedelta
 import duckdb
 import polars as pl
 import pytest
+import research.analysis.horizon_scan_permutation as permutation
+from research.analysis.horizon_scan_checkpoint import build_checkpoint_fingerprint
 from research.analysis.horizon_scan_permutation import (
     run_cross_sectional_permutation,
     run_lookahead_canary,
@@ -207,6 +209,129 @@ def test_run_cross_sectional_permutation_resumes_from_checkpoint_without_recompu
     assert {row["replicate"] for row in persisted} == {0, 1}
 
 
+def test_cross_sectional_directory_checkpoint_is_worker_count_invariant(tmp_path) -> None:
+    registry = _cross_sectional_registry()
+    fingerprint = build_checkpoint_fingerprint(
+        registry=registry,
+        a0_manifest_hash="a0",
+        readiness_population_hash=None,
+        smoke_family=None,
+        requested_replicates=3,
+        include_holdout=False,
+        holdout_start=None,
+        scan_engine="legacy",
+        row_order_contract="row-v1",
+        sue_nw_order_contract="sue-nw-v2",
+        sue_permutation_order_contract="sue-rank-v2",
+        mapping_contract_version="joint_cs_v2",
+        analysis_kernel_hash="kernel",
+        duckdb_version="duckdb",
+        polars_version="polars",
+        numpy_version="numpy",
+    )
+    kwargs = dict(
+        panel_view="analysis_panel",
+        primary_registry=registry,
+        real_discovery_count=1,
+        config_hash="workers",
+        sample_start="2024-01-01",
+        min_names=2,
+        min_names_for_spread=2,
+        quantile_count=5,
+        min_dates_per_cell=5,
+        n_replicates=3,
+        mapping_contract_version="joint_cs_v2",
+        collect_cell_stats=True,
+        checkpoint_path=tmp_path / "cross-sectional",
+        checkpoint_fingerprint=fingerprint,
+    )
+    con_one = duckdb.connect()
+    _seed_replicate_panel(con_one, n_sessions=30)
+    one = run_cross_sectional_permutation(
+        con=con_one, workers=1, **{**kwargs, "checkpoint_path": tmp_path / "one"}
+    )
+
+    con_two = duckdb.connect()
+    _seed_replicate_panel(con_two, n_sessions=30)
+    two = run_cross_sectional_permutation(
+        con=con_two, workers=2, **{**kwargs, "checkpoint_path": tmp_path / "two"}
+    )
+
+    assert one["replicate_summaries"] == two["replicate_summaries"]
+    assert one["cell_stats"] == two["cell_stats"]
+
+
+def test_cross_sectional_process_path_uses_positional_initializer_and_no_base_frame_pickle(
+    monkeypatch,
+):
+    con = duckdb.connect()
+    _seed_replicate_panel(con, n_sessions=30)
+    registry = _cross_sectional_registry()
+    base_frame = permutation.fetch_broad_common_survivor_frame(
+        con,
+        panel_view="analysis_panel",
+        extra_cols=[
+            "feat_a",
+            "feat_b",
+            "y_rank_5d",
+            "raw_label_5d",
+            "label_ok_5d",
+            "y_rank_bucket_0_5d",
+            "raw_bucket_label_0_5d",
+            "bucket_ok_0_5d",
+        ],
+        sample_start="2024-01-01",
+    )
+
+    class _Future:
+        def __init__(self, value):
+            self._value = value
+
+        def result(self):
+            return self._value
+
+    class _FakeProcessPool:
+        def __init__(self, *, max_workers, initializer, initargs):
+            assert max_workers == 2
+            initializer(*initargs)
+
+        def submit(self, function, replicate, kwargs):
+            assert "base_frame" not in kwargs
+            return _Future(function(replicate, kwargs))
+
+        def shutdown(self, *, wait):
+            assert wait is True
+
+    def _fake_initializer(lake, panel_view, primary_registry, sample_start):
+        assert lake == "synthetic-lake"
+        assert panel_view == "analysis_panel"
+        assert primary_registry == registry
+        assert sample_start == "2024-01-01"
+        permutation._CROSS_PROCESS_CONTEXT.clear()
+        permutation._CROSS_PROCESS_CONTEXT.update({"con": con, "frame": base_frame})
+
+    monkeypatch.setattr(permutation, "ProcessPoolExecutor", _FakeProcessPool)
+    monkeypatch.setattr(permutation, "_init_cross_sectional_process_worker", _fake_initializer)
+
+    result = permutation.run_cross_sectional_permutation(
+        con=con,
+        panel_view="analysis_panel",
+        primary_registry=registry,
+        real_discovery_count=0,
+        config_hash="process-path",
+        sample_start="2024-01-01",
+        min_names=2,
+        min_names_for_spread=2,
+        quantile_count=5,
+        min_dates_per_cell=5,
+        n_replicates=1,
+        workers=2,
+        worker_lake="synthetic-lake",
+    )
+
+    assert result["n_replicates"] == 1
+
+
 def test_run_temporal_placebo_is_complete_and_deterministic() -> None:
     con = duckdb.connect()
     _seed_replicate_panel(con, n_sessions=90)
@@ -245,8 +370,11 @@ def test_run_temporal_placebo_is_complete_and_deterministic() -> None:
     )
     result_a = run_temporal_placebo(**kwargs)
     result_b = run_temporal_placebo(**kwargs)
+    result_parallel = run_temporal_placebo(**{**kwargs, "workers": 2})
     assert result_a["replicate_meta"] == result_b["replicate_meta"]
+    assert result_a["replicate_meta"] == result_parallel["replicate_meta"]
     assert result_a["per_cell"] == result_b["per_cell"]
+    assert result_a["per_cell"] == result_parallel["per_cell"]
     assert result_a["per_cell"][hid]["p_temporal_nw"] is not None
     assert 0 < result_a["per_cell"][hid]["p_temporal_nw"] <= 1.0
     for meta in result_a["replicate_meta"]:
@@ -305,9 +433,7 @@ def test_run_lookahead_canary_passes_on_the_constructed_invariant() -> None:
 def test_run_lookahead_canary_fails_when_label_does_not_track_the_feature() -> None:
     con = duckdb.connect()
     _seed_replicate_panel(con, n_sessions=10, n_tickers=6)
-    con.execute(
-        "UPDATE analysis_panel SET raw_label_1d = -raw_label_1d, y_rank_1d = -y_rank_1d"
-    )
+    con.execute("UPDATE analysis_panel SET raw_label_1d = -raw_label_1d, y_rank_1d = -y_rank_1d")
     result = run_lookahead_canary(
         con,
         panel_view="analysis_panel",

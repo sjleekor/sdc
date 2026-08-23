@@ -24,9 +24,14 @@ from typing import Any
 
 import duckdb
 
-from research.analysis.horizon_scan_config import HorizonScanConfig, bucket_primary_cells
+from research.analysis.horizon_scan_config import (
+    DEFAULT_SCAN_ENGINE,
+    HorizonScanConfig,
+    bucket_primary_cells,
+)
 from research.analysis.horizon_scan_run_spec import (
     PreflightError,
+    analysis_kernel_hash,
     git_metadata,
     package_versions,
     phase_a_code_hash,
@@ -260,6 +265,20 @@ def build_phase_b_run_spec(
         "payout_feature_formula_version": PAYOUT_FEATURE_FORMULA_VERSION,
         "fin_feature_formula_version": FIN_FEATURE_FORMULA_VERSION,
         "phase_b_code_hash": code_hash,
+        "analysis_kernel_hash": analysis_kernel_hash(repo_root),
+        "scan_engine": DEFAULT_SCAN_ENGINE,
+        "row_order_contract": config.raw.get("execution", {}).get(
+            "row_order_contract", "legacy_input_order"
+        ),
+        "sue_nw_order_contract": config.raw.get("execution", {}).get(
+            "sue_nw_order_contract", "legacy"
+        ),
+        "sue_permutation_order_contract": config.raw.get("execution", {}).get(
+            "sue_permutation_order_contract", "legacy"
+        ),
+        "mapping_contract_version": config.raw.get("execution", {}).get(
+            "mapping_contract_version", "v1"
+        ),
         "git_commit": git["git_commit"],
         "git_dirty": git["git_dirty"],
         "run_id": f"{started_at[:19].replace(':', '').replace('-', '')}-{code_hash[:8]}",
@@ -294,6 +313,7 @@ PHASE_B_CONTENT_HASH_EXCLUDE_NAMES = frozenset(
         "_SUCCESS.json",
         "phase_b_readiness_freeze.json",
         "03b_horizon_scan_results.md",
+        "timings.json",
     }
 )
 

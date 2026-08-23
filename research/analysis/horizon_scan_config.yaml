@@ -41,6 +41,10 @@ execution:
   lag1_basis: prior_valid_session
   price_default_official_variant: native_t
   flow_unverified_same_day_variant: lag1
+  row_order_contract: feature_frame_trade_date_market_ticker_v1
+  sue_nw_order_contract: sue_nw_sorted_v2
+  sue_permutation_order_contract: sue_rank_canonical_v2
+  mapping_contract_version: joint_cs_v2
 discovery:
   # Phase A §2.3 fixes the global-BH population to this exact (universe,
   # sample_kind) coordinate; tradable/available are robustness gates, not

@@ -180,8 +180,7 @@ def build_broad_quantile_segment_sql(
         + [f"c.cut_{i} IS NULL" for i in range(n_labels - 1)]
     )
     case_lines = [
-        f"WHEN p.{value_col} <= c.cut_{i} THEN '{label}'"
-        for i, label in enumerate(labels[:-1])
+        f"WHEN p.{value_col} <= c.cut_{i} THEN '{label}'" for i, label in enumerate(labels[:-1])
     ]
     case_sql = "\n                ".join(case_lines)
     return f"""
@@ -281,12 +280,10 @@ def resolve_horizon_eligible_end(
     ``bucket_end_date_{h1}_{h2}d`` for a bucket — the available sample's tail
     is horizon-specific (§A-1's ``2025_04_holdout``/``2025_04_...`` period).
     """
-    (result,) = con.execute(
-        f"""
+    (result,) = con.execute(f"""
         SELECT max(trade_date) FROM {panel_view}
         WHERE {end_date_col} IS NOT NULL AND {end_date_col} < DATE '{holdout_start}'
-        """
-    ).fetchone()
+        """).fetchone()
     if result is None:
         raise RuntimeError(f"no row has a pre-holdout {end_date_col}; cannot resolve period end")
     return result
@@ -308,8 +305,7 @@ def family_coverage_stats(
     formation conditions (§3.2/§3.3) the caller wants a denominator over —
     this function only adds the feature/label numerators.
     """
-    row = con.execute(
-        f"""
+    row = con.execute(f"""
         SELECT
             count(*) AS n_formation,
             count(*) FILTER (
@@ -319,8 +315,7 @@ def family_coverage_stats(
             min(trade_date) AS effective_sample_start,
             max(trade_date) AS effective_sample_end
         FROM {formation_view}
-        """
-    ).fetchone()
+        """).fetchone()
     n_formation, n_feature_finite, n_label_valid, effective_start, effective_end = row
     return {
         "n_formation": n_formation,
@@ -346,8 +341,7 @@ def assert_lag1_matches_prior_valid_session(
     """A0 §A-1 test: ``lag1[t]`` must equal ``native``'s prior *valid* session,
     per ticker — never a raw calendar-day shift (halts must be skipped).
     """
-    (mismatches,) = con.execute(
-        f"""
+    (mismatches,) = con.execute(f"""
         WITH ordered AS (
             SELECT ticker, market, {session_col},
                    {lag1_col} AS lag1_value,
@@ -360,8 +354,7 @@ def assert_lag1_matches_prior_valid_session(
         SELECT count(*) FROM ordered
         WHERE lag1_value IS NOT NULL AND prior_native IS NOT NULL
           AND abs(lag1_value - prior_native) > {tolerance}
-        """
-    ).fetchone()
+        """).fetchone()
     if mismatches:
         raise RuntimeError(
             f"{lag1_col} does not equal {native_col}'s prior valid session for "
@@ -441,6 +434,66 @@ def build_formation_sql(
     """
 
 
+def _filter_formation_frame(
+    frame: pl.DataFrame,
+    *,
+    feature_col: str,
+    scan_type: str,
+    h_start: int,
+    h_end: int,
+    universe: str,
+    sample_kind: str,
+    sample_start: str,
+) -> pl.DataFrame:
+    """Apply the formation SQL contract to a feature-wide fetched frame."""
+    rank_col, raw_col, ok_col = _target_columns(scan_type=scan_type, h_start=h_start, h_end=h_end)
+    if universe not in _UNIVERSE_FLAG_COLUMN:
+        raise ValueError(f"unknown universe {universe!r}")
+    required = {
+        "trade_date",
+        "ticker",
+        "market",
+        "formation_session_idx",
+        "ca_mask",
+        feature_col,
+        rank_col,
+        raw_col,
+        ok_col,
+        _UNIVERSE_FLAG_COLUMN[universe],
+    }
+    if sample_kind == "common_survivor":
+        required.update({"common_formation_120d", "common_survivor_120d"})
+    elif sample_kind != "available":
+        raise ValueError(f"unknown sample_kind {sample_kind!r}")
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError(f"formation frame is missing columns: {missing}")
+    filtered = frame.filter(
+        (pl.col("trade_date") >= pl.lit(sample_start).str.to_date())
+        & pl.col(_UNIVERSE_FLAG_COLUMN[universe]).fill_null(False)
+        & pl.col(feature_col).is_not_null()
+        & pl.col(feature_col).is_finite()
+        & ~pl.col("ca_mask").fill_null(True)
+        & pl.col(ok_col).fill_null(False)
+    )
+    if sample_kind == "common_survivor":
+        filtered = filtered.filter(
+            pl.col("common_formation_120d").fill_null(False)
+            & pl.col("common_survivor_120d").fill_null(False)
+        )
+    return filtered.select(
+        [
+            "trade_date",
+            "ticker",
+            "market",
+            "formation_session_idx",
+            pl.col(feature_col).alias("feature_value"),
+            pl.col(rank_col).alias("target_rank"),
+            pl.col(raw_col).alias("target_raw"),
+        ]
+    ).sort(["trade_date", "market", "ticker"])
+
+
 def scan_cell(
     con: duckdb.DuckDBPyConnection,
     *,
@@ -459,6 +512,8 @@ def scan_cell(
     expected_sign: str | None = None,
     extra_where: str | None = None,
     compute_spread: bool = True,
+    scan_engine: str = "legacy",
+    formation_frame: pl.DataFrame | None = None,
 ) -> dict[str, Any]:
     """One (feature, horizon/bucket, universe, sample_kind) cell's IC/NW/spread.
 
@@ -506,18 +561,32 @@ def scan_cell(
         "status": "insufficient",
         "status_reason": None,
     }
-    formation_sql = build_formation_sql(
-        panel_view=panel_view,
-        feature_col=feature_col,
-        scan_type=scan_type,
-        h_start=h_start,
-        h_end=h_end,
-        universe=universe,
-        sample_kind=sample_kind,
-        sample_start=sample_start,
-        extra_where=extra_where,
-    )
-    frame = con.execute(formation_sql).pl()
+    if formation_frame is not None:
+        if extra_where:
+            raise ValueError("extra_where cannot be combined with formation_frame")
+        frame = _filter_formation_frame(
+            formation_frame,
+            feature_col=feature_col,
+            scan_type=scan_type,
+            h_start=h_start,
+            h_end=h_end,
+            universe=universe,
+            sample_kind=sample_kind,
+            sample_start=sample_start,
+        )
+    else:
+        formation_sql = build_formation_sql(
+            panel_view=panel_view,
+            feature_col=feature_col,
+            scan_type=scan_type,
+            h_start=h_start,
+            h_end=h_end,
+            universe=universe,
+            sample_kind=sample_kind,
+            sample_start=sample_start,
+            extra_where=extra_where,
+        )
+        frame = con.execute(formation_sql).pl().sort(["trade_date", "market", "ticker"])
     if frame.is_empty():
         result["status_reason"] = "no_formation_rows"
         return result
@@ -525,7 +594,11 @@ def scan_cell(
     result["effective_sample_end"] = frame["trade_date"].max()
 
     market_ic = per_date_market_rank_ic(
-        frame, pred_col="feature_value", realized_col="target_rank", min_names=min_names
+        frame,
+        pred_col="feature_value",
+        realized_col="target_rank",
+        min_names=min_names,
+        engine=scan_engine,
     )
     market_ic = market_ic.filter(pl.col("rank_ic").is_finite())
     if market_ic.is_empty():
@@ -603,6 +676,15 @@ def assert_rows_match_registry(rows: list[dict[str, Any]], registry: list[dict[s
         raise ValueError("scanned rows contain duplicate hypothesis_id values")
 
 
+def assert_unique_hypothesis_ids(rows: list[dict[str, Any]]) -> None:
+    ids = [row.get("hypothesis_id") for row in rows]
+    if any(hid is None for hid in ids):
+        raise ValueError("combined BH rows must all have a hypothesis_id")
+    duplicates = sorted({hid for hid in ids if ids.count(hid) > 1})
+    if duplicates:
+        raise ValueError(f"combined BH population contains duplicate hypothesis_id: {duplicates}")
+
+
 def _aligned_ic(row: dict[str, Any]) -> float | None:
     ic = row.get("ic_mean")
     if ic is None:
@@ -656,9 +738,13 @@ def apply_global_bh(
     ordered = sorted(rows, key=lambda r: r["hypothesis_id"])
     p_for_bh = np.array(
         [
-            r["p_nw"]
-            if r.get("status") == "valid" and r.get("p_nw") is not None and math.isfinite(r["p_nw"])
-            else 1.0
+            (
+                r["p_nw"]
+                if r.get("status") == "valid"
+                and r.get("p_nw") is not None
+                and math.isfinite(r["p_nw"])
+                else 1.0
+            )
             for r in ordered
         ]
     )
@@ -713,6 +799,8 @@ def run_registry_scan(
     quantile_count: int,
     min_dates_per_cell: int,
     universe_sample_combos: tuple[tuple[str, str], ...] = UNIVERSE_SAMPLE_COMBOS,
+    scan_engine: str = "legacy",
+    reuse_formation_frames: bool = True,
 ) -> list[dict[str, Any]]:
     """Run :func:`scan_cell` for every registered hypothesis across every
     (universe, sample_kind) combo (A-2 steps 4-5) — one row per combination,
@@ -720,6 +808,70 @@ def run_registry_scan(
     computed stats so downstream stages never need to re-join back to config.
     """
     rows: list[dict[str, Any]] = []
+    if reuse_formation_frames and registry:
+        # A feature frame is only live while that feature's hypotheses are
+        # being scanned. Holding the whole registry's frames here multiplies
+        # the panel-sized allocation by the number of features.
+        hypotheses_by_feature: dict[str, list[dict[str, Any]]] = {}
+        for hyp in registry:
+            hypotheses_by_feature.setdefault(hyp["feature"], []).append(hyp)
+        for feature_registry in hypotheses_by_feature.values():
+            feature = feature_registry[0]["feature"]
+            target_cols = sorted(
+                {
+                    col
+                    for hyp in feature_registry
+                    for col in _target_columns(
+                        scan_type=hyp["scan_type"], h_start=hyp["h_start"], h_end=hyp["h_end"]
+                    )
+                }
+            )
+            cols = [
+                "trade_date",
+                "ticker",
+                "market",
+                "formation_session_idx",
+                "ca_mask",
+                "in_broad",
+                "in_tradable",
+                "common_formation_120d",
+                "common_survivor_120d",
+                feature,
+                *target_cols,
+            ]
+            selected = ", ".join(dict.fromkeys(cols))
+            frame = (
+                con.execute(
+                    f"SELECT {selected} FROM {panel_view} "
+                    f"WHERE trade_date >= DATE '{sample_start}'"
+                )
+                .pl()
+                .sort(["trade_date", "market", "ticker"])
+            )
+
+            for hyp in feature_registry:
+                for universe, sample_kind in universe_sample_combos:
+                    cell = scan_cell(
+                        con,
+                        panel_view=panel_view,
+                        feature_col=hyp["feature"],
+                        scan_type=hyp["scan_type"],
+                        h_start=hyp["h_start"],
+                        h_end=hyp["h_end"],
+                        universe=universe,
+                        sample_kind=sample_kind,
+                        sample_start=sample_start,
+                        min_names=min_names,
+                        min_names_for_spread=min_names_for_spread,
+                        quantile_count=quantile_count,
+                        min_dates_per_cell=min_dates_per_cell,
+                        expected_sign=hyp.get("expected_sign"),
+                        scan_engine=scan_engine,
+                        formation_frame=frame,
+                    )
+                    rows.append({**hyp, **cell})
+        return rows
+
     for hyp in registry:
         for universe, sample_kind in universe_sample_combos:
             cell = scan_cell(
@@ -737,6 +889,7 @@ def run_registry_scan(
                 quantile_count=quantile_count,
                 min_dates_per_cell=min_dates_per_cell,
                 expected_sign=hyp.get("expected_sign"),
+                scan_engine=scan_engine,
             )
             rows.append({**hyp, **cell})
     return rows
@@ -810,11 +963,7 @@ def compute_available_direction_pass(
         or not math.isfinite(ic_available)
     ):
         return {"available_direction_pass": None}
-    return {
-        "available_direction_pass": bool(
-            (ic_common_survivor > 0) == (ic_available > 0)
-        )
-    }
+    return {"available_direction_pass": bool((ic_common_survivor > 0) == (ic_available > 0))}
 
 
 def compute_delay_pass(
@@ -896,6 +1045,7 @@ def scan_offset(
     min_names: int,
     nonoverlap_min_dates: int,
     alignment_sign: float,
+    scan_engine: str = "legacy",
 ) -> dict[str, Any]:
     """One non-overlapping offset's IC mean and exact sign-test p (§A-5).
 
@@ -929,7 +1079,11 @@ def scan_offset(
     if frame.is_empty():
         return result
     market_ic = per_date_market_rank_ic(
-        frame, pred_col="feature_value", realized_col="target_rank", min_names=min_names
+        frame,
+        pred_col="feature_value",
+        realized_col="target_rank",
+        min_names=min_names,
+        engine=scan_engine,
     )
     market_ic = market_ic.filter(pl.col("rank_ic").is_finite())
     if market_ic.is_empty():
@@ -970,6 +1124,7 @@ def run_nonoverlap_offsets(
     min_names: int,
     nonoverlap_min_dates: int,
     alignment_sign: float,
+    scan_engine: str = "legacy",
 ) -> dict[str, Any]:
     """All-offset non-overlap summary for one cell (§A-5 completion criterion:
     every valid primary cell gets an offset summary or an explicit
@@ -993,6 +1148,7 @@ def run_nonoverlap_offsets(
             min_names=min_names,
             nonoverlap_min_dates=nonoverlap_min_dates,
             alignment_sign=alignment_sign,
+            scan_engine=scan_engine,
         )
         for o in range(stride)
     ]

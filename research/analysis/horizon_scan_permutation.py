@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +23,18 @@ import duckdb
 import numpy as np
 import polars as pl
 
+from research.analysis.horizon_scan_checkpoint import (
+    load_replicate_checkpoints,
+    write_replicate_checkpoint,
+)
+from research.analysis.horizon_scan_mapping import (
+    JOINT_CS_MAPPING_CONTRACT,
+    build_and_apply_group_permutation,
+)
 from research.analysis.horizon_scan_runner import _target_columns, apply_global_bh, scan_cell
 from research.etl.metrics import choose_nw_lag
+
+_CROSS_PROCESS_CONTEXT: dict[str, Any] = {}
 
 
 def derive_replicate_seed(*, placebo_kind: str, replicate_index: int, config_hash: str) -> int:
@@ -201,22 +212,47 @@ def _registry_target_columns(registry: list[dict[str, Any]]) -> list[str]:
     return sorted(cols)
 
 
-def _load_checkpoint(path: Path | None) -> dict[int, dict[str, Any]]:
+def _load_checkpoint(
+    path: Path | None, *, fingerprint: dict[str, Any] | None = None
+) -> dict[int, dict[str, Any]]:
     if path is None or not path.exists():
         return {}
+    if path.is_dir():
+        if fingerprint is None:
+            raise ValueError("directory checkpoints require a fingerprint")
+        return load_replicate_checkpoints(path, fingerprint=fingerprint)
     out: dict[int, dict[str, Any]] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
+        if fingerprint is not None:
+            if row.get("_fingerprint") != fingerprint:
+                raise ValueError(
+                    "checkpoint fingerprint is missing or incompatible; refusing resume"
+                )
         out[row["replicate"]] = row
     return out
 
 
-def _append_checkpoint(path: Path | None, row: dict[str, Any]) -> None:
+def _append_checkpoint(
+    path: Path | None, row: dict[str, Any], *, fingerprint: dict[str, Any] | None = None
+) -> None:
     if path is None:
         return
+    if path.is_dir() or (fingerprint is not None and path.suffix == ""):
+        if fingerprint is None:
+            raise ValueError("directory checkpoints require a fingerprint")
+        write_replicate_checkpoint(
+            path,
+            replicate=int(row["replicate"]),
+            fingerprint=fingerprint,
+            payload=row,
+        )
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
+    if fingerprint is not None:
+        row = {**row, "_fingerprint": fingerprint}
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, sort_keys=True) + "\n")
 
@@ -262,7 +298,22 @@ def _scan_registry_once(
     min_names_for_spread: int,
     quantile_count: int,
     min_dates_per_cell: int,
+    scan_engine: str = "legacy",
+    frame: pl.DataFrame | None = None,
 ) -> list[dict[str, Any]]:
+    if frame is None:
+        frame = fetch_broad_common_survivor_frame(
+            con,
+            panel_view=panel_view,
+            extra_cols=sorted(
+                {
+                    col
+                    for hyp in registry
+                    for col in _registry_target_columns([hyp]) + [hyp["feature"]]
+                }
+            ),
+            sample_start=sample_start,
+        )
     return [
         {
             **hyp,
@@ -282,6 +333,8 @@ def _scan_registry_once(
                 min_dates_per_cell=min_dates_per_cell,
                 expected_sign=hyp.get("expected_sign"),
                 compute_spread=False,
+                scan_engine=scan_engine,
+                formation_frame=frame,
             ),
         }
         for hyp in registry
@@ -289,7 +342,11 @@ def _scan_registry_once(
 
 
 def _cross_sectional_replicate_summary(
-    replicate_index: int, seed: int, bh_rows: list[dict[str, Any]]
+    replicate_index: int,
+    seed: int,
+    bh_rows: list[dict[str, Any]],
+    *,
+    mapping_hash: str | None = None,
 ) -> dict[str, Any]:
     valid = [r for r in bh_rows if r["status"] == "valid"]
     p_nw_valid = [r["p_nw"] for r in valid if r["p_nw"] is not None and math.isfinite(r["p_nw"])]
@@ -306,7 +363,134 @@ def _cross_sectional_replicate_summary(
         "min_p_nw": min(p_nw_valid) if p_nw_valid else None,
         "min_q_fdr_global": min(q_valid) if q_valid else None,
         "max_abs_t_nw": max(t_nw_valid) if t_nw_valid else None,
+        "mapping_hash": mapping_hash,
     }
+
+
+def _compute_cross_sectional_replicate(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    replicate: int,
+    base_frame: pl.DataFrame,
+    primary_registry: list[dict[str, Any]],
+    panel_view: str,
+    config_hash: str,
+    sample_start: str,
+    min_names: int,
+    min_names_for_spread: int,
+    quantile_count: int,
+    min_dates_per_cell: int,
+    q_threshold: float,
+    scan_engine: str,
+    mapping_contract_version: str,
+    collect_cell_stats: bool,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    seed = derive_replicate_seed(
+        placebo_kind="cross_sectional", replicate_index=replicate, config_hash=config_hash
+    )
+    feature_cols = sorted({hyp["feature"] for hyp in primary_registry})
+    if mapping_contract_version == JOINT_CS_MAPPING_CONTRACT:
+        permuted, mapping_hash = build_and_apply_group_permutation(
+            base_frame,
+            permute_cols=feature_cols,
+            replicate_index=replicate,
+            config_hash=config_hash,
+            mapping_contract_version=mapping_contract_version,
+        )
+    elif mapping_contract_version == "v1":
+        permuted = permute_within_groups(
+            base_frame,
+            group_cols=["trade_date", "market"],
+            permute_cols=feature_cols,
+            seed=seed,
+        )
+        mapping_hash = None
+    else:
+        raise ValueError(f"unknown mapping contract: {mapping_contract_version!r}")
+    rows = _scan_registry_once(
+        con,
+        primary_registry,
+        panel_view=panel_view,
+        sample_start=sample_start,
+        min_names=min_names,
+        min_names_for_spread=min_names_for_spread,
+        quantile_count=quantile_count,
+        min_dates_per_cell=min_dates_per_cell,
+        scan_engine=scan_engine,
+        frame=permuted,
+    )
+    bh_rows = apply_global_bh(rows, q_threshold=q_threshold)
+    summary = _cross_sectional_replicate_summary(
+        replicate, seed, bh_rows, mapping_hash=mapping_hash
+    )
+    cell_stats = (
+        [
+            {
+                "mapping_contract_version": mapping_contract_version,
+                "replicate": replicate,
+                "mapping_hash": mapping_hash,
+                "hypothesis_id": row.get("hypothesis_id"),
+                "family": row.get("family"),
+                "feature": row.get("feature"),
+                "scan_type": row.get("scan_type"),
+                "h_start": row.get("h_start"),
+                "h_end": row.get("h_end"),
+                "expected_sign": row.get("expected_sign"),
+                "status": row.get("status"),
+                "ic_mean": row.get("ic_mean"),
+                "t_nw": row.get("t_nw"),
+                "p_nw": row.get("p_nw"),
+                "n_dates": row.get("n_dates"),
+                "n_obs": row.get("n_obs"),
+            }
+            for row in bh_rows
+        ]
+        if collect_cell_stats
+        else []
+    )
+    if collect_cell_stats:
+        summary["cell_stats"] = cell_stats
+    return summary, cell_stats
+
+
+def _init_cross_sectional_process_worker(
+    lake: Any,
+    panel_view: str,
+    primary_registry: list[dict[str, Any]],
+    sample_start: str,
+) -> None:
+    """Open one independent DuckDB/frame context for a process worker."""
+    from research.analysis.horizon_scan_run_spec import REQUIRED_A0_MARTS
+    from research.analysis.horizon_scan_runner import register_analysis_panel
+    from research.etl.lake import connect
+    from research.etl.mart import register_mart_view
+
+    con = connect(lake)
+    for name in REQUIRED_A0_MARTS:
+        register_mart_view(con, lake, name)
+    register_analysis_panel(con, view_name=panel_view)
+    feature_cols = sorted({hyp["feature"] for hyp in primary_registry})
+    target_cols = _registry_target_columns(primary_registry)
+    frame = fetch_broad_common_survivor_frame(
+        con,
+        panel_view=panel_view,
+        extra_cols=feature_cols + target_cols,
+        sample_start=sample_start,
+    )
+    _CROSS_PROCESS_CONTEXT.clear()
+    _CROSS_PROCESS_CONTEXT.update({"con": con, "frame": frame})
+
+
+def _compute_cross_sectional_process_replicate(
+    replicate: int, kwargs: dict[str, Any]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    kwargs = {key: value for key, value in kwargs.items() if key != "base_frame"}
+    return _compute_cross_sectional_replicate(
+        _CROSS_PROCESS_CONTEXT["con"],
+        replicate=replicate,
+        base_frame=_CROSS_PROCESS_CONTEXT["frame"],
+        **kwargs,
+    )
 
 
 def run_cross_sectional_permutation(
@@ -324,6 +508,12 @@ def run_cross_sectional_permutation(
     n_replicates: int = 100,
     q_threshold: float = 0.10,
     checkpoint_path: Path | None = None,
+    scan_engine: str = "legacy",
+    checkpoint_fingerprint: dict[str, Any] | None = None,
+    mapping_contract_version: str = "v1",
+    collect_cell_stats: bool = False,
+    workers: int = 1,
+    worker_lake: Any | None = None,
 ) -> dict[str, Any]:
     """§A-6a: 100 joint date×market block permutations of every primary
     feature, each rescanned/BH'd exactly like the real 75 cells.
@@ -340,36 +530,69 @@ def run_cross_sectional_permutation(
         con, panel_view=panel_view, extra_cols=feature_cols + target_cols, sample_start=sample_start
     )
 
-    checkpoint = _load_checkpoint(checkpoint_path)
+    checkpoint = _load_checkpoint(checkpoint_path, fingerprint=checkpoint_fingerprint)
     summaries: list[dict[str, Any]] = [checkpoint[i] for i in sorted(checkpoint)]
-    view_name = "_cross_sectional_permuted_panel"
-    for i in range(n_replicates):
-        if i in checkpoint:
-            continue
-        seed = derive_replicate_seed(
-            placebo_kind="cross_sectional", replicate_index=i, config_hash=config_hash
+    cell_stats: list[dict[str, Any]] = []
+    if collect_cell_stats:
+        for summary in summaries:
+            cell_stats.extend(summary.get("cell_stats", []))
+    if workers < 1:
+        raise ValueError("workers must be >= 1")
+    pending = [i for i in range(n_replicates) if i not in checkpoint]
+    kwargs = {
+        "base_frame": base_frame,
+        "primary_registry": primary_registry,
+        "panel_view": panel_view,
+        "config_hash": config_hash,
+        "sample_start": sample_start,
+        "min_names": min_names,
+        "min_names_for_spread": min_names_for_spread,
+        "quantile_count": quantile_count,
+        "min_dates_per_cell": min_dates_per_cell,
+        "q_threshold": q_threshold,
+        "scan_engine": scan_engine,
+        "mapping_contract_version": mapping_contract_version,
+        "collect_cell_stats": collect_cell_stats,
+    }
+    if workers == 1:
+        computed = (_compute_cross_sectional_replicate(con, replicate=i, **kwargs) for i in pending)
+        computed_rows = zip(pending, computed)
+    elif worker_lake is not None:
+        # ``ProcessPoolExecutor`` has no ``initkwargs`` argument. Keep the
+        # initializer positional so the real Phase A process path is usable.
+        executor = ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=_init_cross_sectional_process_worker,
+            initargs=(worker_lake, panel_view, primary_registry, sample_start),
         )
-        permuted = permute_within_groups(
-            base_frame, group_cols=["trade_date", "market"], permute_cols=feature_cols, seed=seed
-        )
-        con.register(view_name, permuted)
-        try:
-            rows = _scan_registry_once(
-                con,
-                primary_registry,
-                panel_view=view_name,
-                sample_start=sample_start,
-                min_names=min_names,
-                min_names_for_spread=min_names_for_spread,
-                quantile_count=quantile_count,
-                min_dates_per_cell=min_dates_per_cell,
-            )
-        finally:
-            con.unregister(view_name)
-        bh_rows = apply_global_bh(rows, q_threshold=q_threshold)
-        summary = _cross_sectional_replicate_summary(i, seed, bh_rows)
-        _append_checkpoint(checkpoint_path, summary)
-        summaries.append(summary)
+        # The child builds its own frame in the initializer. Removing this
+        # value before submit is essential: removing it in the child is too
+        # late because pickle has already copied it across the process pipe.
+        process_kwargs = {key: value for key, value in kwargs.items() if key != "base_frame"}
+        futures = [
+            executor.submit(_compute_cross_sectional_process_replicate, i, process_kwargs)
+            for i in pending
+        ]
+        computed_rows = zip(pending, (future.result() for future in futures))
+    else:
+        # Unit/synthetic callers do not have a LakeConfig to initialize in a
+        # child process. Keep their large frame in-process; Polars releases the
+        # GIL in the hot kernels and checkpoint writes remain coordinator ordered.
+        executor = ThreadPoolExecutor(max_workers=workers)
+        futures = [
+            executor.submit(_compute_cross_sectional_replicate, con, replicate=i, **kwargs)
+            for i in pending
+        ]
+        computed_rows = zip(pending, (future.result() for future in futures))
+    try:
+        for _replicate, (summary, replicate_cell_stats) in computed_rows:
+            if collect_cell_stats:
+                cell_stats.extend(replicate_cell_stats)
+            _append_checkpoint(checkpoint_path, summary, fingerprint=checkpoint_fingerprint)
+            summaries.append(summary)
+    finally:
+        if workers > 1:
+            executor.shutdown(wait=True)
 
     summaries.sort(key=lambda s: s["replicate"])
     replicate_ids = {s["replicate"] for s in summaries}
@@ -387,6 +610,7 @@ def run_cross_sectional_permutation(
         "null_discovery_counts": null_discovery_counts,
         "p_empirical_count": p_empirical_count,
         "n_replicates": n_replicates,
+        "cell_stats": cell_stats,
     }
 
 
@@ -406,6 +630,9 @@ def run_temporal_placebo(
     min_shift_sessions: int = 120,
     p_max: float = 0.10,
     checkpoint_path: Path | None = None,
+    scan_engine: str = "legacy",
+    checkpoint_fingerprint: dict[str, Any] | None = None,
+    workers: int = 1,
 ) -> dict[str, Any]:
     """§A-6b: 100 circular date-shift placebos of the ``nw_lag>=59`` primary
     cells, each rescanned with the *same* gap-aware NW as the real cell.
@@ -418,79 +645,56 @@ def run_temporal_placebo(
     same reproducibility guarantee as :func:`run_cross_sectional_permutation`.
     """
     feature_cols = sorted({hyp["feature"] for hyp in long_horizon_registry})
+    if workers < 1:
+        raise ValueError("workers must be >= 1")
     target_cols = _registry_target_columns(long_horizon_registry)
     label_frame = fetch_broad_common_survivor_frame(
         con, panel_view=panel_view, extra_cols=target_cols, sample_start=sample_start
     )
     feature_cols_sql = ", ".join(feature_cols)
-    feature_frame = con.execute(
-        f"""
+    feature_frame = con.execute(f"""
         SELECT ticker, market, formation_session_idx, {feature_cols_sql}
         FROM {panel_view}
         WHERE in_broad AND common_formation_120d AND common_survivor_120d
           AND trade_date >= DATE '{sample_start}'
-        """
-    ).pl()
+        """).pl()
     total_sessions = int(feature_frame["formation_session_idx"].max())
 
-    checkpoint = _load_checkpoint(checkpoint_path)
+    checkpoint = _load_checkpoint(checkpoint_path, fingerprint=checkpoint_fingerprint)
     replicate_meta: list[dict[str, Any]] = [checkpoint[i] for i in sorted(checkpoint)]
-    view_name = "_temporal_placebo_panel"
-    for i in range(n_replicates):
-        if i in checkpoint:
-            continue
-        seed = derive_replicate_seed(
-            placebo_kind="temporal", replicate_index=i, config_hash=config_hash
-        )
-        shift = select_circular_shift_distance(
-            seed=seed, total_sessions=total_sessions, min_shift=min_shift_sessions
-        )
-        shifted_features = apply_circular_feature_shift(
-            feature_frame,
-            session_col="formation_session_idx",
-            shift=shift,
-            total_sessions=total_sessions,
-        )
-        combined = label_frame.join(
-            shifted_features, on=["formation_session_idx", "ticker", "market"], how="inner"
-        )
-        con.register(view_name, combined)
-        abs_t_nw_by_id: dict[str, float | None] = {}
-        try:
-            for hyp in long_horizon_registry:
-                cell = scan_cell(
-                    con,
-                    panel_view=view_name,
-                    feature_col=hyp["feature"],
-                    scan_type=hyp["scan_type"],
-                    h_start=hyp["h_start"],
-                    h_end=hyp["h_end"],
-                    universe="broad",
-                    sample_kind="common_survivor",
-                    sample_start=sample_start,
-                    min_names=min_names,
-                    min_names_for_spread=min_names_for_spread,
-                    quantile_count=quantile_count,
-                    min_dates_per_cell=min_dates_per_cell,
-                    expected_sign=hyp.get("expected_sign"),
-                    compute_spread=False,
-                )
-                t_nw = cell["t_nw"]
-                abs_t_nw_by_id[hyp["hypothesis_id"]] = (
-                    abs(t_nw) if t_nw is not None and math.isfinite(t_nw) else None
-                )
-        finally:
-            con.unregister(view_name)
-        meta = {
-            "replicate": i,
-            "seed": seed,
-            "shift": shift,
-            "n_rows_after_join": combined.height,
-            "n_tickers_after_join": combined["ticker"].n_unique(),
-            "abs_t_nw_by_id": abs_t_nw_by_id,
-        }
-        _append_checkpoint(checkpoint_path, meta)
-        replicate_meta.append(meta)
+    pending = [i for i in range(n_replicates) if i not in checkpoint]
+    compute_kwargs = {
+        "con": con,
+        "panel_view": panel_view,
+        "long_horizon_registry": long_horizon_registry,
+        "config_hash": config_hash,
+        "sample_start": sample_start,
+        "min_names": min_names,
+        "min_names_for_spread": min_names_for_spread,
+        "quantile_count": quantile_count,
+        "min_dates_per_cell": min_dates_per_cell,
+        "scan_engine": scan_engine,
+        "label_frame": label_frame,
+        "feature_frame": feature_frame,
+        "total_sessions": total_sessions,
+        "min_shift_sessions": min_shift_sessions,
+    }
+    if workers == 1:
+        computed = (_compute_temporal_replicate(i, **compute_kwargs) for i in pending)
+        computed_rows = zip(pending, computed)
+    else:
+        executor = ThreadPoolExecutor(max_workers=workers)
+        futures = [
+            executor.submit(_compute_temporal_replicate, i, **compute_kwargs) for i in pending
+        ]
+        computed_rows = zip(pending, (future.result() for future in futures))
+    try:
+        for _replicate, meta in computed_rows:
+            _append_checkpoint(checkpoint_path, meta, fingerprint=checkpoint_fingerprint)
+            replicate_meta.append(meta)
+    finally:
+        if workers > 1:
+            executor.shutdown(wait=True)
 
     replicate_meta.sort(key=lambda m: m["replicate"])
     replicate_ids = {m["replicate"] for m in replicate_meta}
@@ -519,6 +723,75 @@ def run_temporal_placebo(
         "per_cell": per_cell,
         "n_replicates": n_replicates,
         "total_sessions": total_sessions,
+    }
+
+
+def _compute_temporal_replicate(
+    replicate: int,
+    *,
+    con: duckdb.DuckDBPyConnection,
+    panel_view: str,
+    long_horizon_registry: list[dict[str, Any]],
+    config_hash: str,
+    sample_start: str,
+    min_names: int,
+    min_names_for_spread: int,
+    quantile_count: int,
+    min_dates_per_cell: int,
+    scan_engine: str,
+    label_frame: pl.DataFrame,
+    feature_frame: pl.DataFrame,
+    total_sessions: int,
+    min_shift_sessions: int,
+) -> dict[str, Any]:
+    """Compute one temporal replicate; checkpoint writes stay coordinator-only."""
+    seed = derive_replicate_seed(
+        placebo_kind="temporal", replicate_index=replicate, config_hash=config_hash
+    )
+    shift = select_circular_shift_distance(
+        seed=seed, total_sessions=total_sessions, min_shift=min_shift_sessions
+    )
+    shifted_features = apply_circular_feature_shift(
+        feature_frame,
+        session_col="formation_session_idx",
+        shift=shift,
+        total_sessions=total_sessions,
+    )
+    combined = label_frame.join(
+        shifted_features, on=["formation_session_idx", "ticker", "market"], how="inner"
+    )
+    abs_t_nw_by_id: dict[str, float | None] = {}
+    for hyp in long_horizon_registry:
+        cell = scan_cell(
+            con,
+            panel_view=panel_view,
+            feature_col=hyp["feature"],
+            scan_type=hyp["scan_type"],
+            h_start=hyp["h_start"],
+            h_end=hyp["h_end"],
+            universe="broad",
+            sample_kind="common_survivor",
+            sample_start=sample_start,
+            min_names=min_names,
+            min_names_for_spread=min_names_for_spread,
+            quantile_count=quantile_count,
+            min_dates_per_cell=min_dates_per_cell,
+            expected_sign=hyp.get("expected_sign"),
+            compute_spread=False,
+            scan_engine=scan_engine,
+            formation_frame=combined,
+        )
+        t_nw = cell["t_nw"]
+        abs_t_nw_by_id[hyp["hypothesis_id"]] = (
+            abs(t_nw) if t_nw is not None and math.isfinite(t_nw) else None
+        )
+    return {
+        "replicate": replicate,
+        "seed": seed,
+        "shift": shift,
+        "n_rows_after_join": combined.height,
+        "n_tickers_after_join": combined["ticker"].n_unique(),
+        "abs_t_nw_by_id": abs_t_nw_by_id,
     }
 
 

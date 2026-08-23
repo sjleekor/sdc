@@ -92,6 +92,7 @@ def build_phase_b_report_context(
     diagnostics_written: list[str],
     q_threshold: float,
     source_quality: dict[str, dict[str, Any]] | None = None,
+    timings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the ``03b`` context out of rows ``run_phase_b_core`` already has."""
     ready = [r for r in readiness_rows if r["role"] == "ready_primary"]
@@ -122,6 +123,7 @@ def build_phase_b_report_context(
         },
         "robustness": {name: len(rows) for name, rows in robustness.items()},
         "diagnostics_written": diagnostics_written,
+        "timings": timings or {},
         "limitations": _phase_b_limitations(readiness_rows, source_quality or {}),
     }
 
@@ -173,6 +175,14 @@ def render_phase_b_report(context: dict[str, Any]) -> str:
     bh = context["bh_summary"]
     families = context["family_rows"]
     quality = context["source_quality"]
+    timing = context.get("timings") or {}
+    timing_lines = [
+        f"- {name}: {_cell(record.get('wall_seconds'))} s"
+        for name, record in sorted((timing.get("stages") or {}).items())
+        if isinstance(record, dict)
+    ]
+    if timing.get("total_wall_seconds") is not None:
+        timing_lines.append(f"- total wall time: {_cell(timing['total_wall_seconds'])} s")
 
     header = [
         "# Phase B horizon scan results",
@@ -195,6 +205,7 @@ def render_phase_b_report(context: dict[str, Any]) -> str:
                 f"- started: {_cell(ri.get('started_at'))}",
                 f"- readiness freeze: {rs.get('ready')} ready / {rs.get('blocked')} blocked "
                 f"of {rs.get('candidates')} candidate cells",
+                *(["", "Stage timing:", *timing_lines] if timing_lines else []),
             ]
         ),
         "\n".join(

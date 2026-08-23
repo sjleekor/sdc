@@ -21,7 +21,7 @@ from research.analysis.horizon_scan_phase_b_robustness import compute_nonoverlap
 from research.analysis.horizon_scan_phase_b_scan import (
     _aggregate_cohort_rows,
     _pool_cohort_ranks,
-    build_event_cohort_frame_sql,
+    execute_event_cohort_frame,
 )
 from research.etl.metrics import choose_nw_lag, daily_market_weighted_ic, per_date_market_rank_ic
 
@@ -63,6 +63,7 @@ def compute_phase_b_rank_correlation(
     feature_pairs: list[tuple[str, str, str, str]],
     sample_start: str,
     min_names: int,
+    scan_engine: str = "legacy",
 ) -> list[dict[str, Any]]:
     """One row per ``(family_a, feature_a, family_b, feature_b)`` pair: a
     market-weighted daily Spearman rank-correlation series summarized into a
@@ -86,7 +87,11 @@ def compute_phase_b_rank_correlation(
         )
         frame = con.execute(sql).pl()
         market_ic = per_date_market_rank_ic(
-            frame, pred_col="feature_a_value", realized_col="feature_b_value", min_names=min_names
+            frame,
+            pred_col="feature_a_value",
+            realized_col="feature_b_value",
+            min_names=min_names,
+            engine=scan_engine,
         )
         market_ic = market_ic.filter(pl.col("rank_ic").is_finite())
         daily = daily_market_weighted_ic(market_ic)
@@ -161,7 +166,8 @@ def run_sue_event_ordinal_nonoverlap(
     for cell in ready_event_cells:
         h_start, h_end = cell["h_start"], cell["h_end"]
         lag = choose_nw_lag(scan_type="bucket", bucket_width=h_end - h_start)
-        sql = build_event_cohort_frame_sql(
+        frame = execute_event_cohort_frame(
+            con,
             event_view=event_view,
             calendar_view=calendar_view,
             sue_col=cell["feature"],
@@ -169,7 +175,6 @@ def run_sue_event_ordinal_nonoverlap(
             h_end=h_end,
             sample_start=sample_start,
         )
-        frame = con.execute(sql).pl()
         if not frame.is_empty():
             frame = frame.filter(
                 pl.col("sue_value").is_finite() & pl.col("excess_value").is_finite()

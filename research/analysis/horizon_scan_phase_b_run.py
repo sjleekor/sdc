@@ -48,8 +48,10 @@ inconsistent nesting order.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -58,7 +60,20 @@ import duckdb
 import polars as pl
 
 from krx_collector.infra.calendar.trading_days import get_trading_days
-from research.analysis.horizon_scan_config import CONFIG_PATH, HorizonScanConfig, load_config
+from research.analysis.horizon_scan_checkpoint import (
+    build_checkpoint_fingerprint,
+    canonical_hash,
+    checkpoint_namespace,
+    coordinator_lock,
+    registry_hash,
+)
+from research.analysis.horizon_scan_config import (
+    CONFIG_PATH,
+    DEFAULT_SCAN_ENGINE,
+    HorizonScanConfig,
+    load_config,
+    validate_scan_engine,
+)
 from research.analysis.horizon_scan_permutation import empirical_discovery_count_p
 from research.analysis.horizon_scan_phase_b import (
     PHASE_B_CONTENT_HASH_EXCLUDE_NAMES,
@@ -111,6 +126,8 @@ from research.analysis.horizon_scan_phase_b_source_quality import compute_family
 from research.analysis.horizon_scan_readiness import build_primary_hypothesis_registry
 from research.analysis.horizon_scan_run_spec import (
     REQUIRED_A0_MARTS,
+    analysis_kernel_hash,
+    analysis_kernel_paths,
     assert_a0_manifest_matches,
     compute_run_content_hash,
     kst_now_iso,
@@ -125,6 +142,7 @@ from research.analysis.horizon_scan_runner import (
     resolve_common_formation_end,
     scan_cell,
 )
+from research.analysis.horizon_scan_timing import StageTimingRecorder
 from research.etl.config import REMOTE_SOURCE, LakeConfig
 from research.etl.features.event_scan import (
     EVENT_FEATURE_FORMULA_VERSION,
@@ -163,6 +181,81 @@ from research.etl.phase_b_quality import (
 from research.etl.snapshot import resolve_config
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def load_phase_a_permutation_cell_stats(
+    phase_a_run_dir: Path,
+    *,
+    config: HorizonScanConfig,
+    requested_replicates: int,
+    expected_a0_manifest_content_hash: str | None = None,
+) -> dict[str, Any]:
+    """Validate and load Phase A's reusable cell-level null artifact."""
+    spec_path = phase_a_run_dir / "run_spec.json"
+    success_path = phase_a_run_dir / "_SUCCESS.json"
+    artifact_path = phase_a_run_dir / "core" / "permutation_cell_stats.parquet"
+    if not spec_path.is_file() or not success_path.is_file() or not artifact_path.is_file():
+        raise ValueError(
+            "Phase A permutation reuse requires a published run with "
+            "core/permutation_cell_stats.parquet"
+        )
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    if spec.get("config_hash") != config.config_hash:
+        raise ValueError("Phase A permutation artifact config_hash does not match Phase B")
+    if spec.get("analysis_kernel_hash") != analysis_kernel_hash(REPO_ROOT):
+        raise ValueError("Phase A permutation artifact analysis_kernel_hash does not match")
+    if (
+        expected_a0_manifest_content_hash is not None
+        and spec.get("a0_manifest_content_hash") != expected_a0_manifest_content_hash
+    ):
+        raise ValueError("Phase A permutation artifact A0 manifest content does not match")
+    success = json.loads(success_path.read_text(encoding="utf-8"))
+    recomputed_content_hash = compute_run_content_hash(phase_a_run_dir)
+    if recomputed_content_hash != success.get("content_hash"):
+        raise ValueError("Phase A permutation artifact run content hash does not match")
+    expected_contract = config.raw.get("execution", {}).get("mapping_contract_version", "v1")
+    if spec.get("mapping_contract_version") != expected_contract:
+        raise ValueError("Phase A permutation artifact mapping contract does not match")
+    frame = pl.read_parquet(artifact_path)
+    required = {
+        "mapping_contract_version",
+        "replicate",
+        "mapping_hash",
+        "hypothesis_id",
+        "family",
+        "feature",
+        "scan_type",
+        "h_start",
+        "h_end",
+        "expected_sign",
+        "status",
+        "ic_mean",
+        "t_nw",
+        "p_nw",
+        "n_dates",
+        "n_obs",
+    }
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError(f"Phase A permutation artifact is missing columns: {missing}")
+    expected_ids = {row["hypothesis_id"] for row in build_primary_hypothesis_registry(config)}
+    actual_ids = set(frame["hypothesis_id"].to_list())
+    if actual_ids != expected_ids:
+        raise ValueError("Phase A permutation artifact hypothesis registry does not match")
+    if frame.height != requested_replicates * len(expected_ids):
+        raise ValueError("Phase A permutation artifact has an incomplete replicate×cell grid")
+    replicates = set(frame["replicate"].to_list())
+    if replicates != set(range(requested_replicates)):
+        raise ValueError("Phase A permutation artifact replicate ids do not match")
+    digest = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    return {
+        "run_id": spec.get("run_id"),
+        "content_hash": digest,
+        "mapping_contract_version": expected_contract,
+        "registry_hash": registry_hash(build_primary_hypothesis_registry(config)),
+        "rows": frame.to_dicts(),
+    }
+
 
 PHASE_B_REPORT_NAME = "03b_horizon_scan_results.md"
 COMBINED_AB_REPORT_NAME = "03ab_combined_results.md"
@@ -351,7 +444,9 @@ def _render_readiness_matrix_md(readiness_rows: list[dict[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _scan_kwargs_from_config(config: HorizonScanConfig) -> dict[str, Any]:
+def _scan_kwargs_from_config(
+    config: HorizonScanConfig, *, scan_engine: str = DEFAULT_SCAN_ENGINE
+) -> dict[str, Any]:
     """Same fields as ``horizon_scan.py``'s ``scan_kwargs_from_config``,
     duplicated (not imported) to avoid a circular import — that module in
     turn imports ``run_phase_b_core``/``run_combined_ab`` from here for its
@@ -363,6 +458,7 @@ def _scan_kwargs_from_config(config: HorizonScanConfig) -> dict[str, Any]:
         "min_names_for_spread": int(stats["min_names_for_spread"]),
         "quantile_count": int(stats["quantile_count"]),
         "min_dates_per_cell": int(stats["min_dates_per_cell"]),
+        "scan_engine": scan_engine,
     }
 
 
@@ -403,6 +499,7 @@ def _compute_phase_b_period_ics(
     min_names_for_spread: int,
     quantile_count: int,
     min_dates_per_cell: int,
+    scan_engine: str = "legacy",
 ) -> list[float | None]:
     """One IC per preregistered common period, at the discovery coordinate —
     Phase B analog of ``horizon_scan.py``'s ``compute_period_ics``."""
@@ -425,6 +522,7 @@ def _compute_phase_b_period_ics(
             expected_sign=cell.get("expected_sign"),
             extra_where=f"period_id_common = '{period_id}'",
             compute_spread=False,
+            scan_engine=scan_engine,
         )
         ics.append(result["ic_mean"] if result["status"] == "valid" else None)
     return ics
@@ -521,6 +619,9 @@ def compute_phase_b_gate_updates(
     continuous_scanned_rows: list[dict[str, Any]],
     event_scanned_rows: list[dict[str, Any]],
     scan_kwargs: dict[str, Any],
+    checkpoint_paths: dict[str, Path] | None = None,
+    checkpoint_fingerprints: dict[str, dict[str, Any]] | None = None,
+    workers: int = 1,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]]]:
     """§9 B-9 screen_pass gate inputs (rules 3, 4, 5, 7, 8), one entry per
     ready cell's ``hypothesis_id``. Split out of ``run_phase_b_core`` so it is
@@ -605,6 +706,7 @@ def compute_phase_b_gate_updates(
                 panel_view=PHASE_B_PANEL_VIEW,
                 sample_start=scan_kwargs["sample_start"],
                 min_names=scan_kwargs["min_names"],
+                scan_engine=scan_kwargs.get("scan_engine", "legacy"),
                 nonoverlap_min_dates_overrides=dict(phase_b_cfg["nonoverlap_min_dates"]),
                 valid_offset_ratio_min=float(phase_b_cfg["nonoverlap_valid_offset_ratio_min"]),
                 expected_sign_ratio_min=float(
@@ -628,6 +730,9 @@ def compute_phase_b_gate_updates(
                 n_replicates=int(config.raw["placebo"]["temporal_long_cell_repeats"]),
                 min_shift_sessions=int(config.raw["placebo"]["temporal_min_shift_sessions"]),
                 p_max=float(config.raw["placebo"]["temporal_p_max"]),
+                checkpoint_path=(checkpoint_paths or {}).get("temporal"),
+                checkpoint_fingerprint=(checkpoint_fingerprints or {}).get("temporal"),
+                workers=workers,
                 **scan_kwargs,
             )
             for cell in long_cells:
@@ -675,11 +780,15 @@ def compute_phase_b_gate_updates(
             issuer_result = run_issuer_cluster_bootstrap(
                 con,
                 n_replicates=int(phase_b_cfg["event_issuer_bootstrap_repeats"]),
+                checkpoint_path=(checkpoint_paths or {}).get(f"issuer:{hid}"),
+                checkpoint_fingerprint=(checkpoint_fingerprints or {}).get(f"issuer:{hid}"),
                 **common_bootstrap_kwargs,
             )
             filing_cycle_result = run_filing_cycle_block_bootstrap(
                 con,
                 n_replicates=int(phase_b_cfg["event_filing_cycle_bootstrap_repeats"]),
+                checkpoint_path=(checkpoint_paths or {}).get(f"filing:{hid}"),
+                checkpoint_fingerprint=(checkpoint_fingerprints or {}).get(f"filing:{hid}"),
                 **common_bootstrap_kwargs,
             )
             confirmation = evaluate_sue_cluster_confirmation(issuer_result, filing_cycle_result)
@@ -749,9 +858,17 @@ def run_phase_b_core(
     snapshot_date: str | None = None,
     source: str = REMOTE_SOURCE,
     data_lake_root: Path | None = None,
+    phase_a_run_dir: Path | None = None,
     output_root: Path,
     command_line: list[str],
+    resume: bool = False,
+    checkpoint_root: Path | None = None,
+    workers: int = 1,
+    scan_engine: str = DEFAULT_SCAN_ENGINE,
 ) -> Path:
+    if workers < 1:
+        raise ValueError("workers must be >= 1")
+    validate_scan_engine(scan_engine)
     config = load_config(CONFIG_PATH)
     base = LakeConfig(source=source, data_lake_root=data_lake_root or LakeConfig().data_lake_root)
     required_raw = list(config.raw["phase_b"]["required_raw_tables"])
@@ -765,16 +882,22 @@ def run_phase_b_core(
         raise FileNotFoundError(f"A0 manifest is required before a Phase B scan: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert_a0_manifest_matches(config, manifest)
+    a0_manifest_content_hash = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
 
     started_at = kst_now_iso()
+    timings = StageTimingRecorder()
     a0_run_spec = _build_a0_run_spec_fields(config, manifest)
 
+    timings.start("setup_and_register")
     con = connect(lake)
     raw_present = set(register_views(con, lake))
     for name in REQUIRED_A0_MARTS:
         register_mart_view(con, lake, name)
     register_analysis_panel(con)
+    timings.stop("setup_and_register")
+    timings.start("phase_b_marts")
     phase_b_marts = register_phase_b_marts(con, lake)
+    timings.stop("phase_b_marts")
     available_assets = raw_present | set(REQUIRED_A0_MARTS) | phase_b_marts
 
     readiness_rows = build_phase_b_readiness_rows(config, available_assets=available_assets)
@@ -784,10 +907,33 @@ def run_phase_b_core(
         a0_run_spec=a0_run_spec,
         raw_manifest_tables=raw_present,
         repo_root=REPO_ROOT,
-        code_paths=sorted(Path(__file__).parent.glob("horizon_scan_phase_b*.py")),
+        code_paths=analysis_kernel_paths(REPO_ROOT),
         command_line=command_line,
         started_at=started_at,
     )
+    run_spec["a0_manifest_content_hash"] = a0_manifest_content_hash
+    run_spec["scan_engine"] = scan_engine
+    phase_a_reuse: dict[str, Any] | None = None
+    if phase_a_run_dir is not None:
+        phase_a_reuse = load_phase_a_permutation_cell_stats(
+            phase_a_run_dir,
+            config=config,
+            requested_replicates=int(config.raw["placebo"]["cross_sectional_repeats"]),
+            expected_a0_manifest_content_hash=a0_manifest_content_hash,
+        )
+        run_spec.update(
+            {
+                "phase_a_reuse_run_id": phase_a_reuse["run_id"],
+                "phase_a_permutation_cell_stats_hash": phase_a_reuse["content_hash"],
+            }
+        )
+        phase_a_families = {row.get("family") for row in phase_a_reuse["rows"]}
+        phase_b_families = {
+            row.get("family") for row in readiness_rows if row.get("role") == "ready_primary"
+        }
+        family_overlap = sorted(phase_a_families & phase_b_families)
+        if family_overlap:
+            raise ValueError(f"Phase A/B family sets overlap before Phase B scan: {family_overlap}")
 
     run_dir_root = (
         output_root
@@ -819,30 +965,167 @@ def run_phase_b_core(
         for c in readiness_rows
         if c["role"] == "ready_primary" and c["cell_type"] == "event_bucket"
     ]
-    scan_kwargs = _scan_kwargs_from_config(config)
+    scan_kwargs = _scan_kwargs_from_config(config, scan_engine=scan_engine)
     phase_b_cfg = config.raw["phase_b"]
 
-    if ready_continuous and {"feat_fin_scan_daily", "feat_event_scan_daily"} & phase_b_marts:
-        register_phase_b_panel(
-            con,
-            fin_scan_view="feat_fin_scan_daily" if "feat_fin_scan_daily" in phase_b_marts else None,
-            event_scan_view=(
-                "feat_event_scan_daily" if "feat_event_scan_daily" in phase_b_marts else None
+    checkpoint_base = checkpoint_root or output_root.parent / "horizon_scan_checkpoints"
+    execution = config.raw.get("execution", {})
+    mapping_contract = str(execution.get("mapping_contract_version", "v1"))
+    joint_namespace = checkpoint_namespace(
+        checkpoint_base,
+        phase="B",
+        snapshot_date=resolution.snapshot_date,
+        source=resolution.source,
+        config_hash=config.config_hash,
+        experiment="combined_cross_sectional",
+        contract=mapping_contract,
+    )
+    normalized_ready_registry = [
+        {
+            **cell,
+            "scan_type": (
+                "event_bucket"
+                if cell["cell_type"] == "event_bucket"
+                else "cum" if cell["cell_type"] == "cumulative" else "bucket"
             ),
-        )
-        continuous_scanned_rows = run_phase_b_continuous_scan(con, ready_continuous, **scan_kwargs)
+        }
+        for cell in ready_continuous + ready_events
+    ]
+    checkpoint_registry = build_primary_hypothesis_registry(config) + normalized_ready_registry
+    readiness_population_hash = canonical_hash(
+        sorted(readiness_rows, key=lambda row: row["hypothesis_id"])
+    )
+    joint_fingerprint = build_checkpoint_fingerprint(
+        registry=checkpoint_registry,
+        a0_manifest_hash=a0_manifest_content_hash,
+        readiness_population_hash=readiness_population_hash,
+        smoke_family=None,
+        requested_replicates=int(config.raw["placebo"]["cross_sectional_repeats"]),
+        include_holdout=False,
+        holdout_start=None,
+        scan_engine=scan_engine,
+        row_order_contract=str(execution.get("row_order_contract", "legacy_input_order")),
+        sue_nw_order_contract=str(execution.get("sue_nw_order_contract", "legacy")),
+        sue_permutation_order_contract=str(
+            execution.get("sue_permutation_order_contract", "legacy")
+        ),
+        mapping_contract_version=mapping_contract,
+        analysis_kernel_hash=run_spec["analysis_kernel_hash"],
+        duckdb_version=run_spec["duckdb_version"],
+        polars_version=run_spec["polars_version"],
+        numpy_version=run_spec["numpy_version"],
+    )
+    robustness_paths: dict[str, Path] = {}
+    robustness_fingerprints: dict[str, dict[str, Any]] = {}
 
-    if ready_events and "fin_sue_event" in phase_b_marts:
-        event_scanned_rows = run_phase_b_event_scan(
-            con,
-            ready_events,
-            sample_start=scan_kwargs["sample_start"],
-            min_events_per_market_contribution=int(
-                phase_b_cfg["min_events_per_market_contribution"]
+    def _robustness_fingerprint(registry: list[dict[str, Any]], repeats: int) -> dict[str, Any]:
+        return build_checkpoint_fingerprint(
+            registry=registry,
+            a0_manifest_hash=a0_manifest_content_hash,
+            readiness_population_hash=readiness_population_hash,
+            smoke_family=None,
+            requested_replicates=repeats,
+            include_holdout=False,
+            holdout_start=None,
+            scan_engine=scan_engine,
+            row_order_contract=str(execution.get("row_order_contract", "legacy_input_order")),
+            sue_nw_order_contract=str(execution.get("sue_nw_order_contract", "legacy")),
+            sue_permutation_order_contract=str(
+                execution.get("sue_permutation_order_contract", "legacy")
             ),
-            min_events_per_cohort_total=int(phase_b_cfg["min_events_per_cohort_total"]),
-            min_event_cohorts=int(phase_b_cfg["min_event_cohorts"]),
+            mapping_contract_version=mapping_contract,
+            analysis_kernel_hash=run_spec["analysis_kernel_hash"],
+            duckdb_version=run_spec["duckdb_version"],
+            polars_version=run_spec["polars_version"],
+            numpy_version=run_spec["numpy_version"],
         )
+
+    long_cells_for_checkpoint = select_phase_b_long_horizon_cells(
+        ready_continuous, min_nw_lag=int(config.raw["placebo"]["temporal_min_nw_lag"])
+    )
+    if long_cells_for_checkpoint:
+        temporal_path = checkpoint_namespace(
+            checkpoint_base,
+            phase="B",
+            snapshot_date=resolution.snapshot_date,
+            source=resolution.source,
+            config_hash=config.config_hash,
+            experiment="temporal_placebo",
+            contract="temporal_placebo_v1",
+        )
+        robustness_paths["temporal"] = temporal_path
+        robustness_fingerprints["temporal"] = _robustness_fingerprint(
+            long_cells_for_checkpoint,
+            int(config.raw["placebo"]["temporal_long_cell_repeats"]),
+        )
+    for cell in ready_events:
+        hid = cell["hypothesis_id"]
+        for kind, repeats in (
+            ("issuer", int(phase_b_cfg["event_issuer_bootstrap_repeats"])),
+            ("filing", int(phase_b_cfg["event_filing_cycle_bootstrap_repeats"])),
+        ):
+            key = f"{kind}:{hid}"
+            robustness_paths[key] = checkpoint_namespace(
+                checkpoint_base,
+                phase="B",
+                snapshot_date=resolution.snapshot_date,
+                source=resolution.source,
+                config_hash=config.config_hash,
+                experiment=f"{kind}_bootstrap_{hid}",
+                contract="sue_bootstrap_v1",
+            )
+            robustness_fingerprints[key] = _robustness_fingerprint([cell], repeats)
+    run_spec["checkpoint"] = {
+        "root": str(checkpoint_base),
+        "resume": resume,
+        "workers": workers,
+        "namespaces": [
+            str(joint_namespace),
+            *(str(path) for path in robustness_paths.values()),
+        ],
+    }
+    if not resume:
+        for namespace in [joint_namespace, *robustness_paths.values()]:
+            if any(namespace.glob("replicate=*.json")):
+                raise RuntimeError(
+                    f"checkpoint namespace already contains results; use --resume or choose "
+                    f"another --checkpoint-root: {namespace}"
+                )
+
+    def _write_checkpoint_timings() -> None:
+        for namespace in [joint_namespace, *robustness_paths.values()]:
+            timings.write(namespace / "timings.json")
+
+    timings.start("phase_b_scan")
+    try:
+        if ready_continuous and {"feat_fin_scan_daily", "feat_event_scan_daily"} & phase_b_marts:
+            register_phase_b_panel(
+                con,
+                fin_scan_view=(
+                    "feat_fin_scan_daily" if "feat_fin_scan_daily" in phase_b_marts else None
+                ),
+                event_scan_view=(
+                    "feat_event_scan_daily" if "feat_event_scan_daily" in phase_b_marts else None
+                ),
+            )
+            continuous_scanned_rows = run_phase_b_continuous_scan(
+                con, ready_continuous, **scan_kwargs
+            )
+
+        if ready_events and "fin_sue_event" in phase_b_marts:
+            event_scanned_rows = run_phase_b_event_scan(
+                con,
+                ready_events,
+                sample_start=scan_kwargs["sample_start"],
+                min_events_per_market_contribution=int(
+                    phase_b_cfg["min_events_per_market_contribution"]
+                ),
+                min_events_per_cohort_total=int(phase_b_cfg["min_events_per_cohort_total"]),
+                min_event_cohorts=int(phase_b_cfg["min_event_cohorts"]),
+            )
+    finally:
+        timings.stop("phase_b_scan")
+        _write_checkpoint_timings()
 
     scanned_rows = continuous_scanned_rows + event_scanned_rows
     assembled = assemble_phase_b_primary_table(readiness_rows, scanned_rows)
@@ -852,28 +1135,40 @@ def run_phase_b_core(
     q_threshold = float(config.raw["stats"]["global_bh_q"])
     ready_stats_rows = apply_phase_b_only_bh(ready_stats_rows, q_threshold=q_threshold)
 
-    gate_updates, phase_b_diagnostics = compute_phase_b_gate_updates(
-        con,
-        config,
-        ready_continuous=ready_continuous,
-        ready_events=ready_events,
-        continuous_scanned_rows=continuous_scanned_rows,
-        event_scanned_rows=event_scanned_rows,
-        scan_kwargs=scan_kwargs,
-    )
+    timings.start("phase_b_robustness")
+    # Robustness experiments have their own checkpoint namespaces. Acquire
+    # all of them before loading/writing so a second Phase B coordinator
+    # cannot interleave with this run.
+    try:
+        with ExitStack() as lock_stack:
+            for namespace in robustness_paths.values():
+                lock_stack.enter_context(coordinator_lock(namespace))
+            gate_updates, phase_b_diagnostics = compute_phase_b_gate_updates(
+                con,
+                config,
+                ready_continuous=ready_continuous,
+                ready_events=ready_events,
+                continuous_scanned_rows=continuous_scanned_rows,
+                event_scanned_rows=event_scanned_rows,
+                scan_kwargs=scan_kwargs,
+                checkpoint_paths=robustness_paths,
+                checkpoint_fingerprints=robustness_fingerprints,
+                workers=workers,
+            )
+    finally:
+        timings.stop("phase_b_robustness")
+        _write_checkpoint_timings()
     ready_stats_rows = [
         {**row, **gate_updates.get(row["hypothesis_id"], {})} for row in ready_stats_rows
     ]
     by_id = {r["hypothesis_id"]: r for r in ready_stats_rows}
     assembled = [by_id.get(row["hypothesis_id"], row) for row in assembled]
-
     write_phase_b_run_spec(tmp_run_dir, run_spec)
     (tmp_run_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8"
     )
     core_dir = tmp_run_dir / "core"
     core_dir.mkdir(parents=True, exist_ok=True)
-
     # §7.1 readiness_matrix.{parquet,md} — the full 38-candidate readiness
     # freeze, reformatted for direct inspection. Unlike every other artifact
     # in this function, this is written unconditionally: it's a view over
@@ -913,13 +1208,19 @@ def run_phase_b_core(
             for fam_a, feat_a in phase_a_primary_by_family.items()
             for fam_b, feat_b in phase_b_primary_by_family.items()
         ]
-        rank_corr_rows = compute_phase_b_rank_correlation(
-            con,
-            panel_view=PHASE_B_PANEL_VIEW,
-            feature_pairs=feature_pairs,
-            sample_start=scan_kwargs["sample_start"],
-            min_names=scan_kwargs["min_names"],
-        )
+        timings.start("rank_correlation")
+        try:
+            rank_corr_rows = compute_phase_b_rank_correlation(
+                con,
+                panel_view=PHASE_B_PANEL_VIEW,
+                feature_pairs=feature_pairs,
+                sample_start=scan_kwargs["sample_start"],
+                min_names=scan_kwargs["min_names"],
+                scan_engine=scan_kwargs.get("scan_engine", "legacy"),
+            )
+        finally:
+            timings.stop("rank_correlation")
+            _write_checkpoint_timings()
         if rank_corr_rows:
             pl.DataFrame(rank_corr_rows, infer_schema_length=None).write_parquet(
                 core_dir / "primary_feature_rank_correlation.parquet"
@@ -935,28 +1236,49 @@ def run_phase_b_core(
     # later as a pure-math step over this file, without reconnecting to the
     # lake (see horizon_scan_phase_b_joint_permutation.py's module docstring).
     if continuous_scanned_rows or event_scanned_rows:
-        combined_continuous_registry = build_primary_hypothesis_registry(config) + [
+        all_combined_continuous_registry = build_primary_hypothesis_registry(config) + [
             {**cell, "scan_type": "cum" if cell["cell_type"] == "cumulative" else "bucket"}
             for cell in ready_continuous
         ]
-        permutation_result = run_combined_cross_sectional_permutation(
-            con,
-            panel_view=PHASE_B_PANEL_VIEW,
-            combined_continuous_registry=combined_continuous_registry,
-            ready_sue_cells=ready_events,
-            config_hash=config.config_hash,
-            sample_start=scan_kwargs["sample_start"],
-            min_names=scan_kwargs["min_names"],
-            min_names_for_spread=scan_kwargs["min_names_for_spread"],
-            quantile_count=scan_kwargs["quantile_count"],
-            min_dates_per_cell=scan_kwargs["min_dates_per_cell"],
-            min_events_per_market_contribution=int(
-                phase_b_cfg["min_events_per_market_contribution"]
-            ),
-            min_events_per_cohort_total=int(phase_b_cfg["min_events_per_cohort_total"]),
-            n_replicates=int(config.raw["placebo"]["cross_sectional_repeats"]),
-            q_threshold=q_threshold,
+        combined_continuous_registry = (
+            [
+                {**cell, "scan_type": "cum" if cell["cell_type"] == "cumulative" else "bucket"}
+                for cell in ready_continuous
+            ]
+            if phase_a_reuse is not None
+            else all_combined_continuous_registry
         )
+        timings.start("phase_b_combined_permutation")
+        try:
+            with coordinator_lock(joint_namespace):
+                permutation_result = run_combined_cross_sectional_permutation(
+                    con,
+                    panel_view=PHASE_B_PANEL_VIEW,
+                    combined_continuous_registry=combined_continuous_registry,
+                    ready_sue_cells=ready_events,
+                    config_hash=config.config_hash,
+                    sample_start=scan_kwargs["sample_start"],
+                    min_names=scan_kwargs["min_names"],
+                    min_names_for_spread=scan_kwargs["min_names_for_spread"],
+                    quantile_count=scan_kwargs["quantile_count"],
+                    min_dates_per_cell=scan_kwargs["min_dates_per_cell"],
+                    min_events_per_market_contribution=int(
+                        phase_b_cfg["min_events_per_market_contribution"]
+                    ),
+                    min_events_per_cohort_total=int(phase_b_cfg["min_events_per_cohort_total"]),
+                    n_replicates=int(config.raw["placebo"]["cross_sectional_repeats"]),
+                    q_threshold=q_threshold,
+                    checkpoint_path=joint_namespace,
+                    checkpoint_fingerprint=joint_fingerprint,
+                    workers=workers,
+                    scan_engine=str(scan_kwargs["scan_engine"]),
+                    mapping_contract_version=mapping_contract,
+                    reused_phase_a_cell_stats=phase_a_reuse["rows"] if phase_a_reuse else None,
+                )
+        finally:
+            timings.stop("phase_b_combined_permutation")
+            _write_checkpoint_timings()
+            timings.write(tmp_run_dir / "timings.json")
         pl.DataFrame(
             permutation_result["replicate_summaries"], infer_schema_length=None
         ).write_parquet(core_dir / "permutation_summary.parquet")
@@ -1008,6 +1330,7 @@ def run_phase_b_core(
     pl.DataFrame(assembled, infer_schema_length=None).write_parquet(
         core_dir / "phase_b_primary_hypotheses.parquet"
     )
+    timings.write(tmp_run_dir / "timings.json")
 
     # §7.1 03b_horizon_scan_results.md (B-10 Stage 5) — rendered last, from the
     # rows every stage above already produced, so it cannot disagree with the
@@ -1030,6 +1353,7 @@ def run_phase_b_core(
                     core_dir, diagnostics_written, "receipt_value_pairing_quality"
                 ),
             ),
+            timings=timings.as_dict(),
         ),
     )
 
@@ -1132,10 +1456,57 @@ def run_combined_ab(
             f"{recomputed_b_hash!r} != published={phase_b_success.get('content_hash')!r}"
         )
 
+    identity_fields = (
+        "snapshot_date",
+        "source",
+        "a0_manifest_hash",
+        "a0_manifest_content_hash",
+        "analysis_kernel_hash",
+        "scan_engine",
+        "row_order_contract",
+        "sue_nw_order_contract",
+        "sue_permutation_order_contract",
+        "mapping_contract_version",
+    )
+    common_identity_fields = {
+        field
+        for field in ("snapshot_date", "source")
+        if field in phase_a_spec and field in phase_b_spec
+    }
+    optional_contract_fields = {
+        field
+        for field in identity_fields
+        if field not in {"snapshot_date", "source"}
+        and (field in phase_a_spec or field in phase_b_spec)
+    }
+    fields_to_compare = common_identity_fields | optional_contract_fields
+    mismatches = {
+        field: (phase_a_spec.get(field), phase_b_spec.get(field))
+        for field in fields_to_compare
+        if phase_a_spec.get(field) != phase_b_spec.get(field)
+    }
+    if mismatches:
+        raise ValueError(f"Phase A/B contract preflight mismatch: {mismatches}")
+    referenced_a = phase_b_spec.get("phase_a_reuse_run_id")
+    if referenced_a is not None and referenced_a != phase_a_spec.get("run_id"):
+        raise ValueError("Phase B reused a different Phase A run than AB received")
+    referenced_hash = phase_b_spec.get("phase_a_permutation_cell_stats_hash")
+    if referenced_hash is not None:
+        artifact_path = phase_a_run_dir / "core" / "permutation_cell_stats.parquet"
+        actual_hash = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        if actual_hash != referenced_hash:
+            raise ValueError("Phase B Phase A permutation artifact hash does not match AB input")
+
     assembled = pl.read_parquet(
         phase_b_run_dir / "core" / "phase_b_primary_hypotheses.parquet"
     ).to_dicts()
     phase_b_ready_rows = [row for row in assembled if row.get("role") == "ready_primary"]
+    family_overlap = sorted(
+        {row.get("family") for row in phase_a_rows}
+        & {row.get("family") for row in phase_b_ready_rows}
+    )
+    if family_overlap:
+        raise ValueError(f"Phase A/B family sets overlap: {family_overlap}")
 
     # §9 "source 비치명 경고" — read off the Phase B run's own B-10 Stage 2
     # diagnostics rather than recomputed here, so the cap always refers to the
@@ -1237,7 +1608,7 @@ def run_combined_ab(
         }
 
     started_at = kst_now_iso()
-    code_hash = phase_a_code_hash(sorted(Path(__file__).parent.glob("horizon_scan_phase_b*.py")))
+    code_hash = phase_a_code_hash(analysis_kernel_paths(REPO_ROOT))
     ab_run_id = f"{started_at[:19].replace(':', '').replace('-', '')}-{code_hash[:8]}"
     manifest = {
         "phase": "AB",

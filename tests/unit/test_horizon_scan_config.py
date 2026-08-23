@@ -4,6 +4,7 @@ from copy import deepcopy
 
 import pytest
 from research.analysis.horizon_scan_config import (
+    _canonical_hash,
     bucket_primary_cells,
     load_config,
     validate_config,
@@ -35,9 +36,11 @@ def test_bucket_cells_are_grid_intersection_not_cumulative_count() -> None:
     assert bucket_primary_cells(holding_chg, buckets) == [(10, 20), (20, 40), (40, 60)]
 
     short_turnover = by_family["flow_short_turnover"]
-    assert len(short_turnover["primary_horizon_set"]) + len(
-        bucket_primary_cells(short_turnover, buckets)
-    ) == 10
+    assert (
+        len(short_turnover["primary_horizon_set"])
+        + len(bucket_primary_cells(short_turnover, buckets))
+        == 10
+    )
 
 
 def test_missing_marts_and_unresolved_lag_are_explicit() -> None:
@@ -112,3 +115,21 @@ def test_bh_missing_p_value_is_fixed_at_one() -> None:
     raw["stats"]["bh_missing_p_value"] = 0.5
     with pytest.raises(ValueError, match="bh_missing_p_value"):
         validate_config(raw)
+
+
+def test_scan_engine_is_runtime_only_for_config_hash() -> None:
+    raw = {
+        "execution": {"scan_engine": "legacy", "mapping_contract_version": "joint_cs_v2"},
+        "sample": {"start": "2014-06-01"},
+    }
+    native = {
+        **raw,
+        "execution": {**raw["execution"], "scan_engine": "polars_native_v1"},
+    }
+    changed_contract = {
+        **raw,
+        "execution": {**raw["execution"], "mapping_contract_version": "v1"},
+    }
+
+    assert _canonical_hash(raw) == _canonical_hash(native)
+    assert _canonical_hash(raw) != _canonical_hash(changed_contract)

@@ -22,7 +22,7 @@ import duckdb
 import numpy as np
 import polars as pl
 
-from research.analysis.horizon_scan_config import HorizonScanConfig
+from research.analysis.horizon_scan_config import DEFAULT_SCAN_ENGINE, HorizonScanConfig
 from research.analysis.horizon_scan_readiness import (
     build_primary_hypothesis_registry,
     build_short_exploratory_registry,
@@ -162,6 +162,24 @@ def phase_a_code_hash(code_paths: list[Path]) -> str:
     return hasher.hexdigest()
 
 
+def analysis_kernel_paths(repo_root: Path) -> list[Path]:
+    """Shared source list for Phase A/B kernel lineage.
+
+    The old phase-specific globs omitted ``research/etl/metrics.py`` and made
+    the Phase B scope narrower than the shared runner.  This explicit list is
+    used by both phases and includes newly added ``horizon_scan_*.py`` files.
+    """
+    analysis_dir = repo_root / "research" / "analysis"
+    return [
+        repo_root / "research" / "etl" / "metrics.py",
+        *sorted(analysis_dir.glob("horizon_scan*.py")),
+    ]
+
+
+def analysis_kernel_hash(repo_root: Path) -> str:
+    return phase_a_code_hash(analysis_kernel_paths(repo_root))
+
+
 def kst_now_iso() -> str:
     return datetime.now(tz=KST).isoformat()
 
@@ -225,6 +243,20 @@ def build_run_spec(
         "git_commit": git_metadata(repo_root)["git_commit"],
         "git_dirty": git_metadata(repo_root)["git_dirty"],
         "phase_a_code_hash": code_hash,
+        "analysis_kernel_hash": analysis_kernel_hash(repo_root),
+        "scan_engine": DEFAULT_SCAN_ENGINE,
+        "row_order_contract": config.raw.get("execution", {}).get(
+            "row_order_contract", "legacy_input_order"
+        ),
+        "sue_nw_order_contract": config.raw.get("execution", {}).get(
+            "sue_nw_order_contract", "legacy"
+        ),
+        "sue_permutation_order_contract": config.raw.get("execution", {}).get(
+            "sue_permutation_order_contract", "legacy"
+        ),
+        "mapping_contract_version": config.raw.get("execution", {}).get(
+            "mapping_contract_version", "v1"
+        ),
         "run_id": f"{started_at[:19].replace(':', '').replace('-', '')}-{code_hash[:8]}",
         **package_versions(),
         "command_line": command_line,
@@ -270,7 +302,7 @@ REQUIRED_RUN_ARTIFACTS: tuple[str, ...] = ("run_spec.json", "manifest.json")
 # subtrees (core/, robustness/, permutation/, cards/) are hashed; plots/ is
 # excluded too since PNG bytes are not the reproducibility target.
 _CONTENT_HASH_EXCLUDE_NAMES = frozenset(
-    {"run_spec.json", "_SUCCESS.json", "03a_horizon_scan_results.md"}
+    {"run_spec.json", "_SUCCESS.json", "03a_horizon_scan_results.md", "timings.json"}
 )
 _CONTENT_HASH_EXCLUDE_DIRS = frozenset({"plots"})
 

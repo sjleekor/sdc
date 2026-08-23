@@ -16,6 +16,7 @@ from research.etl.metrics import (
     market_weight_means,
     n_hac_pairs,
     newey_west_tstat,
+    newey_west_tstat_legacy,
     per_date_market_quantile_spread,
     per_date_market_rank_ic,
     portfolio_turnover,
@@ -41,6 +42,80 @@ def test_market_ic_is_not_double_counted_by_date() -> None:
     assert market.height == 3
     assert daily.height == 2
     assert daily.filter(pl.col("trade_date") == 1).height == 1
+
+
+def test_native_rank_ic_matches_legacy_across_contract_edge_cases() -> None:
+    # Covers ties, a single-market date, NaN/inf filtering, the exact
+    # min_names boundary, a constant group, and shuffled input order.
+    frame = pl.DataFrame(
+        {
+            "trade_date": [1] * 4 + [2] * 3 + [3] * 3 + [4] + [5] * 4,
+            "market": ["KOSPI"] * 4 + ["KOSDAQ"] * 3 + ["KOSPI"] * 3 + ["KOSPI"] + ["KOSPI"] * 4,
+            "pred": [
+                1.0,
+                1.0,
+                2.0,
+                3.0,
+                1.0,
+                2.0,
+                3.0,
+                4.0,
+                4.0,
+                4.0,
+                1.0,
+                2.0,
+                float("nan"),
+                float("inf"),
+                3.0,
+            ],
+            "realized": [
+                1.0,
+                2.0,
+                2.0,
+                3.0,
+                3.0,
+                2.0,
+                1.0,
+                4.0,
+                4.0,
+                4.0,
+                3.0,
+                2.0,
+                1.0,
+                2.0,
+                float("nan"),
+            ],
+        }
+    ).sample(fraction=1.0, shuffle=True, seed=17)
+    legacy = per_date_market_rank_ic(
+        frame, pred_col="pred", realized_col="realized", min_names=2, engine="legacy"
+    ).sort(["trade_date", "market"])
+    native = per_date_market_rank_ic(
+        frame, pred_col="pred", realized_col="realized", min_names=2, engine="polars_native_v1"
+    ).sort(["trade_date", "market"])
+
+    assert native.select(["trade_date", "market", "n"]).equals(
+        legacy.select(["trade_date", "market", "n"])
+    )
+    for left, right in zip(legacy["rank_ic"], native["rank_ic"]):
+        if math.isnan(left):
+            assert math.isnan(right)
+        else:
+            assert right == pytest.approx(left, abs=1e-12)
+
+
+def test_gap_aware_newey_west_native_matches_legacy_randomized() -> None:
+    rng = np.random.default_rng(20260823)
+    for n in (5, 11, 31):
+        for lag in (0, 1, 7, 19):
+            sessions = np.sort(rng.choice(np.arange(1, 160), size=n, replace=False))
+            values = rng.normal(size=n)
+            expected = newey_west_tstat_legacy(values, sessions, lag)
+            actual = newey_west_tstat(values, sessions, lag)
+            if math.isnan(expected):
+                assert math.isnan(actual)
+            else:
+                assert actual == pytest.approx(expected, rel=1e-12, abs=1e-12)
 
 
 def test_nw_uses_session_gap_not_compressed_array_position() -> None:

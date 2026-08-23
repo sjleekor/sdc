@@ -16,6 +16,7 @@ counts (cross-sectional and temporal) for the same reason.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 from dataclasses import replace
@@ -25,7 +26,19 @@ from typing import Any
 import duckdb
 import polars as pl
 
-from research.analysis.horizon_scan_config import CONFIG_PATH, HorizonScanConfig, load_config
+from research.analysis.horizon_scan_checkpoint import (
+    build_checkpoint_fingerprint,
+    checkpoint_namespace,
+    coordinator_lock,
+)
+from research.analysis.horizon_scan_config import (
+    CONFIG_PATH,
+    DEFAULT_SCAN_ENGINE,
+    SCAN_ENGINES,
+    HorizonScanConfig,
+    load_config,
+    validate_scan_engine,
+)
 from research.analysis.horizon_scan_permutation import (
     run_cross_sectional_permutation,
     run_lookahead_canary,
@@ -48,6 +61,7 @@ from research.analysis.horizon_scan_report import (
 )
 from research.analysis.horizon_scan_run_spec import (
     REQUIRED_A0_MARTS,
+    analysis_kernel_paths,
     build_run_spec,
     kst_now_iso,
     publish_run,
@@ -66,6 +80,7 @@ from research.analysis.horizon_scan_runner import (
     run_registry_scan,
     scan_cell,
 )
+from research.analysis.horizon_scan_timing import StageTimingRecorder
 from research.etl.config import REMOTE_SOURCE, LakeConfig
 from research.etl.horizon_scan_inputs import REQUIRED_RAW_INPUTS
 from research.etl.lake import connect
@@ -86,14 +101,18 @@ def filter_registry_to_family(
     return [r for r in registry if r["family"] == family]
 
 
-def scan_kwargs_from_config(config: HorizonScanConfig) -> dict[str, Any]:
+def scan_kwargs_from_config(
+    config: HorizonScanConfig, *, scan_engine: str = DEFAULT_SCAN_ENGINE
+) -> dict[str, Any]:
     stats = config.raw["stats"]
+    validate_scan_engine(scan_engine)
     return {
         "sample_start": str(config.raw["sample"]["start"]),
         "min_names": int(stats["min_names_per_date_market"]),
         "min_names_for_spread": int(stats["min_names_for_spread"]),
         "quantile_count": int(stats["quantile_count"]),
         "min_dates_per_cell": int(stats["min_dates_per_cell"]),
+        "scan_engine": scan_engine,
     }
 
 
@@ -142,6 +161,7 @@ def compute_period_ics(
     min_names_for_spread: int,
     quantile_count: int,
     min_dates_per_cell: int,
+    scan_engine: str = "legacy",
 ) -> list[float | None]:
     ics: list[float | None] = []
     for period_id in period_ids:
@@ -162,6 +182,7 @@ def compute_period_ics(
             expected_sign=hyp.get("expected_sign"),
             extra_where=f"period_id_common = '{period_id}'",
             compute_spread=False,
+            scan_engine=scan_engine,
         )
         ics.append(cell["ic_mean"] if cell["status"] == "valid" else None)
     return ics
@@ -187,6 +208,7 @@ def compute_family_delay_gate(
     min_names_for_spread: int,
     quantile_count: int,
     min_dates_per_cell: int,
+    scan_engine: str = "legacy",
 ) -> dict[str, Any]:
     """A family whose official variant is already lag1 evaluates this against
     itself (native_ic IS the lag1 IC) — trivially passes, matching §A-4's own
@@ -207,6 +229,7 @@ def compute_family_delay_gate(
         min_dates_per_cell=min_dates_per_cell,
         expected_sign=hyp.get("expected_sign"),
         compute_spread=False,
+        scan_engine=scan_engine,
     )
     ic_lag1 = lag1_cell["ic_mean"] if lag1_cell["status"] == "valid" else None
     p_nw_lag1 = lag1_cell["p_nw"] if lag1_cell["status"] == "valid" else None
@@ -330,6 +353,7 @@ def build_family_result(
             min_names=scan_kwargs["min_names"],
             nonoverlap_min_dates=int(config.raw["stats"]["nonoverlap_min_dates"]),
             alignment_sign=alignment_sign,
+            scan_engine=scan_kwargs["scan_engine"],
         )
 
     cell_screen: dict[str, dict[str, Any]] = {}
@@ -487,7 +511,14 @@ def run_phase_a(
     holdout_start: str | None,
     output_root: Path,
     command_line: list[str],
+    resume: bool = False,
+    checkpoint_root: Path | None = None,
+    workers: int = 1,
+    scan_engine: str = DEFAULT_SCAN_ENGINE,
 ) -> Path:
+    if workers < 1:
+        raise ValueError("workers must be >= 1")
+    validate_scan_engine(scan_engine)
     config = load_config(CONFIG_PATH)
     base = LakeConfig(source=source, data_lake_root=data_lake_root or LakeConfig().data_lake_root)
     lake, resolution = resolve_config(
@@ -503,8 +534,10 @@ def run_phase_a(
     if not manifest_path.is_file():
         raise FileNotFoundError(f"A0 manifest is required before a Phase A scan: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    a0_manifest_content_hash = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
 
     started_at = kst_now_iso()
+    timings = StageTimingRecorder()
     run_spec = build_run_spec(
         config,
         manifest,
@@ -516,16 +549,20 @@ def run_phase_a(
         include_holdout=include_holdout,
         holdout_start_override=holdout_start,
         repo_root=REPO_ROOT,
-        code_paths=sorted(Path(__file__).parent.glob("horizon_scan*.py")),
+        code_paths=analysis_kernel_paths(REPO_ROOT),
         command_line=command_line,
         started_at=started_at,
     )
+    run_spec["a0_manifest_content_hash"] = a0_manifest_content_hash
+    run_spec["scan_engine"] = scan_engine
 
+    timings.start("setup_and_register")
     con = connect(lake)
     register_a0_marts(con, lake)
     register_analysis_panel(con)
     period_view, common_formation_end = register_period_segment_view(con, config)
     period_ids = [p["id"] for p in config.raw["sample"]["period_sets"]["common"]]
+    timings.stop("setup_and_register")
 
     primary_registry = filter_registry_to_family(
         build_primary_hypothesis_registry(config), smoke_family
@@ -533,11 +570,13 @@ def run_phase_a(
     short_registry = filter_registry_to_family(
         build_short_exploratory_registry(config), smoke_family
     )
-    scan_kwargs = scan_kwargs_from_config(config)
+    scan_kwargs = scan_kwargs_from_config(config, scan_engine=scan_engine)
     q_threshold = float(config.raw["stats"]["global_bh_q"])
 
+    timings.start("real_scan")
     all_rows = run_registry_scan(con, primary_registry, **scan_kwargs) if primary_registry else []
     short_rows = run_registry_scan(con, short_registry, **scan_kwargs) if short_registry else []
+    timings.stop("real_scan")
 
     broad_common_survivor = [
         r for r in all_rows if r["universe"] == "broad" and r["sample_kind"] == "common_survivor"
@@ -556,40 +595,122 @@ def run_phase_a(
     temporal_repeats = (
         permutations if permutations is not None else int(placebo_cfg["temporal_long_cell_repeats"])
     )
+    long_registry = select_long_horizon_hypotheses(primary_registry) if primary_registry else []
+    checkpoint_base = checkpoint_root or output_root.parent / "horizon_scan_checkpoints"
+    a0_manifest_hash = a0_manifest_content_hash
+    execution = config.raw.get("execution", {})
+    mapping_contract = str(execution.get("mapping_contract_version", "v1"))
+    cross_namespace = checkpoint_namespace(
+        checkpoint_base,
+        phase="A",
+        snapshot_date=resolution.snapshot_date,
+        source=resolution.source,
+        config_hash=config.config_hash,
+        experiment="cross_sectional",
+        contract=mapping_contract,
+    )
+    temporal_namespace = checkpoint_namespace(
+        checkpoint_base,
+        phase="A",
+        snapshot_date=resolution.snapshot_date,
+        source=resolution.source,
+        config_hash=config.config_hash,
+        experiment="temporal_placebo",
+        contract="temporal_placebo_v1",
+    )
+
+    def _fingerprint(registry: list[dict[str, Any]], repeats: int) -> dict[str, Any]:
+        return build_checkpoint_fingerprint(
+            registry=registry,
+            a0_manifest_hash=a0_manifest_hash,
+            readiness_population_hash=None,
+            smoke_family=smoke_family,
+            requested_replicates=repeats,
+            include_holdout=include_holdout,
+            holdout_start=holdout_start,
+            scan_engine=scan_engine,
+            row_order_contract=str(execution.get("row_order_contract", "legacy_input_order")),
+            sue_nw_order_contract=str(execution.get("sue_nw_order_contract", "legacy")),
+            sue_permutation_order_contract=str(
+                execution.get("sue_permutation_order_contract", "legacy")
+            ),
+            mapping_contract_version=mapping_contract,
+            analysis_kernel_hash=run_spec["analysis_kernel_hash"],
+            duckdb_version=run_spec["duckdb_version"],
+            polars_version=run_spec["polars_version"],
+            numpy_version=run_spec["numpy_version"],
+        )
+
+    cross_fingerprint = _fingerprint(primary_registry, permutation_repeats)
+    temporal_fingerprint = _fingerprint(long_registry, temporal_repeats) if long_registry else None
+    run_spec["checkpoint"] = {
+        "root": str(checkpoint_base),
+        "resume": resume,
+        "workers": workers,
+        "namespaces": [str(cross_namespace), str(temporal_namespace)],
+    }
+    if not resume:
+        for namespace in (cross_namespace, temporal_namespace):
+            if any(namespace.glob("replicate=*.json")):
+                raise RuntimeError(
+                    f"checkpoint namespace already contains results; use --resume or choose "
+                    f"another --checkpoint-root: {namespace}"
+                )
 
     permutation_result: dict[str, Any] = {
         "replicate_summaries": [],
         "real_discovery_count": real_discovery_count,
         "p_empirical_count": None,
         "n_replicates": 0,
+        "cell_stats": [],
     }
     if primary_registry and permutation_repeats > 0:
-        permutation_result = run_cross_sectional_permutation(
-            con,
-            panel_view="analysis_panel",
-            primary_registry=primary_registry,
-            real_discovery_count=real_discovery_count,
-            config_hash=config.config_hash,
-            n_replicates=permutation_repeats,
-            q_threshold=q_threshold,
-            **scan_kwargs,
-        )
+        timings.start("cross_sectional_permutation")
+        try:
+            with coordinator_lock(cross_namespace):
+                permutation_result = run_cross_sectional_permutation(
+                    con,
+                    panel_view="analysis_panel",
+                    primary_registry=primary_registry,
+                    real_discovery_count=real_discovery_count,
+                    config_hash=config.config_hash,
+                    n_replicates=permutation_repeats,
+                    q_threshold=q_threshold,
+                    checkpoint_path=cross_namespace,
+                    checkpoint_fingerprint=cross_fingerprint,
+                    workers=workers,
+                    worker_lake=lake,
+                    **scan_kwargs,
+                    mapping_contract_version=mapping_contract,
+                    collect_cell_stats=True,
+                )
+        finally:
+            timings.stop("cross_sectional_permutation")
+            timings.write(cross_namespace / "timings.json")
 
     temporal_result: dict[str, Any] = {"replicate_meta": [], "per_cell": {}, "n_replicates": 0}
-    long_registry = select_long_horizon_hypotheses(primary_registry) if primary_registry else []
     if long_registry and temporal_repeats > 0:
+        timings.start("temporal_placebo")
         real_t_nw_by_id = {r["hypothesis_id"]: r["t_nw"] for r in broad_common_survivor}
-        temporal_result = run_temporal_placebo(
-            con,
-            panel_view="analysis_panel",
-            long_horizon_registry=long_registry,
-            real_t_nw_by_id=real_t_nw_by_id,
-            config_hash=config.config_hash,
-            n_replicates=temporal_repeats,
-            min_shift_sessions=int(config.raw["placebo"]["temporal_min_shift_sessions"]),
-            p_max=float(config.raw["placebo"]["temporal_p_max"]),
-            **scan_kwargs,
-        )
+        try:
+            with coordinator_lock(temporal_namespace):
+                temporal_result = run_temporal_placebo(
+                    con,
+                    panel_view="analysis_panel",
+                    long_horizon_registry=long_registry,
+                    real_t_nw_by_id=real_t_nw_by_id,
+                    config_hash=config.config_hash,
+                    n_replicates=temporal_repeats,
+                    min_shift_sessions=int(config.raw["placebo"]["temporal_min_shift_sessions"]),
+                    p_max=float(config.raw["placebo"]["temporal_p_max"]),
+                    checkpoint_path=temporal_namespace,
+                    checkpoint_fingerprint=temporal_fingerprint,
+                    workers=workers,
+                    **scan_kwargs,
+                )
+        finally:
+            timings.stop("temporal_placebo")
+            timings.write(temporal_namespace / "timings.json")
 
     canary = run_lookahead_canary(
         con,
@@ -633,6 +754,7 @@ def run_phase_a(
     )
     tmp_run_dir = run_dir_root / f"run_id={run_spec['run_id']}.tmp"
     plots_dir = tmp_run_dir / "plots"
+    timings.start("artifact_render")
     for fam_name, result in family_results.items():
         card = result["card"]
         cumulative_curves: dict[str, list[dict[str, Any]]] = {}
@@ -670,6 +792,7 @@ def run_phase_a(
     )
     core_dir = tmp_run_dir / "core"
     core_dir.mkdir(parents=True, exist_ok=True)
+    timings.write(tmp_run_dir / "timings.json")
     # §6.2: the broad/common-survivor primary rows must carry their BH fields
     # (q_fdr_global, bh_pass, primary_discovery, isolated_spike) — all_rows is
     # the pre-BH scan output, so swap in the BH-augmented row wherever one
@@ -688,6 +811,10 @@ def run_phase_a(
         pl.DataFrame(output_rows, infer_schema_length=None).write_parquet(
             core_dir / "horizon_ic.parquet"
         )
+    if permutation_result.get("cell_stats"):
+        pl.DataFrame(permutation_result["cell_stats"], infer_schema_length=None).write_parquet(
+            core_dir / "permutation_cell_stats.parquet"
+        )
     cards_dir = tmp_run_dir / "cards"
     cards_dir.mkdir(parents=True, exist_ok=True)
     cards = [result["card"] for result in family_results.values()]
@@ -697,6 +824,7 @@ def run_phase_a(
 
     price_cards = [c for c in cards if c["domain"] in ("price", "reference")]
     flow_cards = [c for c in cards if c["domain"] == "flow"]
+    timings.stop("artifact_render")
     report_context = {
         "run_identity": {
             "run_id": run_spec["run_id"],
@@ -756,8 +884,10 @@ def run_phase_a(
             f"look-ahead canary: canary_pass={canary['canary_pass']} "
             "(technical check, not an official artifact)"
         ],
+        "timings": timings.as_dict(),
     }
     write_markdown_report(tmp_run_dir / "03a_horizon_scan_results.md", report_context)
+    timings.write(tmp_run_dir / "timings.json")
 
     final_run_dir = run_dir_root / f"run_id={run_spec['run_id']}"
     return publish_run(tmp_run_dir, final_run_dir, run_spec=run_spec)
@@ -775,6 +905,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--holdout-start", default=None)
     parser.add_argument("--output-root", type=Path, default=Path("research/output/horizon_scan"))
     parser.add_argument(
+        "--resume", action="store_true", help="resume compatible replicate checkpoints"
+    )
+    parser.add_argument(
+        "--checkpoint-root",
+        type=Path,
+        default=None,
+        help="checkpoint root outside the published phase directories",
+    )
+    parser.add_argument("--workers", type=int, default=1, help="replicate workers (default: 1)")
+    parser.add_argument(
+        "--scan-engine",
+        choices=SCAN_ENGINES,
+        default=DEFAULT_SCAN_ENGINE,
+        help="rank IC implementation recorded in run_spec (default: polars_native_v1)",
+    )
+    parser.add_argument(
         "--phase-a-run-dir",
         type=Path,
         default=None,
@@ -785,6 +931,12 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="--phase AB only: a published phase=B run directory to combine",
+    )
+    parser.add_argument(
+        "--phase-a-reuse-run-dir",
+        type=Path,
+        default=None,
+        help="--phase B only: reuse Phase A permutation cell statistics",
     )
     args = parser.parse_args(argv)
     command_line = ["horizon_scan", *(argv or [])]
@@ -800,14 +952,23 @@ def main(argv: list[str] | None = None) -> int:
             holdout_start=args.holdout_start,
             output_root=args.output_root,
             command_line=command_line,
+            resume=args.resume,
+            checkpoint_root=args.checkpoint_root,
+            workers=args.workers,
+            scan_engine=args.scan_engine,
         )
     elif args.phase == "B":
         published = run_phase_b_core(
             snapshot_date=args.snapshot_date,
             source=args.source,
             data_lake_root=args.data_lake_root,
+            phase_a_run_dir=args.phase_a_reuse_run_dir,
             output_root=args.output_root,
             command_line=command_line,
+            resume=args.resume,
+            checkpoint_root=args.checkpoint_root,
+            workers=args.workers,
+            scan_engine=args.scan_engine,
         )
     else:
         if args.phase_a_run_dir is None or args.phase_b_run_dir is None:

@@ -46,7 +46,7 @@ from research.analysis.horizon_scan_permutation import (
 )
 from research.analysis.horizon_scan_phase_b_scan import (
     _pool_cohort_ranks,
-    build_event_cohort_frame_sql,
+    execute_event_cohort_frame,
 )
 from research.analysis.horizon_scan_runner import run_nonoverlap_offsets
 
@@ -98,6 +98,7 @@ def run_phase_b_continuous_nonoverlap(
     panel_view: str,
     sample_start: str,
     min_names: int,
+    scan_engine: str = "legacy",
     nonoverlap_min_dates_overrides: dict[str, int] | None = None,
     valid_offset_ratio_min: float = 0.80,
     expected_sign_ratio_min: float = 0.60,
@@ -126,6 +127,7 @@ def run_phase_b_continuous_nonoverlap(
             min_names=min_names,
             nonoverlap_min_dates=min_dates,
             alignment_sign=alignment_sign,
+            scan_engine=scan_engine,
         )
         gate = compute_nonoverlap_robustness_pass(
             summary,
@@ -165,10 +167,13 @@ def run_phase_b_temporal_placebo(
     min_names_for_spread: int,
     quantile_count: int,
     min_dates_per_cell: int,
+    scan_engine: str = "legacy",
     n_replicates: int = 100,
     min_shift_sessions: int = 120,
     p_max: float = 0.10,
     checkpoint_path=None,
+    checkpoint_fingerprint: dict[str, Any] | None = None,
+    workers: int = 1,
 ) -> dict[str, Any]:
     """§6 B-8 continuous point 4 — pure pass-through to
     ``horizon_scan_permutation.run_temporal_placebo`` against the Phase B
@@ -184,10 +189,13 @@ def run_phase_b_temporal_placebo(
         min_names_for_spread=min_names_for_spread,
         quantile_count=quantile_count,
         min_dates_per_cell=min_dates_per_cell,
+        scan_engine=scan_engine,
         n_replicates=n_replicates,
         min_shift_sessions=min_shift_sessions,
         p_max=p_max,
         checkpoint_path=checkpoint_path,
+        checkpoint_fingerprint=checkpoint_fingerprint,
+        workers=workers,
     )
 
 
@@ -229,6 +237,7 @@ def run_cluster_bootstrap(
     expected_sign: str | None = None,
     p_max: float = 0.10,
     checkpoint_path=None,
+    checkpoint_fingerprint: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One cluster-resample-with-replacement bootstrap of a SUE event-bucket
     cell's pooled cohort ``ic_mean`` (§5.4's statistic, §6 B-8 SUE points
@@ -243,7 +252,8 @@ def run_cluster_bootstrap(
     with no minimum-cohort-count gate (a resampled draw legitimately has
     fewer qualifying cohort dates sometimes; that's the point of resampling).
     """
-    sql = build_event_cohort_frame_sql(
+    frame = execute_event_cohort_frame(
+        con,
         event_view=event_view,
         calendar_view=calendar_view,
         sue_col=sue_col,
@@ -251,7 +261,6 @@ def run_cluster_bootstrap(
         h_end=h_end,
         sample_start=sample_start,
     )
-    frame = con.execute(sql).pl()
     if not frame.is_empty():
         frame = frame.filter(pl.col("sue_value").is_finite() & pl.col("excess_value").is_finite())
     if frame.is_empty():
@@ -275,7 +284,7 @@ def run_cluster_bootstrap(
             mask = mask & (pl.col(col) == value)
         groups[key] = frame.filter(mask)
 
-    checkpoint = _load_checkpoint(checkpoint_path)
+    checkpoint = _load_checkpoint(checkpoint_path, fingerprint=checkpoint_fingerprint)
     replicate_rows: list[dict[str, Any]] = [checkpoint[i] for i in sorted(checkpoint)]
     for i in range(n_replicates):
         if i in checkpoint:
@@ -296,7 +305,7 @@ def run_cluster_bootstrap(
         cohort_rows = pooled["cohort_rows"]
         ic_mean = float(np.mean([r[2] for r in cohort_rows])) if cohort_rows else None
         row = {"replicate": i, "seed": seed, "ic_mean": ic_mean}
-        _append_checkpoint(checkpoint_path, row)
+        _append_checkpoint(checkpoint_path, row, fingerprint=checkpoint_fingerprint)
         replicate_rows.append(row)
 
     replicate_rows.sort(key=lambda r: r["replicate"])
@@ -352,6 +361,7 @@ def run_issuer_cluster_bootstrap(
     calendar_view: str = "daily_ohlcv",
     sue_col: str = "fin_sue",
     checkpoint_path=None,
+    checkpoint_fingerprint: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """§6 B-8 SUE point 2: resample issuers (tickers) — each drawn ticker's
     entire primary-sample event history travels together."""
@@ -373,6 +383,7 @@ def run_issuer_cluster_bootstrap(
         expected_sign=expected_sign,
         p_max=p_max,
         checkpoint_path=checkpoint_path,
+        checkpoint_fingerprint=checkpoint_fingerprint,
     )
 
 
@@ -393,6 +404,7 @@ def run_filing_cycle_block_bootstrap(
     calendar_view: str = "daily_ohlcv",
     sue_col: str = "fin_sue",
     checkpoint_path=None,
+    checkpoint_fingerprint: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """§6 B-8 SUE point 3: resample ``(bsns_year, reprt_code)`` filing-cycle
     blocks — every event from every issuer sharing that reporting window
@@ -416,6 +428,7 @@ def run_filing_cycle_block_bootstrap(
         expected_sign=expected_sign,
         p_max=p_max,
         checkpoint_path=checkpoint_path,
+        checkpoint_fingerprint=checkpoint_fingerprint,
     )
 
 

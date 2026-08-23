@@ -108,6 +108,21 @@ def test_blocked_run_reports_the_blocker_and_no_fabricated_statistics() -> None:
     assert "It is not zero." in markdown
 
 
+def test_phase_b_report_renders_stage_timing_when_supplied() -> None:
+    context = _context(
+        timings={
+            "stages": {"phase_b_scan": {"wall_seconds": 12.5}},
+            "total_wall_seconds": 12.5,
+        }
+    )
+
+    markdown = render_phase_b_report(context)
+
+    assert "Stage timing:" in markdown
+    assert "phase_b_scan: 12.5000 s" in markdown
+    assert "total wall time: 12.5000 s" in markdown
+
+
 def test_bh_counts_are_real_numbers_once_cells_were_evaluated() -> None:
     assembled = [
         {
