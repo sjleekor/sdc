@@ -643,14 +643,14 @@ def test_the_employment_series_take_the_unadjusted_variant() -> None:
     assert all("I28B" not in str(by_id[series_id].endpoint_params) for series_id in N8_SERIES)
 
 
-def test_the_employment_series_are_inactive_until_the_duplicate_gate_runs() -> None:
-    # N8-5 decides whether these belong at all: drop them if they correlate
-    # above 0.8 with macro_m2 / macro_consumer_sentiment after transform and
-    # after availability alignment. Seeding them active would start collecting
-    # before that question is answered.
+def test_the_employment_series_reflect_the_duplicate_measure_gate() -> None:
+    # N8-5 keeps the two rate series and drops employed persons: its level
+    # correlation with macro_m2 was 0.9045 after availability alignment.
     by_id = _series_by_id()
 
-    assert all(by_id[series_id].active is False for series_id in N8_SERIES)
+    assert by_id["macro_unemployment_rate"].active is True
+    assert by_id["macro_employment_rate"].active is True
+    assert by_id["macro_employed_persons"].active is False
 
 
 def test_the_employment_series_use_the_same_conservative_availability_lag() -> None:

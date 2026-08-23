@@ -800,11 +800,11 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
         # after the fact: today's adjusted 2019 value is not what was published
         # in 2019, so it leaks. Same reasoning as `08` §B1.5.
         #
-        # INACTIVE until the N8-5 duplicate-measure gate has run. Seeding an
-        # active series starts collecting it, and the gate ("drop it if it
-        # correlates above 0.8 with macro_m2 / macro_consumer_sentiment, after
-        # transform and after availability alignment") is meant to decide
-        # whether it belongs at all.
+        # N8-5 duplicate-measure gate (2026-08-23): the unemployment and
+        # employment rates stayed below the 0.8 correlation cutoff against
+        # the existing macro series after availability alignment, so they are
+        # active.  Employed persons remains inactive because its level
+        # correlation with macro_m2 was 0.9045.
         CommonFeatureSeries(
             series_id="macro_unemployment_rate",
             source=Source.ECOS,
@@ -828,10 +828,10 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             history_start_date=date(2000, 1, 1),
             max_stale_business_days=45,
             default_transform="level",
-            active=False,
+            active=True,
             notes=(
                 "N8. 원계열 (I28A); without item_code2 the response mixes in "
-                "계절조정 (I28B) at the same TIME. Inactive until N8-5."
+                "계절조정 (I28B) at the same TIME. N8-5 passed; active."
             ),
         ),
         CommonFeatureSeries(
@@ -857,8 +857,8 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             history_start_date=date(2000, 1, 1),
             max_stale_business_days=45,
             default_transform="level",
-            active=False,
-            notes="N8. 원계열 (I28A). Inactive until N8-5.",
+            active=True,
+            notes="N8. 원계열 (I28A). N8-5 passed; active.",
         ),
         CommonFeatureSeries(
             series_id="macro_employed_persons",
@@ -884,7 +884,10 @@ def default_common_feature_series() -> list[CommonFeatureSeries]:
             max_stale_business_days=45,
             default_transform="level",
             active=False,
-            notes="N8. 원계열 (I28A). Inactive until N8-5.",
+            notes=(
+                "N8. 원계열 (I28A). Inactive: level correlation with "
+                "macro_m2 was 0.9045 in the N8-5 gate."
+            ),
         ),
         CommonFeatureSeries(
             series_id="macro_ppi",
