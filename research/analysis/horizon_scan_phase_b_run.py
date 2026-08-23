@@ -1240,14 +1240,11 @@ def run_phase_b_core(
             {**cell, "scan_type": "cum" if cell["cell_type"] == "cumulative" else "bucket"}
             for cell in ready_continuous
         ]
-        combined_continuous_registry = (
-            [
-                {**cell, "scan_type": "cum" if cell["cell_type"] == "cumulative" else "bucket"}
-                for cell in ready_continuous
-            ]
-            if phase_a_reuse is not None
-            else all_combined_continuous_registry
-        )
+        # Keep Phase A cells in the registry when reusing their permutation
+        # rows.  ``run_combined_cross_sectional_permutation`` validates that
+        # every reused Phase A row belongs to the combined A+B population,
+        # then removes those rows from the newly scanned side itself.
+        combined_continuous_registry = all_combined_continuous_registry
         timings.start("phase_b_combined_permutation")
         try:
             with coordinator_lock(joint_namespace):
