@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -105,7 +106,6 @@ _EVIDENCE_GRADE_KEYS = {"evaluation_order", "A", "B", "C", "D", "R"}
 
 # 04_specific_plan_B.md §2.1/§2.4 — frozen before any Phase B outcome is computed.
 _PHASE_B_FIXED_PROTOCOL_VALUES = {
-    "primary_candidate_count_max": 38,
     "phase_a_primary_count": 75,
     "readiness_freeze_before_label_join": True,
     "preflight_blocked_role": "blocked_exploratory",
@@ -150,6 +150,9 @@ def validate_config(raw: dict[str, Any]) -> None:
         raise ValueError(f"evidence_grade missing keys: {sorted(missing_grade_keys)}")
     if raw["evidence_grade"]["evaluation_order"] != ["R", "C", "A", "B", "D"]:
         raise ValueError("evidence_grade.evaluation_order must check R/C before A/B/D")
+    schema_version = int(raw["schema_version"])
+    if schema_version not in {4, 5}:
+        raise ValueError(f"unsupported horizon scan schema_version: {schema_version}")
     for key, expected in _PHASE_B_FIXED_PROTOCOL_VALUES.items():
         actual = raw["phase_b"].get(key)
         if actual != expected:
@@ -167,8 +170,12 @@ def validate_config(raw: dict[str, Any]) -> None:
             f"sparse_primary_grid_families references unknown families: {unknown_sparse}"
         )
     families = raw["families"]
-    if not isinstance(families, list) or len(families) != 25:
-        raise ValueError("exactly 25 families must be registered")
+    if not isinstance(families, list):
+        raise ValueError("families must be a list")
+    if schema_version == 4 and len(families) != 25:
+        raise ValueError("schema v4 must register exactly 25 families")
+    if schema_version == 5 and len(families) <= 25:
+        raise ValueError("schema v5 expansion must append at least one family")
     names = [f.get("family") for f in families]
     if len(set(names)) != len(names) or any(not n for n in names):
         raise ValueError("family names must be unique and non-empty")
@@ -195,6 +202,8 @@ def validate_config(raw: dict[str, Any]) -> None:
         if "event_buckets" in family and family["event_buckets"] != _PHASE_B_EVENT_BUCKETS:
             raise ValueError(f"{family['family']}: event_buckets differs from the frozen grid")
         if (
+            schema_version == 4
+            and
             family.get("role") == "ready"
             and family.get("family") != "flow_individual_netbuy_to_volume"
             and family.get("expected_sign") not in {"+", "-"}
@@ -205,15 +214,21 @@ def validate_config(raw: dict[str, Any]) -> None:
         raise ValueError("exactly four short-selling families must be exploratory")
     if sum(1 for f in families if f.get("phase") == "A") != 17:
         raise ValueError("Phase A must contain 17 families")
-    if sum(1 for f in families if f.get("phase") == "B") != 8:
-        raise ValueError("Phase B must contain 8 families")
+    phase_b_family_count = sum(1 for f in families if f.get("phase") == "B")
+    if schema_version == 4 and phase_b_family_count != 8:
+        raise ValueError("schema v4 Phase B must contain 8 families")
+    if schema_version == 5 and phase_b_family_count <= 8:
+        raise ValueError("schema v5 Phase B must append at least one family")
     fdr_count = sum(
         len(f["primary_horizon_set"]) + len(bucket_primary_cells(f, raw["buckets"]))
         for f in families
         if f.get("fdr_include", False)
     )
-    if fdr_count != 75:
-        raise ValueError(f"global primary hypothesis count must be 75, got {fdr_count}")
+    phase_a_primary_count = int(raw["phase_b"]["phase_a_primary_count"])
+    if fdr_count != phase_a_primary_count:
+        raise ValueError(
+            f"global primary hypothesis count must be {phase_a_primary_count}, got {fdr_count}"
+        )
     short_count = sum(
         len(f["primary_horizon_set"]) + len(bucket_primary_cells(f, raw["buckets"])) for f in short
     )
@@ -228,15 +243,49 @@ def validate_config(raw: dict[str, Any]) -> None:
         )
         for f in phase_b_families
     )
-    max_candidates = raw["phase_b"]["primary_candidate_count_max"]
+    max_candidates = raw["phase_b"].get("primary_candidate_count_max")
+    if not isinstance(max_candidates, int) or max_candidates <= 0:
+        raise ValueError("phase_b.primary_candidate_count_max must be a positive integer")
+    if schema_version == 4 and max_candidates != 38:
+        raise ValueError("schema v4 phase_b.primary_candidate_count_max must be 38")
     if phase_b_count != max_candidates:
         raise ValueError(f"Phase B candidate count must be {max_candidates}, got {phase_b_count}")
 
 
-def load_config(path: Path | str = CONFIG_PATH) -> HorizonScanConfig:
-    path = Path(path)
+def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    merged = deepcopy(base)
+    for key, value in overlay.items():
+        if key in {"extends", "families_append"}:
+            continue
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    appended = overlay.get("families_append", [])
+    if appended:
+        if not isinstance(appended, list):
+            raise ValueError("families_append must be a list")
+        merged["families"] = [*merged.get("families", []), *deepcopy(appended)]
+    return merged
+
+
+def _load_raw(path: Path, *, seen: frozenset[Path] = frozenset()) -> dict[str, Any]:
+    resolved = path.resolve()
+    if resolved in seen:
+        raise ValueError(f"horizon scan config extends cycle: {resolved}")
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("horizon scan YAML root must be an object")
+    parent = raw.get("extends")
+    if parent is None:
+        return raw
+    parent_path = (path.parent / str(parent)).resolve()
+    base = _load_raw(parent_path, seen=seen | {resolved})
+    return _deep_merge(base, raw)
+
+
+def load_config(path: Path | str = CONFIG_PATH) -> HorizonScanConfig:
+    path = Path(path)
+    raw = _load_raw(path)
     validate_config(raw)
     return HorizonScanConfig(raw=raw, config_hash=_canonical_hash(raw), path=path)

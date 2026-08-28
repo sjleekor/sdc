@@ -150,10 +150,25 @@ from research.etl.features.event_scan import (
     PAYOUT_FEATURE_FORMULA_VERSION,
     materialize_event_scan_daily,
 )
+from research.etl.features.filing_activity import (
+    FILING_ACTIVITY_FORMULA_VERSION,
+    FILING_ACTIVITY_TABLE,
+    materialize_filing_activity,
+)
 from research.etl.features.fin_scan import (
     FIN_FEATURE_FORMULA_VERSION,
     FIN_SCAN_TABLE,
     materialize_fin_scan_daily,
+)
+from research.etl.features.market_cap import (
+    MARKET_CAP_FORMULA_VERSION,
+    MARKET_CAP_TABLE,
+    materialize_market_cap,
+)
+from research.etl.features.periodic_extras import (
+    PERIODIC_EXTRAS_FORMULA_VERSION,
+    PERIODIC_EXTRAS_TABLE,
+    materialize_periodic_extras,
 )
 from research.etl.features.sue_event import SUE_EVENT_TABLE, materialize_sue_event
 from research.etl.lake import connect, register_views
@@ -181,6 +196,33 @@ from research.etl.phase_b_quality import (
 from research.etl.snapshot import resolve_config
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _source_quality_for_config(
+    config: HorizonScanConfig,
+    *,
+    vintage_quality_rows: list[dict[str, Any]] = (),
+    pairing_quality_rows: list[dict[str, Any]] = (),
+) -> dict[str, dict[str, Any]]:
+    """Merge measured source checks with config-frozen non-fatal warnings."""
+    quality = compute_family_source_quality(
+        vintage_quality_rows=vintage_quality_rows,
+        pairing_quality_rows=pairing_quality_rows,
+    )
+    for family in config.families:
+        declared = family.get("source_quality")
+        if not declared:
+            continue
+        name = family["family"]
+        current = quality.get(name, {})
+        reason = str(declared.get("warning") or "config_declared_warning")
+        quality[name] = {
+            **current,
+            "source_quality_status": str(declared.get("status", "warn")),
+            "source_quality_reasons": reason,
+            "source_quality_grade_cap": declared.get("grade_cap"),
+        }
+    return quality
 
 
 def load_phase_a_permutation_cell_stats(
@@ -333,6 +375,9 @@ _QUALITY_DIAGNOSTICS: tuple[tuple[str, frozenset[str], Any], ...] = (
 _FORMULA_VERSION_BY_DEPENDENCY = {
     FIN_SCAN_TABLE: FIN_FEATURE_FORMULA_VERSION,
     EVENT_SCAN_TABLE: EVENT_FEATURE_FORMULA_VERSION,
+    MARKET_CAP_TABLE: MARKET_CAP_FORMULA_VERSION,
+    FILING_ACTIVITY_TABLE: FILING_ACTIVITY_FORMULA_VERSION,
+    PERIODIC_EXTRAS_TABLE: PERIODIC_EXTRAS_FORMULA_VERSION,
 }
 _FORMULA_VERSION_BY_FAMILY = {
     "ev_payout_yield": PAYOUT_FEATURE_FORMULA_VERSION,
@@ -534,7 +579,7 @@ def _compute_phase_b_period_ics(
 def register_phase_b_marts(
     con: duckdb.DuckDBPyConnection, lake: LakeConfig, *, force: bool = False
 ) -> set[str]:
-    """Materialize the 5 Phase B marts in dependency order, best-effort.
+    """Materialize Phase B marts in dependency order, best-effort.
 
     ``stock_metric_vintage_fact`` is the sole root every other mart depends on
     directly or transitively; ``feat_event_scan_daily`` also needs
@@ -559,12 +604,25 @@ def register_phase_b_marts(
     trading_days = list(get_trading_days(bounds[0], bounds[1])) if bounds[0] is not None else []
 
     _try(
+        MARKET_CAP_TABLE,
+        lambda: materialize_market_cap(con, lake, force=force),
+    )
+    _try(
+        FILING_ACTIVITY_TABLE,
+        lambda: materialize_filing_activity(con, lake, force=force),
+    )
+
+    _try(
         "stock_metric_vintage_fact",
         lambda: materialize_stock_metric_vintage_fact(
             con, lake, trading_days=trading_days, force=force
         ),
     )
     if "stock_metric_vintage_fact" in available:
+        _try(
+            PERIODIC_EXTRAS_TABLE,
+            lambda: materialize_periodic_extras(con, lake, force=force),
+        )
         _try(
             "fin_quarterly_metric_vintage",
             lambda: materialize_fin_quarterly_metric_vintage(con, lake, force=force),
@@ -691,8 +749,16 @@ def compute_phase_b_gate_updates(
             period_ics = _compute_phase_b_period_ics(
                 con, panel_view=period_view, cell=cell, period_ids=period_ids, **scan_kwargs
             )
+            broad_ic = (
+                combos_by_hid.get(hid, {})
+                .get(("broad", "common_survivor"), {})
+                .get("ic_mean")
+            )
+            gate_sign = cell.get("expected_sign")
+            if gate_sign is None and broad_ic is not None:
+                gate_sign = "+" if broad_ic > 0 else "-"
             period_sign_pass = compute_phase_b_period_sign_pass(
-                period_ics, expected_sign=cell.get("expected_sign")
+                period_ics, expected_sign=gate_sign
             )
             gate_updates[hid].update(period_sign_pass)
 
@@ -700,9 +766,20 @@ def compute_phase_b_gate_updates(
             ready_continuous, min_nw_lag=int(config.raw["placebo"]["temporal_min_nw_lag"])
         )
         if long_cells:
+            gate_long_cells = []
+            for cell in long_cells:
+                broad_ic = (
+                    combos_by_hid.get(cell["hypothesis_id"], {})
+                    .get(("broad", "common_survivor"), {})
+                    .get("ic_mean")
+                )
+                gate_sign = cell.get("expected_sign")
+                if gate_sign is None and broad_ic is not None:
+                    gate_sign = "+" if broad_ic > 0 else "-"
+                gate_long_cells.append({**cell, "expected_sign": gate_sign})
             nonoverlap_result = run_phase_b_continuous_nonoverlap(
                 con,
-                long_cells,
+                gate_long_cells,
                 panel_view=PHASE_B_PANEL_VIEW,
                 sample_start=scan_kwargs["sample_start"],
                 min_names=scan_kwargs["min_names"],
@@ -865,11 +942,12 @@ def run_phase_b_core(
     checkpoint_root: Path | None = None,
     workers: int = 1,
     scan_engine: str = DEFAULT_SCAN_ENGINE,
+    config_path: Path | str = CONFIG_PATH,
 ) -> Path:
     if workers < 1:
         raise ValueError("workers must be >= 1")
     validate_scan_engine(scan_engine)
-    config = load_config(CONFIG_PATH)
+    config = load_config(config_path)
     base = LakeConfig(source=source, data_lake_root=data_lake_root or LakeConfig().data_lake_root)
     required_raw = list(config.raw["phase_b"]["required_raw_tables"])
     lake, resolution = resolve_config(
@@ -1098,7 +1176,14 @@ def run_phase_b_core(
 
     timings.start("phase_b_scan")
     try:
-        if ready_continuous and {"feat_fin_scan_daily", "feat_event_scan_daily"} & phase_b_marts:
+        daily_marts = tuple(
+            name
+            for name in (MARKET_CAP_TABLE, FILING_ACTIVITY_TABLE, PERIODIC_EXTRAS_TABLE)
+            if name in phase_b_marts
+        )
+        if ready_continuous and (
+            {FIN_SCAN_TABLE, EVENT_SCAN_TABLE} & phase_b_marts or daily_marts
+        ):
             register_phase_b_panel(
                 con,
                 fin_scan_view=(
@@ -1107,6 +1192,7 @@ def run_phase_b_core(
                 event_scan_view=(
                     "feat_event_scan_daily" if "feat_event_scan_daily" in phase_b_marts else None
                 ),
+                additional_daily_views=daily_marts,
             )
             continuous_scanned_rows = run_phase_b_continuous_scan(
                 con, ready_continuous, **scan_kwargs
@@ -1342,7 +1428,8 @@ def run_phase_b_core(
             robustness=phase_b_diagnostics,
             diagnostics_written=diagnostics_written,
             q_threshold=q_threshold,
-            source_quality=compute_family_source_quality(
+            source_quality=_source_quality_for_config(
+                config,
                 vintage_quality_rows=_written_diagnostic_rows(
                     core_dir, diagnostics_written, "stock_metric_vintage_quality"
                 ),
@@ -1429,8 +1516,9 @@ def run_combined_ab(
     phase_b_run_dir: Path,
     output_root: Path,
     command_line: list[str],
+    config_path: Path | str = CONFIG_PATH,
 ) -> Path:
-    config = load_config(CONFIG_PATH)
+    config = load_config(config_path)
     phase_a_rows = load_phase_a_primary_rows(phase_a_run_dir, config)
 
     phase_a_success = json.loads((phase_a_run_dir / "_SUCCESS.json").read_text(encoding="utf-8"))
@@ -1515,7 +1603,8 @@ def run_combined_ab(
         path = phase_b_run_dir / "core" / f"{name}.parquet"
         return pl.read_parquet(path).to_dicts() if path.is_file() else []
 
-    source_quality = compute_family_source_quality(
+    source_quality = _source_quality_for_config(
+        config,
         vintage_quality_rows=_phase_b_diagnostic("stock_metric_vintage_quality"),
         pairing_quality_rows=_phase_b_diagnostic("receipt_value_pairing_quality"),
     )

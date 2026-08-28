@@ -4,6 +4,7 @@ from copy import deepcopy
 
 import pytest
 from research.analysis.horizon_scan_config import (
+    CONFIG_PATH,
     _canonical_hash,
     bucket_primary_cells,
     load_config,
@@ -18,6 +19,41 @@ def test_preregistered_registry_and_hypothesis_count() -> None:
     assert sum(f["phase"] == "A" for f in config.families) == 17
     assert config.primary_hypothesis_count == 75
     assert sum(f["role"] == "exploratory_short_regime" for f in config.families) == 4
+
+
+def test_expansion_config_extends_base_without_mutating_it() -> None:
+    expansion_path = CONFIG_PATH.with_name("horizon_scan_expansion_20260827.yaml")
+    base = load_config()
+    expansion = load_config(expansion_path)
+
+    assert base.raw["schema_version"] == 4
+    assert len(base.families) == 25
+    assert expansion.raw["schema_version"] == 5
+    assert len(expansion.families) == 35
+    assert sum(f["phase"] == "A" for f in expansion.families) == 17
+    assert sum(f["phase"] == "B" for f in expansion.families) == 18
+    assert expansion.raw["phase_b"]["primary_candidate_count_max"] == 78
+    assert expansion.primary_hypothesis_count == 75
+    assert expansion.config_hash != base.config_hash
+
+    new_names = {f["family"] for f in expansion.families} - {f["family"] for f in base.families}
+    assert new_names == {
+        "mcap_krx_log",
+        "ev_filing_activity",
+        "ev_amendment_ratio",
+        "own_insider_filing_activity",
+        "own_major_filing_activity",
+        "own_amendment_ratio",
+        "hc_employee_growth",
+        "hc_productivity",
+        "own_major_stake_level",
+        "own_major_stake_change",
+    }
+    regimes = expansion.raw["phase_c"]["regime_candidates"]
+    assert {row["feature_code"] for row in regimes} == {
+        "macro_unemployment_rate_level",
+        "macro_employment_rate_level",
+    }
 
 
 def test_bucket_cells_are_grid_intersection_not_cumulative_count() -> None:

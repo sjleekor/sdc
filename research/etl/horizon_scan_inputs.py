@@ -70,6 +70,7 @@ def build_a0_inputs(
     force: bool = False,
     output_root: Path | None = None,
     research_output_root: Path | None = None,
+    config_path: Path | str = CONFIG_PATH,
 ) -> Path:
     """Build A0 marts and atomically write the success manifest last."""
     # Deferred import: horizon_scan_readiness imports REQUIRED_RAW_INPUTS from
@@ -80,7 +81,7 @@ def build_a0_inputs(
     )
 
     base = config or LakeConfig(source=REMOTE_SOURCE)
-    horizon_config = load_config(CONFIG_PATH)
+    horizon_config = load_config(config_path)
     pinned, resolution = resolve_config(
         base,
         required_inputs=REQUIRED_RAW_INPUTS,
@@ -210,13 +211,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", default=REMOTE_SOURCE)
     parser.add_argument("--data-lake-root", type=Path, default=None)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--config", type=Path, default=CONFIG_PATH)
     args = parser.parse_args(argv)
     config = LakeConfig(
         source=args.source,
         data_lake_root=args.data_lake_root or LakeConfig().data_lake_root,
         engine=EngineOptions(threads=4, memory_limit="4GB"),
     )
-    print(build_a0_inputs(config=config, snapshot_date=args.snapshot_date, force=args.force))
+    print(
+        build_a0_inputs(
+            config=config,
+            snapshot_date=args.snapshot_date,
+            force=args.force,
+            config_path=args.config,
+        )
+    )
     return 0
 
 

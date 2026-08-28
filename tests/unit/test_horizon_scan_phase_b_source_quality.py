@@ -56,6 +56,16 @@ def test_every_phase_b_family_has_a_declared_dependency_set() -> None:
         "fin_sue",
         "ev_net_share_issuance_yoy",
         "ev_payout_yield",
+        "mcap_krx_log",
+        "ev_filing_activity",
+        "ev_amendment_ratio",
+        "own_insider_filing_activity",
+        "own_major_filing_activity",
+        "own_amendment_ratio",
+        "hc_employee_growth",
+        "hc_productivity",
+        "own_major_stake_level",
+        "own_major_stake_change",
     }
 
 

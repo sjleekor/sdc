@@ -6,6 +6,10 @@
   여기에는 **무엇을 언제 하는가**만 둔다.
 - 체크박스는 작업이 **끝났고 검증됐을 때** 채운다. 착수만으로 채우지 않는다.
 
+> **최신 기준일: 2026-08-27.** 과거 날짜별 기록은 보존하고, 실제 현재 상태는 문서 끝의
+> `2026-08-27 로컬 후속`을 우선한다. 이 절은 sj2-server 현재 상태가 아니라 8월 23일 로컬
+> snapshot과 8월 27일 로컬 산출물을 기준으로 썼다.
+
 ---
 
 ## 진행 요약
@@ -13,9 +17,9 @@
 | 차수 | 대상 | 상태 | 비고 |
 |---|---|---|---|
 | 0단계 | 착수 전 공통 | **완료** (2026-08-15) | pykrx 실호출 확인됨 |
-| 1차 | N1 · N2 · N3 | N2 완료 · **N1·N3 차단 해제** (2026-08-18) | K-4 어댑터가 선행 |
+| 1차 | N1 · N2 · N3 | **N1·N2-9/V6·S-4 완료** | N2는 PIT industry 전까지 diagnostic-only |
 | 2차 | N4 · N5 | **N4 목적 A 종결** (2026-08-18) | 대체안 crosswalk 실패 → 측정 안 하고 한계 명시 |
-| 3차 | ledger · N6 · N7 · N8 | **N7 축소** (K-6d) | 6,000 호출 백필 취소 → KIS 횡단면 대조 |
+| 3차 | ledger · N6 · N7 · N8 | **완료** | N7 KIS 횡단면 대조·C4/C5 처분까지 완료 |
 | 후순위 | N9 · DS005 | 착수 안 함 | 조건 미충족 |
 
 > **2026-08-16 — KRX를 쓰는 모든 작업이 멈췄다.**
@@ -111,7 +115,7 @@ N6-5의 대상 집합이 N3에서 **S-1**으로 바뀌었으므로 **N6은 KRX�
 | 9 | **N5-7** + 후순위 공시활동 피쳐 | 신규 수집 없음. 같은 원천이라 한 묶음 사전등록 | — |
 | 10 | **N8** (ECOS) | KRX와 무관 | N8-2 readiness 창 정렬 |
 | 11 | **N7 축소안** 횡단면 대조 | KIS `per`·`pbr`·`eps`·`bps` | I7 · C4/C5 처리 방침 |
-| 12 | **O-8/D-5 freshness 알람** | `daily_market_cap` **제외하고 등록한다.** 판단은 그대로인데 이유가 바뀌었다 — 비어 있어서가 아니라 원천(`sto/stk_bydd_trd`)이 **T+1**이라 `max_lag_trading_days=1`을 영원히 못 맞춘다 (2026-08-19 실측) | — |
+| 12 | **O-8/D-5 freshness 알람** | `daily_market_cap`은 T+1에 맞춘 **별도 2거래일 예산**, 다른 일별 도메인은 1거래일 예산으로 등록한다 | — |
 | 13 | 검정 트랙 `0-4` Phase C 인계 판단 | 수집과 독립 | — |
 | 14 | **K-0c 약관 게이트** · K-6c KIS 약관 | 문서 판단 | 사람 |
 
@@ -333,7 +337,7 @@ N6은 대상 집합이 N3에서 S-1으로 바뀌었으므로(N6-5) **이제 KRX 
       요청 3,959 / 저장 3,959 / skip 0 / 무응답 0 / 오류 0.
       **상폐 법인 1,330건 포함.** `--universe-scope historical`이 없었으면 2,629건만 받았다
 - [x] **N2-8 `definitions/industry_groups.py`** — 순수 코드, Storage 의존 없음
-- [~] **N2-9 `fin_scan.py` 업종 중립 variant** — **코드 완료, 실행은 lake 갱신 대기**
+- [x] **N2-9 `fin_scan.py` 업종 중립 variant** — **2026-08-27 로컬 실행 완료**
   - [x] `build_fin_scan_daily_sql(industry_view=...)`로 파라미터화.
         **횡단면 파티션 16곳이 한 문자열을 공유한다** — 일부만 업종 기준이 되면
         value 합성 점수가 업종 상대와 시장 상대를 섞는다
@@ -345,8 +349,8 @@ N6은 대상 집합이 N3에서 S-1으로 바뀌었으므로(N6-5) **이제 KRX 
   - [x] **`induty_code`가 없으면 큰 소리로 실패한다** — 전부 unknown으로 묶으면
         결과가 기존 경로와 똑같아지고, **그 동일함이 "업종은 상관없다"는 발견처럼 읽힌다**
   - [x] 테스트 9건. per-ticker lag 창은 업종 중립화 대상이 아님도 고정
-  - [ ] **실행은 못 한다** — lake 최신 스냅샷(2026-08-12)이 `induty_code` 추가(08-15) 이전이고
-        sj2가 막혀 있다. **D-8 lake 갱신이 선행**
+  - [x] 8월 23일 lake에서 7,211,785행 materialize. 첫 실데이터 실행에서 중간 CTE의
+        `industry_group` passthrough 누락을 찾아 고치고 binder 회귀 test 추가(10개 통과)
 - [x] **N2-10 검증 V1~V5 완료** → [`poc/n2_validation.md`](poc/n2_validation.md)
   - [x] **V1 결측률 0.000%** (기준 2% 미만). 자릿수 2/3/4/5 = 44/1,387/481/2,047
   - [x] **V2 기준 미달 → 규칙을 고쳤다.** 섹션으로 접어도 43개 중 11개가 20 미만(최소 2).
@@ -359,7 +363,10 @@ N6은 대상 집합이 N3에서 S-1으로 바뀌었으므로(N6-5) **이제 KRX 
   - [x] **V4 `acc_mt != '12'` 142건**(상장 53건). 시총 비중은 N1-8 이후
   - [x] **V5 결측 0·미래 0.** 1900년 이전 3건은 실제 값(신한은행 1897·동화약품 1897·
         우리은행 1899) — **임계값이 틀렸지 데이터가 틀린 게 아니다.** firm age 사용 가능
-  - [ ] V6 업종별 `fin_value_z` 중앙값 분산 — **이 작업의 핵심 산출물.** D-8 이후
+  - [x] V6 업종별 `fin_value_z` 중앙값 분산 — **업종 효과 확인.** 일별 rank corr 중앙값
+        0.8305, 업종 중앙값 사이 표준편차 0.2832 → 0.0958(**65.4% 감소**).
+        날짜별 유효 구성원 20 미만 그룹이 69.4%라 핵심 수치는 `n>=20`으로 제한했다.
+        현재 업종 소급이라 scored 사용은 계속 금지 → [`poc/n2_validation.md`](poc/n2_validation.md)
   - [x] **PIT 금지선 유지** — 진단 전용, scored backtest·acceptance gate·holdout 금지
 
 ### N3. PIT 유니버스 백필 — 기존 스냅샷 테이블
@@ -635,7 +642,8 @@ N6은 대상 집합이 N3에서 S-1으로 바뀌었으므로(N6-5) **이제 KRX 
 
 ### N6. 직원·임원·최대주주·감사의견
 
-상세: [`07_w3_periodic_report_extras.md`](07_w3_periodic_report_extras.md) · 약 16만 호출 · 3일 · 선행: N3, L-1
+상세: [`07_w3_periodic_report_extras.md`](07_w3_periodic_report_extras.md) · 83,700 요청 설계 ·
+2015~2025 raw와 로컬 분석 완료
 
 - [x] **N6-1 PoC** → [`poc/n6_periodic_extras.md`](poc/n6_periodic_extras.md)
   - [x] **변동 폭 확인 — 패키지 살아 있다.** 직원 수 YoY 표준편차 **13.7%**,
@@ -658,10 +666,11 @@ N6은 대상 집합이 N3에서 S-1으로 바뀌었으므로(N6-5) **이제 KRX 
       **연도 씨닝이 서비스에 들어갔다**(162,000 → 83,700). 기본 `--universe-scope historical` —
       감사 비적정은 대부분 나중에 상폐된 기업 얘기라 current로 잡으면 이 패키지가
       존재하는 이유가 편향된다
-- [ ] **N6-5 대상 집합 구성** — ~~N3 + filing_receipt~~ → **S-1이 선행 조건**.
+- [x] **N6-5 대상 집합 구성** — ~~N3 + filing_receipt~~ → **S-1이 선행 조건**.
       `dart_filing_receipt_raw`가 `active_only=True`로 수집돼 **그 자체가 편향돼 있다**
       ([`poc/survivorship_gap.md`](poc/survivorship_gap.md))
-      (현재 상장사로 잡으면 부실 신호에 생존편향이 그대로 들어온다)
+      (현재 상장사로 잡으면 부실 신호에 생존편향이 그대로 들어온다). S-1 확장 뒤 historical
+      모집단으로 백필했다
 - [x] **N6-6 테스트** — 41건
   - [x] 정정본 시나리오 — 다른 `rcept_no`가 오면 덮어쓰지 않고 행이 는다
   - [x] **ledger 기반 exit 75 재개** — 1차 run이 1건 뒤 중단돼도 **끝난 슬라이스는
@@ -683,12 +692,17 @@ N6은 대상 집합이 N3에서 S-1으로 바뀌었으므로(N6-5) **이제 KRX 
         **정정 — `dart_capital_change_raw`는 못 쓴다.** 물적분할은 모회사 주식 수를
         안 바꿔서 **동기가 된 LG화학 사례를 그 방법이 놓친다**(lake 실측: 2019~2021
         분할 흔적 0, `isu_dcrs_stle` 15종에 합병·회사분할 없음). 적용 규모는
-        2015~2025 corp-year 43,549 중 증거 **1,023건(2.35%)**.
-        상폐 기업은 `dart_filing_receipt_raw`의 `active_only` 편향 때문에 보정 밖 →
-        N6-5에서 재적용
-- [ ] **N6-8 백필** — 연도 분할, `dart-backfill-all-years.sh` **마지막 단계**
-- [ ] **N6-9 횡단면 변동 측정** + **final-vintage 한계를 피쳐 문서·evidence grade에 명시**
-- [ ] **N6-10 밸류업 공시 분류 가능성 확인** — 수집·분류만, 검정은 나중
+        active 중심 과거 집계는 2015~2025 corp-year 43,549 중 증거 **1,023건(2.35%)**.
+        S-1 확장 뒤 증거는 **1,175 corp-year**, 연속 직원 수와 맞는 건 1,090건이고
+        크기 게이트까지 통과한 **378건**을 mask한다
+- [x] **N6-8 백필** — employee 92,163행·governance 326,997행, 3,404법인,
+      2015~2025. `executive`는 사전 결정대로 제외
+- [x] **N6-9 횡단면 변동 측정** + **final-vintage 한계를 피쳐 문서·evidence grade에 명시**
+      → [`poc/n6_analysis_20260827.md`](poc/n6_analysis_20260827.md). Scan 후보는
+      `hc_employee_growth_yoy`, `hc_revenue_per_employee`, `own_major_stake` level·change 4개다.
+      과거 접수번호 8,236개가 값과 짝지어지지 않아 grade 상한은 `B`다
+- [x] **N6-10 밸류업 공시 분류 가능성 확인** — 1,104건·765법인, 실제 계획 계열
+      1,016건·758법인. 2024년 이후 표본이라 검정은 미룬다
 
 ### N7. KRX 공식 밸류에이션 — `daily_market_fundamental`
 
@@ -721,9 +735,13 @@ N6은 대상 집합이 N3에서 S-1으로 바뀌었으므로(N6-5) **이제 KRX 
 - [ ] **N7-5 서비스 + CLI** — `prices fundamental-backfill`
 - [ ] **N7-6 테스트**
 - [ ] **N7-7 백필** — 최근 → 과거
-- [ ] **N7-8 대조 분석 C1~C5** — **이 작업의 주 산출물**
-  - [ ] C3 `PER == 0` 집합 vs I1의 "1분위 몰림" 집합 — **I1의 직접 검증**
-  - [ ] C5 IC는 **exploratory로 표기.** 승격하면 새 config로 confirmatory run
+- [x] **N7-8 축소 대조 분석** — 2026-08-27 완료.
+      [`poc/n7_kis_cross_section_20260827.md`](poc/n7_kis_cross_section_20260827.md)
+  - [x] B/M 가격 정렬 rank correlation 0.9274, E/P 0.6547
+  - [x] KIS PER 결측의 90.3%가 canonical E/P 결측·손실과 겹침
+  - [x] C4 폐기 — KIS에 `DIV` 없음
+  - [x] C5 폐기 — 현재 횡단면으로 미래수익률 IC를 만들지 않음
+  - [x] KIS 밸류 feature 승격 안 함. historical 백필은 취소 상태 유지
   - [ ] `10_known_issues.md` I1·I7 반영 여부 판단
 
 ### N8. 고용 지표 (ECOS)
@@ -1123,9 +1141,9 @@ KRX 안내문이 이유를 명시한다 — **약관 제10조 제2호는 자동�
       - [x] **축소안의 검증 범위는 B/M·E/P뿐이다** (2026-08-16 추가).
             KIS는 `per`·`pbr`·`eps`·`bps`만 준다 → **CFO/P·S/P는 검증 못 한다.**
             그리고 **I7이 바로 `revenue`·`gross_profit` 문제라 I7 수정 결과를 못 본다**
-      - [ ] **C4·C5 상태 미결** — 축소안으로 **수행 불가능**해졌다.
-            C4는 KIS 현재가에 `DIV`가 없고, C5는 현재값 횡단면으로 IC를 못 낸다.
-            **폐기인지 다른 시계열로 이전인지 명시할 것**
+      - [x] **C4·C5 폐기 확정** (2026-08-27). C4는 KIS 현재가에 `DIV`가 없고,
+            C5는 현재값 횡단면으로 IC를 못 낸다. 다른 시계열로 옮기지 않고 historical
+            백필도 되살리지 않는다
     - [x] **N7에 남는 건 매핑 검증 하나다** — I1·I7 수정 후에도 매핑이 맞는지는 모른다.
           **다만 횡단면 문제라 6,000일 이력이 필요 없다.**
           KIS `inquire_price`(`FHKST01010100`)가 `per`·`pbr`·`eps`·`bps`를 준다
@@ -1289,13 +1307,12 @@ KRX 안내문이 이유를 명시한다 — **약관 제10조 제2호는 자동�
         `evaluate_staleness`가 각 raw 도메인의 최신 행을 KRX 거래일 달력과 비교한다
   - [x] 거래일 예산(`daily_ohlcv`·`daily_market_cap`·flow 그룹·KRX/FDR/PYKRX common)과
         달력 예산(ECOS·FRED)을 분리. **매일 걸리는 게이트는 아무도 안 본다**
-  - [x] ~~`daily_market_cap`도 게이트에 포함~~ → **뒤집혔다 (2026-08-19).** 당시 근거는
-        "일별 잡이 될 예정"이었는데, 원천(`sto/stk_bydd_trd`)이 **T+1**이라는 게 실측으로
-        나왔다. `max_lag_trading_days=1`은 가장 최근 세션을 요구하므로 **이 도메인은
-        영원히 못 맞춘다.** 매일 걸리는 게이트는 아무도 안 본다 — 같은 원칙이 이번엔
-        반대 결론을 낸다. **제외하고 등록한다** (109행 12번과 일치)
+  - [x] **`daily_market_cap` domain별 예산** (2026-08-28) — 원천(`sto/stk_bydd_trd`)이
+        T+1이라 공통 `max_lag_trading_days=1`은 영원히 못 맞춘다. gate에서 빼면 장기 중단도
+        못 잡으므로 별도 기본값 `max_market_cap_lag_trading_days=2`를 추가했다. 다른 일별
+        도메인은 1거래일 예산을 유지한다
   - [ ] Cronicle 이벤트 등록 (23:00, 저녁 수집 창 종료 후) —
-        **`daily_market_cap` 제외가 등록의 선행 조건이다**
+        domain별 예산 구현은 끝났다. event 등록만 남았다
   - [ ] `profile`을 정기 스케줄에 편입 — 지금 수동 wrapper뿐
 - [x] **O-9 원천 차단 정지 조건 `ConsecutiveFailureGuard`** (2026-08-15, v0.9.4) —
       탐지가 아니라 **정지**다. 모든 수집기가 실패를 항목 오류로 기록하고 넘어가서,
@@ -1478,8 +1495,14 @@ pykrx가 상폐 종목 OHLCV를 상폐일까지 준다(5종목 중 4종목 확�
         종목이 최대 **324개 많고**, 그 차이가 곧 `daily_ohlcv`의 생존편향이다
         (`04_w1_pit_universe.md` §3.6). **이제 바로 돌릴 수 있다**
 - [ ] **S-3 상폐 시점 확정** — N3 월말 스냅샷 diff + `daily_ohlcv` 마지막 거래일
-- [ ] **S-4 편향 크기 측정** — 같은 피쳐를 편향 표본과 복구 표본으로 각각 돌린 IC 차이.
-      **이게 생존편향의 크기 그 자체다**
+- [x] **S-4 편향 크기 측정** (2026-08-27) — continuous 23 family의 longest cumulative
+      셀을 복구 panel과 현재 ACTIVE ticker-only panel에서 비교했다.
+      - 부호 반전 0건, 전체 IC 절대 차이 중앙값 0.00064(common)·0.00072(available)
+      - price 8개는 available 관측치 유지율 중앙값 92.43%, IC 차이 중앙값 0.00293
+      - 최대 `px_near_52w_high` 0.00666, 다음 `px_idio_vol_60d` 0.00588
+      - 편향 표본이 |IC|를 일괄 키우지는 않았다(available 9/23만 증가)
+      - `stock_master` DELISTED 476행 중 16 ticker는 시장 이전 중복. 실제 DELISTED-only 460,
+        label 포함 439, OHLCV 없음 21 → [`poc/s4_survivorship_bias_20260827.md`](poc/s4_survivorship_bias_20260827.md)
 
 ---
 
@@ -1539,10 +1562,195 @@ N1 PoC 중에 드러난 별건이다. 측정: [`poc/n1_adjusted_price_vintage.md
 
 ---
 
+## 2026-08-22 재점검 — S-1부터 다시 잇는 실행 순서
+
+### 확인한 현재 상태
+
+| 항목 | 현재 값 | 판정 |
+|---|---:|---|
+| historical corp 대상 | 3,959 | S-1 기준 모집단 |
+| `dart_filing_receipt_raw` 법인 | 3,490 | 469개 미포함. 상폐·전 연도 무응답 집합으로 `no_data` 분류 |
+| `dart_financial_statement_raw` 법인 | 3,093 | 866개 미포함 |
+| `dart_xbrl_document` 법인 | 3,093 | financials와 같은 미포함 집합. financial raw가 없는 법인 |
+| `dart_share_count_raw` 법인 | 3,430 | 529개 미포함 |
+| `dart_employee_raw` | 0행 | N6 백필 전 |
+| `dart_governance_raw` | 0행 | N6 백필 전 |
+| `daily_market_cap` | 7,066,126행 | N1 백필 완료 |
+| `stock_master_snapshot` | 132행 / 기준일 121개 | N3는 N1 응답에 흡수된 상태 |
+| `collection_slice_state` | 334,457행, 모두 `no_data` | endpoint별 해석 없이는 완료 판정에 사용하지 않음 |
+
+8월 22일 OpenDART run은 성공으로 끝났지만, 성공은 모든 법인에 데이터가 있었다는 뜻이
+아니다. S-1 완료 조건은 `targets_processed=3,959`가 아니라 **법인·연도별 `stored` 또는
+API `no_data` 사유가 모두 닫힌 상태**다.
+
+현재 run 상태도 먼저 정리해야 한다. active process는 없는데 prod `ingestion_runs`에는
+2025 financials(8월 18일 시작)와 2020 share-info(8월 21일 시작)가 아직 `running`으로 남아
+있었다. 두 stale run은 8월 22일에 `failed`로 닫았다. 2021 financials의 실제 실패 한 건은
+강제 재시도로 573행을 넣었다. 2020 share-info 11013도 3,959 법인 전체를 강제 재수집해
+15,836 요청·오류 0·`no_data` 6,600으로 끝냈다. 2015 XBRL의 11012·11013·11014는
+financial raw 선행조건 오류라 `no_data`로 분류했다. 2020 XBRL은 일일 rate limit으로
+실패했지만 2020년 financial raw가 있는 2,241개 법인과 XBRL 법인이 일치해 데이터 공백은
+없었다. 전체 강제 재수집은 응답 속도 때문에 중단하고 stale run을 닫았다. 상세 표는
+[`poc/s1_coverage_20260822.md`](poc/s1_coverage_20260822.md)에 남겼다. filing receipt의
+연도별 `no_data` ledger를 남기기 전까지 S-1을 최종 완료로 표시하지 않는다.
+
+### 남은 작업 순서
+
+1. **S-1 coverage ledger 작성** — raw 보유 법인과 `collection_slice_state=no_data`를
+   확인했다. filing receipt의 연도별 사유를 별도 ledger로 남기는 일은 추적성 개선 항목으로
+   남긴다. 상세 결과는 [`poc/s1_coverage_20260822.md`](poc/s1_coverage_20260822.md)다.
+2. **stale run 정리 후 잔여 재수집** — stale `running` 2건을 닫고 2021 financials 오류와
+   2020 share-info 11013을 강제 재수집했다. 2015 XBRL은 선행 raw가 없어 `no_data`로
+   분류했고, 2020 XBRL rate-limit 실패는 기존 financial/XBRL 법인 집합이 일치해 재수집하지
+   않는다.
+3. **KIS flows cutover** — 2일차 대조를 확정하고 평일 `foreign_holding` 이벤트와 월요일
+   `investor`·`shorting` 이벤트를 등록했다. `short_selling_balance_quantity` 보완을 위해
+   기존 KRX flows 체인은 유지한다.
+4. **N6 백필** — 8월 22일 23:08부터 historical 3,959법인·2015~2025년을 대상으로
+   `employee, major_shareholder, major_change, audit_opinion` 백필을 실행 중이다.
+   `executive`는 1차 대상에서 제외한다. 완료 뒤 변동성·final-vintage 한계를 기록한다.
+5. **N8·N1 후속 검증** — ECOS seed/sync와 중복 게이트, N1 V4/V7을 실행한다.
+6. **D-8 lake 갱신** — prod를 local로 동기화하고 raw parquet을 다시 만든다. 그 뒤 N2-9,
+   N2-10 V6, S-2~S-4를 실행한다.
+7. **검정 재실행** — I7·`mcap_krx_log`·최신 raw를 반영한 새 config를 사전등록하고
+   Phase A → B → AB, 이어서 Phase C·acceptance gate를 진행한다.
+
+### 계획에서 취소·종결로 바꿔 읽을 항목
+
+- N3-5b는 N1 Open API 백필에 흡수됐다.
+- N4는 crosswalk 실패로 목적 A를 종결했다. 구현하지 않는다.
+- N7-2~N7-7의 6,000회 백필은 취소됐다. KIS 횡단면 대조만 남았다.
+- N9·DS005·`elestock`·공매도 잔고 대체 경로는 후순위다.
+
+### 운영 정리
+
+완료된 일회성 Cronicle 이벤트는 검증이 끝나는 즉시 삭제하고, N1·KIS flows·freshness
+정기 이벤트만 남긴다. 현재 상태를 확인하지 않고 문서의 8월 18일 “진행 중” 문구를
+완료 판정으로 사용하지 않는다.
+
+## 2026-08-23~24 재점검 — 현재 완료·잔여
+
+이 절은 sj2-server에 접속하지 않고 확인한 결과다. 원천 규모는
+`snapshot_date=2026-08-23/source=sj2_remote` 로컬 parquet manifest를 썼고, 검정 결과는 로컬
+official artifact를 썼다. 현재 prod DB·Cronicle 상태를 뜻하지 않는다.
+
+### 완료된 항목
+
+| 묶음 | 8월 23~24일 결과 | 판정 |
+|---|---|---|
+| S-1 filing coverage | 누락 법인 469개 × 2015~2026년 5,628요청이 모두 OpenDART `013 no_data`, 오류 0 | **완료**. filing receipt raw는 3,490법인·1,447,329행 |
+| N1 market cap | `daily_market_cap` 7,066,126행, 2014-06 이후 이력과 corporate-action 마스킹·DART/KRX 주식 수 대조 완료 | **수집·검증 완료**. `mcap_krx_log`의 Scan 배선은 별도 |
+| S-2·S-3 상폐 가격 | 상폐 master 476개 중 OHLCV 보유 455개, 가격 이력이 없는 법인 21개, OHLCV 637,467행 | **가격 백필 완료**. 정확한 상폐일은 미해결 |
+| N6 raw | employee 92,163행·3,404법인, governance 326,997행·3,404법인, 2015~2025 | **raw 백필 완료**. 8월 27일 횡단면·final-vintage 평가도 완료 |
+| N8 ECOS | 실업률·고용률·취업자 수 각 319개월, 2000-01~2026-07 | 실업률·고용률 `active=true`, 취업자 수는 M2 level corr 0.9045로 `active=false` |
+| 최신 lake/A0 | 8월 23일 raw snapshot과 A0 7개 mart 발행, 일별 행 7,211,785 | **완료** |
+| Phase A/B/AB | A 60분 11초, B 44분 24초, AB 1초 미만. 결합 discovery 56, B-cell grade A5·B7·C25·D1 | **official 완주**, 실행시간 목표 달성 |
+| T1 acceptance gate | 8월 24일 walk-forward 재실행. h20 비용 반영 차이 −0.0025 | **20일 모델 비채택 유지**, holdout 미사용 |
+
+N6 세부 raw는 employee 92,163행, major shareholder 247,171행, major change 24,740행,
+audit opinion 55,086행이다. S-1과 N6 근거는 각각
+[`poc/s1_coverage_20260823.md`](poc/s1_coverage_20260823.md), N6 local parquet manifest다.
+N8 근거는 [`poc/n8_gate_20260823.md`](poc/n8_gate_20260823.md), 상폐 가격 근거는
+[`poc/s3_delisting_dates_20260823.md`](poc/s3_delisting_dates_20260823.md)다.
+
+### 최신 검정에 아직 들어가지 않은 것
+
+8월 23일 official Scan은 기존 25 family·113가설을 다시 검정한 실행이다. 다음 항목은 코드나
+raw가 있어도 해당 config와 Horizon Scan 입력에는 연결되지 않았다.
+
+- `mcap_krx_log`
+- `feat_filing_activity`
+- N2 업종 중립 variant
+- N6 employee·governance 파생 후보
+- N8 실업률·고용률
+
+따라서 최신 `fin_log_mcap` 결과를 KRX `daily_market_cap` 결과로 읽으면 안 된다. 현재
+`fin_log_mcap`은 DART share 기반 `market_cap_pit`를 쓴다.
+
+### 다음 작업 순서
+
+1. ~~N2-9·N2-10 V6~~ — **2026-08-27 완료**.
+2. ~~S-4 상폐 bias 비교~~ — **2026-08-27 완료**.
+3. ~~N6-9·N6-10~~ — **2026-08-27 완료**.
+4. ~~**N7 KIS 횡단면 대조와 C4/C5 처분**~~ — **2026-08-27 완료**. 2,764종목 정상 응답,
+   B/M rank correlation 0.9274. C4·C5는 폐기했고 historical 백필은 되살리지 않는다.
+5. ~~**새 feature config 사전등록**~~ — **2026-08-27 완료**. 확장 hash `889c3e83…`,
+   Phase B 78개·결합 BH 153개. 기존 `config_hash=ab0de634…`는 보존한다.
+   **mart·Scan 배선은 다음 단계**다.
+6. **새 A0 → A → B → AB를 순서대로 실행한다.** BH 모집단이 늘어난 뒤 기존 56개 discovery가
+   어떻게 바뀌는지 함께 기록한다.
+7. **Phase C와 T2 acceptance gate로 넘긴다.** holdout은 feature·horizon·variant 선택이 모두
+   끝난 뒤 한 번만 연다.
+
+N9·DS005·`elestock`과 공매도 잔고 대체 경로는 계속 후순위다. sj2-server에 다시 접근할 수 있을
+때 N6 prod run·freshness·Cronicle, KIS 정기 체인과 K-0c 약관 게이트를 따로 확인한다.
+
+## 2026-08-27 로컬 후속
+
+sj2-server 없이 앞 절의 1~3번을 닫았다.
+
+- N2 업종 중립 `fin_value_z`는 기존 값과 일별 rank correlation 중앙값 0.8305다. 업종 간
+  중앙값 표준편차는 0.2832에서 0.0958로 줄었다. 다만 현재 업종을 과거에 소급하므로
+  Horizon Scan에는 아직 넣지 않는다.
+- S-4는 continuous 23 family에서 부호 반전이 없었다. available IC 절대 차이 중앙값은
+  0.00072이고 price 8개 중앙값은 0.00293이다. 정확한 상폐일이 없는 21개는 한계로 남긴다.
+- N6는 4개 feature를 골랐다. 상세 계약은
+  [`poc/n6_analysis_20260827.md`](poc/n6_analysis_20260827.md)다.
+
+N7도 8월 27일 끝냈다. 2,764종목을 전부 받았고, 실제 외부 HTTP는 rate-limit 재시도 10회와
+token 발급 1회를 포함해 2,775회였다. B/M 가격 정렬 rank correlation은 0.9274, E/P는
+0.6547이다. C4·C5는 폐기하고 KIS 밸류를 feature로 올리지 않는다. 상세는
+[`poc/n7_kis_cross_section_20260827.md`](poc/n7_kis_cross_section_20260827.md)다.
+
+새 config 사전등록도 끝냈다. 따라서 다음 순서의 시작점은 **mart·Scan 배선**이다. 그 뒤 A0 →
+A → B → AB → Phase C/T2 acceptance gate 순서로 간다.
+
+## 2026-08-28 확장 검정·sj2 운영 점검
+
+앞 절의 mart·Scan 배선과 A → B → AB를 모두 끝냈다. 확장 config `889c3e83…` 결과는 Phase A
+75/75 valid, Phase B 78/78 ready, AB 153가설·discovery 87·`screen_pass` 40이다. 기존 Phase A
+discovery 변화는 0개다. Phase C는 설명할 만한 부호 반전이 없어 열지 않았다.
+
+T2는 `screen_pass` family의 primary feature 14개를 baseline 40개에 함께 붙여 valid 구간을
+비교했다. Rank IC와 비용 반영 spread가 h5·h20·h60에서 모두 좋아졌다. 최종 holdout은 h60
+라벨이 성숙하는 2026년 10~11월까지 미룬다.
+
+sj2-server가 다시 켜진 뒤 read-only로 확인한 운영 상태는 다음과 같다.
+
+| 항목 | 확인 결과 | 판정 |
+|---|---|---|
+| 배포 | `ghcr.io/sjleekor/sdc:v0.11.2`, Postgres 18.3 healthy | 서버·compose 정상 |
+| N6 prod | 2015~2025, 122,729슬라이스, raw 419,160행, 오류 0 | 백필 완료 |
+| 일일 OHLCV·common·KRX flows | 대부분 2026-08-27까지 | 정상 |
+| `daily_market_cap` | 최신 2026-08-19 | 정기 Cronicle event 없음 |
+| KIS `foreign_holding_shares` | 최신 2026-08-20 | 08-21~27 잡이 전 종목 skip |
+| `ingestion_runs` | `running` 0건 | stale run 없음 |
+
+KIS skip 원인은 source 전환용 cursor가 KRX·KIS coverage를 합쳐 읽은 것이다. KRX가 당일 행을
+먼저 쓰면 KIS snapshot까지 완료로 잡혔다. KIS와 KRX cursor를 source별로 분리했고 테스트를
+추가했다. 아직 release·deploy하지 않았다.
+
+남은 순서는 다음과 같다.
+
+1. KIS cursor 수정 release·sj2 deploy
+2. 배포 뒤 KIS `foreign_holding` plan 확인과 1회 실행
+3. `daily_market_cap` 평일 T+1 Cronicle event 등록과 08-20 이후 gap 복구
+4. `daily_market_cap` 2거래일·다른 일별 도메인 1거래일 예산으로 nightly freshness event 등록
+5. 평문 PostgreSQL URI가 남은 Cronicle job 파일 178개 정리와 DB credential 회전
+6. 2026년 10~11월 T1·T2 h60 holdout 1회 평가
+7. K-0c/KIS 약관을 사람이 확인
+
+1~5는 운영 변경이라 read-only 점검과 분리한다. 6은 시간 게이트, 7은 사람 판단이다.
+
 ## 개정 이력
 
 | 날짜 | 내용 |
 |---|---|
+| 2026-08-28 | **확장 A/B/AB와 T2 validation 완료.** Phase C는 열지 않음. sj2 N6·freshness·Cronicle 점검 완료, KIS cursor 버그 로컬 수정. prod 반영과 누락 복구는 운영 승인 대기 |
+| 2026-08-27 | **확장 config 사전등록 완료.** hash `889c3e83…`, 기존 Phase A 75개 보존, Phase B 38→78개, 결합 BH 153개. N8은 Phase C regime 후보로 분리 |
+| 2026-08-27 | **N7 KIS 횡단면 대조 완료.** 2,764종목 정상 응답, B/M rank correlation 0.9274, E/P 0.6547. C4·C5 폐기, KIS 밸류 feature 비승격 확정 |
+| 2026-08-27 | **로컬 후속 1~3 완료.** N2 V6, S-4 생존편향 비교, N6 횡단면·final-vintage·밸류업 분류와 Horizon 후보 4개를 확정. 다음 시작점은 N7 KIS 횡단면 대조 |
+| 2026-08-24 | **8월 23~24일 로컬 산출물 반영.** S-1·N1·S-2/S-3·N6 raw·N8 완료, 최신 A/B/AB와 T1 acceptance gate 결과, 새 Scan에 아직 연결되지 않은 후보와 다음 실행 순서를 정리 |
 | 2026-08-15 | 최초 작성. `00`~`09` 계획을 실행 체크리스트로 분해 |
 | 2026-08-16 | **K 묶음 신설.** KRX 차단이 페이싱이 아니라 약관 위반임을 확인하고(K-0), Open API 서비스 목록을 대조했다(K-1). N1·N3는 옮길 수 있고 `flows`·N4·N7은 갈 곳이 없다. N3-5b는 60/152에서 종료 판정, N4·N7에 차단 표기, S-2·V-1b에 선행 조건 갱신 |
 | 2026-08-16 | **K-1b 경로 인벤토리.** `universe sync`가 FDR 라이브러리 안에서 같은 MDC 엔드포인트를 치고 있었다 — 회계에 없던 KRX 수집기다. **문이 셋**(MDC 로그인 / pykrx 로그인 / FDR 익명)이라 K-5 폐기 범위를 넓혔다. `MDCSTAT01501` 응답 키가 `OutBlock_1`이라는 K-2 간접 근거도 기록 |

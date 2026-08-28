@@ -190,6 +190,7 @@ def _build_one(
         cfg_run,
         created_at="grade_a_acceptance_gate",
         write=True,
+        reuse_existing_marts=True,
         feature_cols_override=list(cols),
     )
 

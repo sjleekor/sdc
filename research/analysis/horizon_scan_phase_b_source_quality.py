@@ -78,6 +78,16 @@ FAMILY_METRIC_DEPENDENCIES: dict[str, frozenset[str]] = {
     "ev_payout_yield": frozenset(
         {"issued_shares", "treasury_shares", "treasury_share_acquisition_amount"}
     ),
+    "mcap_krx_log": frozenset(),
+    "ev_filing_activity": frozenset(),
+    "ev_amendment_ratio": frozenset(),
+    "own_insider_filing_activity": frozenset(),
+    "own_major_filing_activity": frozenset(),
+    "own_amendment_ratio": frozenset(),
+    "hc_employee_growth": frozenset(),
+    "hc_productivity": frozenset(),
+    "own_major_stake_level": frozenset(),
+    "own_major_stake_change": frozenset(),
 }
 
 

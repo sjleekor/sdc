@@ -19,6 +19,7 @@ import pytest
 from research.etl.features.fin_scan import (
     CROSS_SECTION_WITH_INDUSTRY,
     build_fin_scan_daily_sql,
+    register_fin_scan_daily_view,
 )
 from research.etl.industry import register_industry_group_view
 
@@ -66,6 +67,39 @@ def test_the_per_ticker_windows_stay_per_ticker() -> None:
     variant = build_fin_scan_daily_sql(industry_view="dim_industry_group")
 
     assert "PARTITION BY ticker, market ORDER BY trade_date" in variant
+
+
+def test_the_variant_binds_and_exposes_its_group() -> None:
+    """Catch a group column dropped between panel and window CTEs."""
+    con = duckdb.connect()
+    con.execute(
+        "CREATE TABLE pit (trade_date DATE, ticker VARCHAR, market VARCHAR, "
+        "market_cap_pit DOUBLE, issued_shares_pit DOUBLE, shares_is_available BOOLEAN, "
+        "shares_invalid_flag BOOLEAN, shares_available_from DATE)"
+    )
+    con.execute(
+        "CREATE TABLE quality (trade_date DATE, ticker VARCHAR, market VARCHAR, "
+        "is_halted BOOLEAN, valid_session_idx BIGINT)"
+    )
+    con.execute(
+        "CREATE TABLE vintages (ticker VARCHAR, metric_code VARCHAR, fs_basis VARCHAR, "
+        "seq_key BIGINT, rcept_no VARCHAR, metric_kind VARCHAR, ttm_value DOUBLE, "
+        "standalone_value DOUBLE, ttm_available_from DATE, available_from DATE, "
+        "value_lag_4q DOUBLE)"
+    )
+    con.execute("CREATE TABLE industries (ticker VARCHAR, industry_group VARCHAR)")
+
+    register_fin_scan_daily_view(
+        con,
+        view_name="industry_fin_scan",
+        pit_view="pit",
+        quality_view="quality",
+        vintage_view="vintages",
+        industry_view="industries",
+    )
+
+    columns = [row[0] for row in con.execute("DESCRIBE industry_fin_scan").fetchall()]
+    assert "industry_group" in columns
 
 
 # --------------------------------------------------------------------------

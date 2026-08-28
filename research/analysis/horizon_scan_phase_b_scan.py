@@ -88,8 +88,9 @@ def build_phase_b_panel_sql(
     analysis_panel_view: str = "analysis_panel",
     fin_scan_view: str | None = "feat_fin_scan_daily",
     event_scan_view: str | None = "feat_event_scan_daily",
+    additional_daily_views: tuple[str, ...] = (),
 ) -> str:
-    """LEFT JOIN Phase B's two daily feature marts onto the Phase A panel.
+    """LEFT JOIN Phase B daily feature marts onto the Phase A panel.
 
     Both marts are one row per raw ``daily_ohlcv`` row (B-4/B-5 docstrings) —
     the same grain ``analysis_panel_view`` is already keyed on — so this
@@ -113,6 +114,10 @@ def build_phase_b_panel_sql(
     if event_scan_view is not None:
         select_cols.append("es.* EXCLUDE (trade_date, ticker, market)")
         joins.append(f"LEFT JOIN {event_scan_view} es USING (trade_date, ticker, market)")
+    for index, daily_view in enumerate(additional_daily_views):
+        alias = f"x{index}"
+        select_cols.append(f"{alias}.* EXCLUDE (trade_date, ticker, market)")
+        joins.append(f"LEFT JOIN {daily_view} {alias} USING (trade_date, ticker, market)")
     return f"""
         SELECT
             {", ".join(select_cols)}
@@ -128,6 +133,7 @@ def register_phase_b_panel(
     analysis_panel_view: str = "analysis_panel",
     fin_scan_view: str | None = "feat_fin_scan_daily",
     event_scan_view: str | None = "feat_event_scan_daily",
+    additional_daily_views: tuple[str, ...] = (),
 ) -> str:
     """Register the Phase B panel view; raises ``RuntimeError`` if it fanned out."""
     con.execute(
@@ -136,6 +142,7 @@ def register_phase_b_panel(
             analysis_panel_view=analysis_panel_view,
             fin_scan_view=fin_scan_view,
             event_scan_view=event_scan_view,
+            additional_daily_views=additional_daily_views,
         )
     )
     assert_panel_join_preserves_keys(con, view_name, analysis_panel_view)

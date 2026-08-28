@@ -1,7 +1,7 @@
 # 00. Phase A/B 실행시간 개선 — 개요와 결정
 
 - 작성일: 2026-08-23
-- 상태: 코드 구현 완료, 새 A0·실데이터 검증 대기
+- 상태: 8월 23일 실데이터 official A/B/AB 완주·실행시간 목표 달성. 8월 27일 통계·판정 결정성 재검증 완료
 - 대상: Horizon Scan `Phase A`, `Phase B`, `Phase AB`
 - 선행 문서:
   - [`../01_feature_candidate/03_horizon_predictive_power_plan.md`](../01_feature_candidate/03_horizon_predictive_power_plan.md)
@@ -40,6 +40,23 @@ permutation 전 frame을 실제 event grain의 canonical key로 정렬한다.
 따라서 바뀔 것으로 예상하는 값은 joint `permutation_summary`, combined empirical p-value, AB
 파생값이고, real SUE 6개 cell의 t/p는 parity 대상이다. real 값이 의미 있게 바뀌면 예상된 변화가
 아니라 regression으로 처리한다. 이 수정은 별도 contract version과 새 Phase B/AB run으로 발행한다.
+
+### 2026-08-23 실데이터 결과
+
+`snapshot_date=2026-08-23`, `config_hash=ab0de634…`로 A → B → AB를 official로 완주했다.
+
+| 단계 | run_id | 시간 | peak RSS |
+|---|---|---:|---:|
+| Phase A | `20260823T210913-b649a460` | 3,611.211초(60분 11초) | 9.94GB |
+| Phase B | `20260823T221441-b649a460` | 2,664.390초(44분 24초) | 20.36GB |
+| Phase AB | `20260823T225913-b649a460` | 1초 미만 | artifact 결합만 실행 |
+
+A+B+AB는 약 1시간 44분으로 최종 목표 3시간을 넘지 않았다. Phase B가 Phase A의
+`permutation_cell_stats.parquet`를 재사용했고, `joint_cs_v2` mapping hash 검증과 AB preflight도
+통과했다. 8월 27일 같은 코드·입력의 두 번째 official A → B → AB도 완주했다. primary 표와
+permutation·grade는 정확히 같았고, non-overlap·rank correlation에 최대 `1.11e-16`의 마지막
+비트 차이만 남았다. 따라서 통계·판정 결정성은 통과했지만 byte-level content hash 결정성은
+아직 완전하지 않다. 기존 계약 full parity 결과의 별도 발행은 남아 있다.
 
 ## 2. 지금 구조와 바꿀 구조
 
@@ -109,18 +126,17 @@ Phase B 기존 run 두 건에서 초반 스캔·bootstrap·진단은 약 39분�
 
 ## 4. 목표
 
-아래 수치는 구현 완료 판정에 쓸 목표다. 아직 보장된 실행시간은 아니다.
+아래는 개선 전 실측, 8월 23일 최신 실측과 목표를 비교한 값이다.
 
-| 단계 | 현재 실측 | 1차 목표 | 최종 목표 |
-|---|---:|---:|---:|
-| Phase A | 4시간 41분 | 2시간 30분 이하 | 1시간 30분 안팎 |
-| Phase B | 5시간 30분 | 3시간 이하 | A 재사용 1시간 45분, 병렬 적용 1시간 30분 이하 |
-| Phase AB | 1초 미만 | 유지 | 유지 |
-| A+B+AB | 약 10시간 11분 | 5시간 30분 이하 | 3시간 이하 |
+| 단계 | 개선 전 | 2026-08-23 | 최종 목표 | 판정 |
+|---|---:|---:|---:|---|
+| Phase A | 4시간 41분 | 60분 11초 | 1시간 30분 안팎 | 달성 |
+| Phase B | 5시간 30분 | 44분 24초 | 1시간 30분 이하 | 달성 |
+| Phase AB | 1초 미만 | 1초 미만 | 유지 | 달성 |
+| A+B+AB | 약 10시간 11분 | 약 1시간 44분 | 3시간 이하 | 달성 |
 
-최종 목표에는 native kernel, Phase A 통계 재사용, 제한된 병렬 실행이 모두 포함된다. 메모리
-bandwidth에 따라 병렬화 효과가 작을 수 있으므로 실행시간은 단계별 benchmark 뒤 다시 고정한다.
-최종 목표를 병렬화 효과에만 기대지 않도록 feature별 fetch 재사용을 병렬화보다 먼저 끝낸다.
+최신 실행은 native kernel, Phase A 통계 재사용과 worker 2개를 적용했다. B의 peak RSS가
+20.36GB였으므로 같은 장비에서 A와 B를 동시에 돌리지 않는다.
 
 ## 5. 지켜야 할 것
 

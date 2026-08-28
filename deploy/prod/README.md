@@ -183,6 +183,8 @@ source lock은 `/tmp/sdc-locks/<domain>.lock`에 `flock`을 걸고, lock 획득 
 | `dart-backfill-all-years.sh` | OpenDART 연도별 대량 backfill. 기본은 전체 backfill 구간을 `opendart` lock으로 감싼다. |
 | `flows-backfill-range.sh` | `FLOW_START`, `FLOW_END`로 지정한 수급 range를 수동 backfill한다. 항상 `krx_marketdata` lock을 사용한다. |
 | `db-init.sh` | collector의 `db init` 실행. |
+| `ops-freshness-report.sh` | raw freshness gate. 기본 예산은 일별 1거래일, `daily_market_cap` 2거래일, release-lagged source 14일이다. |
+| `prices-market-cap-backfill.sh` | `daily_market_cap` gap detection/backfill. 2026-08-28 현재 정기 event 등록 전이다. |
 | `pull-image.sh` | collector image pull. |
 | `up-db.sh` | DB service 기동. |
 | `validate.sh` | `validate --market all` 실행. |

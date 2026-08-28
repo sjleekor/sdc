@@ -136,6 +136,10 @@ def build_freshness_report(storage: Storage, *, running_limit: int = 20) -> Fres
 TRADING_DAY_SOURCES = frozenset({Source.KRX, Source.KIS, Source.FDR, Source.PYKRX})
 
 DEFAULT_MAX_LAG_TRADING_DAYS = 1
+# KRX Open API publishes daily_market_cap at T+1. At the end of today's
+# collection window the newest legitimate row is the previous trading session,
+# so this domain needs a separate two-session budget rather than an exemption.
+DEFAULT_MAX_MARKET_CAP_LAG_TRADING_DAYS = 2
 DEFAULT_MAX_LAG_CALENDAR_DAYS = 14
 
 
@@ -179,6 +183,7 @@ def evaluate_staleness(
     *,
     as_of: date | None = None,
     max_lag_trading_days: int = DEFAULT_MAX_LAG_TRADING_DAYS,
+    max_market_cap_lag_trading_days: int = DEFAULT_MAX_MARKET_CAP_LAG_TRADING_DAYS,
     max_lag_calendar_days: int = DEFAULT_MAX_LAG_CALENDAR_DAYS,
     holidays: set[date] | None = None,
 ) -> list[StaleFinding]:
@@ -192,6 +197,9 @@ def evaluate_staleness(
     findings: list[StaleFinding] = []
 
     trading_threshold = _trading_day_threshold(as_of, max_lag_trading_days, holidays)
+    market_cap_threshold = _trading_day_threshold(
+        as_of, max_market_cap_lag_trading_days, holidays
+    )
     calendar_threshold = as_of - timedelta(days=max(1, max_lag_calendar_days))
 
     def check(domain: str, latest: date | None, threshold: date | None, cadence: str) -> None:
@@ -208,7 +216,7 @@ def evaluate_staleness(
             )
 
     check("daily_ohlcv", report.price_latest_date, trading_threshold, "trading")
-    check("daily_market_cap", report.market_cap_latest_date, trading_threshold, "trading")
+    check("daily_market_cap", report.market_cap_latest_date, market_cap_threshold, "trading")
 
     for group, latest in sorted(report.flow_group_latest_dates.items()):
         if group in FLOW_METRIC_GROUPS and not active_flow_metrics(group):

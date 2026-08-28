@@ -1,7 +1,7 @@
 # 03. 구현 순서와 검증 계획
 
 - 작성일: 2026-08-23
-- 상태: 코드 구현·unit 검증 완료, 새 A0·실데이터 검증 대기
+- 상태: 코드·unit·8월 23일 실데이터 검증과 8월 27일 통계·판정 결정성 반복 완료. 일부 parity 발행 대기
 - 원칙: 성능 개선과 통계 계약 변경을 한 commit에서 섞지 않는다.
 
 ---
@@ -582,29 +582,29 @@ I6의 1시간 45분은 앞단 39분도 native kernel과 fetch 재사용으로 �
 
 다음을 모두 만족하면 작업을 끝낸다.
 
-- [ ] stage timing artifact가 A/B에 있다.
-- [ ] `analysis_kernel_hash`가 `research/etl/metrics.py`와 공통 module을 포함한다.
+- [x] stage timing artifact가 A/B에 있다.
+- [x] `analysis_kernel_hash`가 `research/etl/metrics.py`와 공통 module을 포함한다.
 - [ ] legacy→legacy 재현성 기준선과 canonical order 비용이 기록돼 있다.
-- [ ] Polars native IC와 vectorized Newey–West가 parity test를 통과했다.
+- [x] Polars native IC와 vectorized Newey–West가 parity test를 통과했다.
 - [ ] SUE sorted-v2가 입력 순서 불변 test를 통과했고, real SUE 6개 cell parity와 joint null
       파생값 delta가 발행됐다.
-- [ ] formation fetch가 unique feature 단위로 줄고 permutation의 cell별 DuckDB fetch가 없어졌다.
+- [x] formation fetch가 unique feature 단위로 줄고 permutation의 cell별 DuckDB fetch가 없어졌다.
 - [ ] full 100-replicate 기존 계약 parity가 통과했다.
-- [ ] replicate checkpoint로 중단된 실행을 이어갈 수 있다.
-- [ ] checkpoint fingerprint가 smoke/official 혼입을 거부한다.
-- [ ] checkpoint fingerprint가 DuckDB/Polars/NumPy 버전이 다른 resume을 거부한다.
-- [ ] 같은 checkpoint namespace의 동시 run이 coordinator lock으로 막힌다.
-- [ ] Phase A cell-level permutation artifact가 발행된다.
-- [ ] cell artifact에 combined BH 재계산에 필요한 registry 필드가 있다.
-- [ ] A/B family disjoint assert가 적용됐다.
-- [ ] B가 재생성한 replicate별 `mapping_hash`가 Phase A artifact와 exact match다.
-- [ ] A∪B `hypothesis_id` 유일성 assert가 combined BH 전에 적용됐다.
-- [ ] Phase B가 Phase A 75개 null 통계를 다시 계산하지 않는다.
-- [ ] AB preflight가 A/B 상호 동일성과 B가 참조한 Phase A artifact 일치를 검사한다.
-- [ ] 1/2 workers 결과가 같다.
-- [ ] peak RSS와 최종 실행시간 목표를 확인했다.
-- [ ] Phase A → B → AB 새 official run이 완주했다.
-- [ ] 결과 문서가 새 run id와 artifact hash를 가리킨다.
+- [x] replicate checkpoint로 중단된 실행을 이어갈 수 있다.
+- [x] checkpoint fingerprint가 smoke/official 혼입을 거부한다.
+- [x] checkpoint fingerprint가 DuckDB/Polars/NumPy 버전이 다른 resume을 거부한다.
+- [x] 같은 checkpoint namespace의 동시 run이 coordinator lock으로 막힌다.
+- [x] Phase A cell-level permutation artifact가 발행된다.
+- [x] cell artifact에 combined BH 재계산에 필요한 registry 필드가 있다.
+- [x] A/B family disjoint assert가 적용됐다.
+- [x] B가 재생성한 replicate별 `mapping_hash`가 Phase A artifact와 exact match다.
+- [x] A∪B `hypothesis_id` 유일성 assert가 combined BH 전에 적용됐다.
+- [x] Phase B가 Phase A 75개 null 통계를 다시 계산하지 않는다.
+- [x] AB preflight가 A/B 상호 동일성과 B가 참조한 Phase A artifact 일치를 검사한다.
+- [x] 1/2 workers 결과가 같다.
+- [x] peak RSS와 최종 실행시간 목표를 확인했다.
+- [x] Phase A → B → AB 새 official run이 완주했다.
+- [x] 결과 문서가 새 run id와 artifact hash를 가리킨다.
 
 ## 17. 2026-08-23 구현 기록
 
@@ -641,5 +641,50 @@ I6의 1시간 45분은 앞단 39분도 native kernel과 fetch 재사용으로 �
 - SUE permutation은 `ticker`와 `original_rcept_no`를 필수 grain key로 요구한다. temporal checkpoint는 SUE contract를 사용하지 않는다.
 - native/legacy IC·Newey–West parity, process worker path, mapping 중복 key, corrupt checkpoint 복구, report timing을 unit test로 추가했다.
 
-아직 새 A0와 실데이터 official run은 하지 않았다. 따라서 실제 RSS, Phase A/B/AB 완주 시간,
-100회 mapping hash exact match와 full-data parity는 새 A0를 만든 뒤 별도로 확인해야 한다.
+이 문단까지는 실데이터 실행 전 리뷰 기록이다. 실제 실행 결과는 아래 §19가 우선한다.
+
+## 19. 2026-08-23~24 실데이터 검증 결과
+
+`snapshot_date=2026-08-23`, `config_hash=ab0de634…`, `workers=2`로 새 A0와 official
+Phase A → B → AB를 완주했다.
+
+| 단계 | run_id | 결과 | 시간 | peak RSS |
+|---|---|---|---:|---:|
+| A | `20260823T210913-b649a460` | 75/75 valid, discovery 32 | 3,611.211초 | 9,936,863,232 bytes |
+| B | `20260823T221441-b649a460` | 38/38 ready, discovery 24 | 2,664.390초 | 20,360,249,344 bytes |
+| AB | `20260823T225913-b649a460` | `m_ab=113`, discovery 56, `screen_pass` 12 | 1초 미만 | artifact 결합만 실행 |
+
+실행시간은 A 1시간 30분 안팎, B 1시간 30분 이하, 합계 3시간 이하 목표를 모두 달성했다.
+Phase B는 A의 75개 null cell 통계를 다시 계산하지 않았고, 100개 replicate의 `joint_cs_v2`
+mapping hash를 A artifact와 맞춘 뒤 완료됐다. AB도 같은 snapshot·source·A0 manifest와 B가
+참조한 A run을 확인한 뒤 발행됐다. 8월 27일 현재 `tests/unit`은 **1,343개 통과**다.
+
+남은 항목은 다음과 같다.
+
+- run spec이 `git_dirty=true`다. 같은 코드·입력의 두 번째 official 결정성 run은 아직 없다.
+- legacy→legacy 기준선과 canonical order 비용 기록은 완료 여부를 따로 확인해야 한다.
+- real SUE 6셀 parity와 joint null 파생값 delta, 기존 계약 full 100-replicate parity는 별도
+  산출물로 발행되지 않았다.
+- `09_all_feature_results.md`를 포함한 전체 결과 문서가 새 run id와 artifact hash를 가리키지는
+  않는다.
+- I8은 SUE bootstrap만 10분을 넘는다고 분리 측정됐을 때 시작한다. 최신 B의 robustness stage
+  전체 시간만으로는 이 조건을 판정하지 않는다.
+
+## 20. 2026-08-27 결정성 재실행
+
+같은 8월 23일 A0 manifest·config·worker 수로 official A → B → AB를 한 번 더 실행했다.
+
+| 단계 | 재실행 run_id | 시간 | peak RSS |
+|---|---|---:|---:|
+| A | `20260827T082015-b649a460` | 3,758.931초 | 9,352,904,704 bytes |
+| B | `20260827T092909-b649a460` | 2,686.803초 | 17,587,863,552 bytes |
+| AB | `20260827T101418-b649a460` | 1초 미만 | artifact 결합만 실행 |
+
+A/B primary와 permutation parquet, AB 결합 primary·overlay는 기존 run과 정확히 같았다.
+discovery 56, `screen_pass` 12, B-cell grade A5·B7·C25·D1도 그대로다. 다른 파일은
+non-overlap offset 평균과 rank correlation 통계의 부동소수점 마지막 비트뿐이며 최대 절대 차이는
+`1.11e-16`이다. content hash는 이 차이를 포함하므로 A/B/AB 모두 달라졌다.
+
+결론은 **통계·판정 결정성 통과, byte-level 결정성 미완료**다. canonical 결과는 8월 23일 run을
+유지하며 8월 27일 run은 반복 검증 lineage로 남긴다. byte-level까지 고정하려면 offset과 rank
+correlation 집계 전에 행 순서와 합산 순서를 더 강하게 고정해야 한다.

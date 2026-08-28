@@ -4,7 +4,8 @@
 - 공통 규약: [`01_implementation_checklist.md`](01_implementation_checklist.md)
 - 원천: OpenDART 정기보고서 주요정보(DS002) 5종
 - 새 테이블: `dart_employee_raw`, `dart_governance_raw`
-- 예상 규모: **약 16만 호출 · 키 3개 기준 약 3일**
+- 확정 규모: **83,700 요청 설계 · 2015~2025 raw 백필 완료**
+- 전체 분석: [`poc/n6_analysis_20260827.md`](poc/n6_analysis_20260827.md)
 
 ---
 
@@ -158,6 +159,11 @@ vintage probe(`09` §8)처럼 "얼마나 자주 바뀌는가"를 재는 것은 �
 감사의견·최대주주 변동처럼 **정정이 곧 신호인 항목**에서는 이 한계가 특히 아프다.
 그래서 **부실 신호 피쳐는 final-vintage 위에서 결론 내지 않는다.**
 
+> **2026-08-27 실측.** employee 28,283 corp-year 중 사업보고서 접수번호가 둘 이상인 곳은
+> 6,744건이다. filing receipt 36,673개 중 N6 값과 짝지어진 건 28,437개뿐이라 과거 접수번호
+> **8,236개가 값 없이 남는다.** 추가 vintage 보존율은 1.84%다. 채택 후보는 최종
+> `rcept_no` 날짜부터만 쓰고 `source_warning=final_vintage`, evidence grade 상한 `B`를 둔다.
+
 ---
 
 ## 4. 작업 순서
@@ -295,6 +301,10 @@ PoC(`poc/n6_periodic_extras.md` §6) 권고안대로 다섯 개를 고정한다.
    ([`poc/survivorship_gap.md`](poc/survivorship_gap.md)) **상폐 기업은 이 보정을 못
    받는다.** N6-5(S-1 선행)로 대상 집합을 다시 짤 때 같이 재적용한다.
 
+   **2026-08-27 재측정** — S-1 확장 뒤 2015~2025 증거는 **1,175 corp-year**다. 연속
+   직원 수가 있는 1,090건에 크기 게이트를 적용했고 **378건**을 mask한다. 위 1,023건은
+   active 중심 filing으로 계산한 과거 값으로 남겨둔다.
+
 ---
 
 ## 7. 리스크
@@ -320,12 +330,27 @@ PoC(`poc/n6_periodic_extras.md` §6) 권고안대로 다섯 개를 고정한다.
 
 공통 DoD(`01` §7)에 더해:
 
-- [ ] `poc/n6_periodic_extras.md` — `row_ordinal` vs hash 확정, **변동 폭 사전 확인**
-- [ ] **`collection_slice_state` ledger 구현·동작 확인** (`01` §2.4)
-- [ ] 대상 집합이 **역사적 상장사**로 구성됐는가 (현재 상장사 2,700이 아님)
-- [ ] **§3.5 final-vintage 한계가 문서에 명시**되고, 부실 신호 피쳐에 그 제한이 붙었는가
-- [ ] 2016~2026 사업보고서 백필 완료, 연도별 커버리지 기록
-- [ ] exit 75 재개가 실제 백필 중에 동작했음을 로그로 확인
-- [ ] **횡단면 변동 측정**: 각 후보 피쳐의 연간 변화율 분포. 변동이 없으면 그렇게 적는다
-- [ ] §6의 네 결정 고정
-- [ ] 밸류업 공시 분류 가능성 확인 결과(§5)
+- [x] `poc/n6_periodic_extras.md` — `row_ordinal` vs hash 확정, **변동 폭 사전 확인**
+- [x] **`collection_slice_state` ledger 구현·동작 확인** (`01` §2.4)
+- [x] 대상 집합이 **역사적 상장사**로 구성됐는가 (현재 상장사 2,700이 아님)
+- [x] **§3.5 final-vintage 한계가 문서에 명시**되고, 부실 신호 피쳐에 그 제한이 붙었는가
+- [x] 2015~2025 사업보고서 백필 완료, 연도별 coverage 기록
+- [x] exit 75 재개 경로가 ledger 테스트와 실 DB slice 재실행에서 동작했는가
+- [x] **횡단면 변동 측정**: [`poc/n6_analysis_20260827.md`](poc/n6_analysis_20260827.md)
+- [x] §6의 다섯 결정 고정
+- [x] 밸류업 공시 분류 가능성 확인 결과(§5)
+
+---
+
+## 9. 2026-08-27 최종 후보
+
+전체 백필 분석 결과 다음 4개 feature만 새 Horizon Scan config에 넣는다.
+
+- `hc_employee_growth_yoy`
+- `hc_revenue_per_employee`
+- `own_major_stake`
+- `own_major_stake_chg`
+
+`hc_avg_pay_growth`는 단위·집계 정규화 전까지 보류한다. `gov_audit_opinion_flag`와
+`own_control_change`는 final-vintage·availability 계약을 통과하지 못해 `NE`다.
+밸류업 분류는 1,104건·765법인까지 가능하지만 2024년 이후 표본이라 검정을 미룬다.

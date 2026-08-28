@@ -104,9 +104,14 @@ KIS     : (종목)        → 기간
 | 4 | **CLI가 `Source.KRX`를 하드코딩**한다 | `cli/app.py` |
 | 5 | **freshness도 `Source.KRX` 고정** | `service/freshness.py` |
 
-**전환 조건으로 둘 것**: source 전환 cursor · 종목·날짜·페이지 checkpoint ·
+**전환 조건으로 둘 것**: source별 cursor · 종목·날짜·페이지 checkpoint ·
 no-data tombstone · **실 HTTP/retry 계수** · 전역 auth·rate-limit 서킷 브레이커 ·
 source-aware freshness.
+
+> **2026-08-28 운영 수정:** 전환 첫날의 빈 KIS cursor를 피하려고 KRX·KIS coverage를
+> 합친 구현은 두 collector가 함께 도는 동안 맞지 않았다. KRX 당일 행이 KIS 작업까지
+> 완료로 만들었고, `foreign_holding`이 08-20 이후 멈췄다. KRX와 KIS cursor를 각각의
+> source로 분리하고, 첫 KIS 실행의 bounded lookback 재수집을 허용하는 쪽으로 고쳤다.
 
 **이게 K-6f의 실제 작업량이다.** 어댑터를 쓰는 것보다 크다.
 

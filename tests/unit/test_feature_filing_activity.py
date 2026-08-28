@@ -67,7 +67,7 @@ def _run(
         )
     con.execute("CREATE VIEW dart_filing_receipt_raw AS SELECT * FROM receipts")
 
-    result = con.execute(build_filing_activity_sql()).fetchall()
+    result = con.execute(build_filing_activity_sql(universe_view="dim_universe_daily")).fetchall()
     columns = [description[0] for description in con.description]
     rows = [dict(zip(columns, row, strict=True)) for row in result]
     return sorted(rows, key=lambda row: row["trade_date"])

@@ -205,23 +205,22 @@ def _run(storage: FakeStorage, provider: FakeProvider, **kwargs):
     )
 
 
-# --- condition 1: the cursor spans sources ----------------------------------
+# --- condition 1: the cursor is source-scoped -------------------------------
 
 
-def test_the_cursor_reads_krx_and_kis_together() -> None:
-    # Scoping the cursor to Source.KIS would read empty on changeover day and
-    # the incremental start point would vanish.
+def test_the_cursor_reads_only_kis_rows() -> None:
+    # KRX can finish first on the same day. Its row must not make the KIS item
+    # look complete, or the daily KIS snapshot job skips the whole universe.
     storage = FakeStorage()
     _run(storage, FakeProvider())
 
     assert storage.coverage_calls
     assert storage.coverage_calls[0]["sources"] == FLOW_CURSOR_SOURCES
-    assert Source.KRX in storage.coverage_calls[0]["sources"]
-    assert Source.KIS in storage.coverage_calls[0]["sources"]
+    assert storage.coverage_calls[0]["sources"] == (Source.KIS,)
 
 
-def test_krx_history_lets_the_first_kis_run_resume_rather_than_refetch() -> None:
-    # KRX filled everything up to 2026-08-12; KIS should ask only for the rest.
+def test_kis_history_lets_the_next_kis_run_resume_rather_than_refetch() -> None:
+    # KIS filled everything up to 2026-08-12; it should ask only for the rest.
     stored_through = SESSIONS[-3]
     coverage = {
         (ticker_metric[0], ticker_metric[1]): (SESSIONS.index(stored_through) + 1, stored_through)

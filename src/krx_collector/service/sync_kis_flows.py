@@ -4,11 +4,10 @@ This is not a port of :mod:`sync_krx_flows` with a different provider. KRX
 answers ``(date, market) -> every ticker``; KIS answers ``(ticker) -> a date
 range``. Everything downstream of that difference has to change:
 
-* **The cursor spans sources.** ``Source.KIS`` starts with zero rows, so a
-  source-scoped ``MAX(trade_date)`` reads empty on changeover day and the
-  incremental start point disappears. The cursor asks about the *metric*, over
-  both sources, which is also what makes the KIS run resume exactly where the
-  KRX run stopped.
+* **The cursor is source-scoped.** KRX and KIS can run in parallel, so a KRX
+  row must not make a KIS work item look complete. The first transition run may
+  refetch the bounded lookback window; after that, only KIS rows advance the
+  KIS cursor.
 * **The checkpoint is per ticker.** A KRX failure leaves a market-day hole that
   aggregate counters describe. A KIS failure leaves a hole in one name, and the
   run has to say which one — a sample of three error keys cannot.
@@ -84,9 +83,10 @@ KIS_FLOW_METRIC_GROUPS: dict[str, tuple[str, ...]] = {
     SHORTING_GROUP: ("short_selling_volume", "short_selling_value"),
 }
 
-# Sources that write these metric codes. The KIS cursor reads KRX history so
-# the changeover does not look like an empty table.
-FLOW_CURSOR_SOURCES: tuple[Source, ...] = (Source.KRX, Source.KIS)
+# Only rows written by this collector can complete its work. Reading KRX here
+# made the daily KIS foreign-holding job skip every ticker whenever the KRX job
+# had already stored the same trading day.
+FLOW_CURSOR_SOURCES: tuple[Source, ...] = (Source.KIS,)
 
 DEFAULT_LOOKBACK_DAYS = 10
 DEFAULT_NO_DATA_TTL_DAYS = 7

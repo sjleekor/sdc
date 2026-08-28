@@ -109,7 +109,7 @@ def phase_b_candidate_cells(config: HorizonScanConfig) -> list[dict[str, Any]]:
 
 
 def build_phase_b_candidate_registry(config: HorizonScanConfig) -> list[dict[str, Any]]:
-    """§2.1: exactly 38 candidate cells, or the registry itself is wrong.
+    """Build exactly the config-frozen number of Phase B candidate cells.
 
     Mirrors ``build_primary_hypothesis_registry``'s defense-in-depth pattern —
     ``validate_config`` already checks this count at load time; this re-checks
@@ -117,9 +117,10 @@ def build_phase_b_candidate_registry(config: HorizonScanConfig) -> list[dict[str
     (not a config bug) still fails loudly.
     """
     cells = phase_b_candidate_cells(config)
-    if len(cells) != PHASE_B_MAX_CANDIDATES:
+    expected = int(config.raw["phase_b"]["primary_candidate_count_max"])
+    if len(cells) != expected:
         raise ValueError(
-            f"Phase B candidate registry must have {PHASE_B_MAX_CANDIDATES} cells, "
+            f"Phase B candidate registry must have {expected} cells, "
             f"got {len(cells)}"
         )
     return cells
@@ -173,10 +174,11 @@ def summarize_phase_b_readiness(
     """§2.3: ``M_B_ready`` and the combined ``M_AB = 75 + M_B_ready`` count."""
     ready_primary = [r for r in rows if r["role"] == "ready_primary"]
     blocked = [r for r in rows if r["role"] == "blocked_exploratory"]
-    if len(ready_primary) + len(blocked) != PHASE_B_MAX_CANDIDATES:
+    expected = int(config.raw["phase_b"]["primary_candidate_count_max"])
+    if len(ready_primary) + len(blocked) != expected:
         raise ValueError(
             "ready_primary + blocked_exploratory must equal the frozen candidate count "
-            f"({PHASE_B_MAX_CANDIDATES}), got {len(ready_primary) + len(blocked)}"
+            f"({expected}), got {len(ready_primary) + len(blocked)}"
         )
     phase_a_count = config.raw["phase_b"]["phase_a_primary_count"]
     return {
@@ -204,7 +206,7 @@ def write_phase_b_readiness_freeze(
     payload = {
         "config_hash": config.config_hash,
         "generated_at": generated_at,
-        "max_candidates": PHASE_B_MAX_CANDIDATES,
+        "max_candidates": int(config.raw["phase_b"]["primary_candidate_count_max"]),
         **summary,
         "cells": rows,
     }

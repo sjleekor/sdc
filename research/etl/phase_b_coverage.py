@@ -53,7 +53,10 @@ import duckdb
 
 from krx_collector.definitions.metric_rules import default_metric_mapping_rules
 from research.etl.features.event_scan import EVENT_SCAN_TABLE
+from research.etl.features.filing_activity import FILING_ACTIVITY_TABLE
 from research.etl.features.fin_scan import FIN_SCAN_TABLE
+from research.etl.features.market_cap import MARKET_CAP_TABLE
+from research.etl.features.periodic_extras import PERIODIC_EXTRAS_TABLE
 from research.etl.features.sue_event import (
     EVENT_BUCKETS,
     MIN_SUE_HISTORY,
@@ -356,6 +359,35 @@ _EVENT_PRIMARY: tuple[tuple[str, str | None, str, str | None], ...] = (
     ),
 )
 
+_EXPANSION_PRIMARY: tuple[tuple[str, str, str | None], ...] = (
+    (MARKET_CAP_TABLE, "mcap_krx_log", None),
+    (FILING_ACTIVITY_TABLE, "ev_filing_burst_60d", None),
+    (FILING_ACTIVITY_TABLE, "ev_amendment_ratio_1y", None),
+    (FILING_ACTIVITY_TABLE, "own_insider_filing_burst_60d", None),
+    (FILING_ACTIVITY_TABLE, "own_major_filing_60d", None),
+    (FILING_ACTIVITY_TABLE, "own_amendment_ratio_1y", None),
+    (
+        PERIODIC_EXTRAS_TABLE,
+        "hc_employee_growth_yoy",
+        "CAST(trade_date - hc_employee_growth_available_from AS BIGINT)",
+    ),
+    (
+        PERIODIC_EXTRAS_TABLE,
+        "hc_revenue_per_employee",
+        "CAST(trade_date - hc_productivity_available_from AS BIGINT)",
+    ),
+    (
+        PERIODIC_EXTRAS_TABLE,
+        "own_major_stake",
+        "CAST(trade_date - own_major_stake_available_from AS BIGINT)",
+    ),
+    (
+        PERIODIC_EXTRAS_TABLE,
+        "own_major_stake_chg",
+        "CAST(trade_date - own_major_stake_chg_available_from AS BIGINT)",
+    ),
+)
+
 
 def _feature_coverage_specs() -> tuple[FeatureCoverageSpec, ...]:
     specs: list[FeatureCoverageSpec] = []
@@ -399,6 +431,22 @@ def _feature_coverage_specs() -> tuple[FeatureCoverageSpec, ...]:
                 precondition_expr=None,
             )
         )
+    for mart, feature, age_expr in _EXPANSION_PRIMARY:
+        for variant, value_column in (
+            ("native_t", feature),
+            ("lag1", f"{feature}_lag1"),
+        ):
+            specs.append(
+                FeatureCoverageSpec(
+                    feature=value_column,
+                    variant=variant,
+                    source_mart=mart,
+                    value_column=value_column,
+                    age_expr=age_expr if variant == "native_t" else None,
+                    precondition="none",
+                    precondition_expr=None,
+                )
+            )
     return tuple(specs)
 
 
@@ -436,7 +484,7 @@ def build_feature_coverage_sql(
             CAST({age} AS BIGINT) AS age_days,
             {_sql_str_literal(spec.precondition)} AS precondition,
             {precondition_ok} AS precondition_ok
-        FROM {views[spec.source_mart]}""")
+        FROM {views.get(spec.source_mart, spec.source_mart)}""")
     long_sql = "\n        UNION ALL\n".join(branches)
     return f"""
     WITH long AS ({long_sql}
@@ -591,7 +639,18 @@ def register_feature_coverage_view(
     view_name: str = FEATURE_COVERAGE_TABLE,
     **views: str,
 ) -> str:
-    con.execute(f"CREATE OR REPLACE VIEW {view_name} AS {build_feature_coverage_sql(**views)}")
+    existing = {
+        row[0]
+        for row in con.execute(
+            "SELECT table_name FROM duckdb_tables() "
+            "UNION SELECT view_name FROM duckdb_views()"
+        ).fetchall()
+    }
+    specs = tuple(spec for spec in FEATURE_COVERAGE_SPECS if spec.source_mart in existing)
+    con.execute(
+        f"CREATE OR REPLACE VIEW {view_name} AS "
+        f"{build_feature_coverage_sql(specs=specs, **views)}"
+    )
     return view_name
 
 

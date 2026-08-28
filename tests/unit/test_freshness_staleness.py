@@ -37,6 +37,7 @@ from krx_collector.service.sync_krx_flows import (
 SATURDAY = date(2026, 8, 15)
 FRIDAY = date(2026, 8, 14)
 THURSDAY = date(2026, 8, 13)
+TUESDAY = date(2026, 8, 18)
 
 NO_HOLIDAYS: set[date] = set()
 
@@ -67,8 +68,9 @@ def test_current_data_produces_no_findings() -> None:
 
 
 def test_reproduces_the_2026_08_14_outage() -> None:
-    # Everything one session behind, which is what the host being down over the
-    # evening window looked like in the database.
+    # Same-day domains are one session behind, which is what the host being down
+    # over the evening window looked like. Thursday market cap is still valid
+    # on Friday because that source is T+1.
     report = _report(
         price=THURSDAY,
         market_cap=THURSDAY,
@@ -83,7 +85,6 @@ def test_reproduces_the_2026_08_14_outage() -> None:
 
     assert {finding.domain for finding in findings} == {
         "daily_ohlcv",
-        "daily_market_cap",
         "krx_security_flow_raw:investor_net_buy",
         "krx_security_flow_raw:short_selling",
         "common:market_kospi_close_krx",
@@ -116,13 +117,35 @@ def test_an_empty_table_is_stale_rather_than_skipped() -> None:
 
 
 def test_market_cap_is_gated_alongside_prices() -> None:
-    # daily_market_cap becomes a daily job, so leaving it out of the gate would
-    # recreate the exact hole the gate exists to close. It is empty until the
-    # N1 backfill lands, and empty is stale -- so schedule the gate after the
-    # backfill, do not carve out an exemption for it.
+    # A separate T+1 budget is not an exemption. Empty is still stale.
     findings = _evaluate(_report(market_cap=None))
 
     assert [finding.domain for finding in findings] == ["daily_market_cap"]
+
+
+def test_market_cap_has_a_separate_t_plus_one_budget() -> None:
+    # 08-17 is a holiday. At Tuesday's close the T+1 source may legitimately
+    # end on Friday while same-day domains must already contain Tuesday.
+    report = _report(
+        price=TUESDAY,
+        market_cap=FRIDAY,
+        flows={"investor_net_buy": TUESDAY},
+    )
+
+    assert _evaluate(report, as_of=TUESDAY, holidays={date(2026, 8, 17)}) == []
+
+
+def test_market_cap_two_published_sessions_behind_is_stale() -> None:
+    report = _report(
+        price=TUESDAY,
+        market_cap=THURSDAY,
+        flows={"investor_net_buy": TUESDAY},
+    )
+
+    findings = _evaluate(report, as_of=TUESDAY, holidays={date(2026, 8, 17)})
+
+    assert [finding.domain for finding in findings] == ["daily_market_cap"]
+    assert findings[0].required_at_or_after == FRIDAY
 
 
 def test_release_lagged_sources_get_a_calendar_budget() -> None:

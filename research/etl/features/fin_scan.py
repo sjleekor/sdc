@@ -171,6 +171,7 @@ def build_fin_scan_daily_sql(
         "" if industry_view is None else f"\n        LEFT JOIN {industry_view} ind USING (ticker)"
     )
     industry_column = "" if industry_view is None else ",\n            ind.industry_group"
+    industry_passthrough = "" if industry_view is None else ", industry_group"
 
     return f"""
     WITH {_metric_intervals_cte(vintage_view)},
@@ -197,7 +198,7 @@ def build_fin_scan_daily_sql(
     ),
     resolved AS (
         SELECT
-            trade_date, ticker, market,
+            trade_date, ticker, market{industry_passthrough},
             market_cap_pit, shares_is_available, shares_invalid_flag,
             is_halted, valid_session_idx,
             CASE WHEN v_net_income_cfs IS NOT NULL THEN 'CFS'
@@ -260,7 +261,7 @@ def build_fin_scan_daily_sql(
     ),
     ratios AS (
         SELECT
-            trade_date, ticker, market, fs_basis_used, negative_equity,
+            trade_date, ticker, market{industry_passthrough}, fs_basis_used, negative_equity,
             gross_profit_source, value_available_from, profitability_available_from,
             asset_growth_available_from, accruals_available_from,
             CASE WHEN base_ok THEN ln(market_cap_pit) END AS fin_log_mcap,
@@ -361,7 +362,7 @@ def build_fin_scan_daily_sql(
         FROM value_combined
     )
     SELECT
-        trade_date, ticker, market,
+        trade_date, ticker, market{industry_passthrough},
         fin_log_mcap,
         LAG(fin_log_mcap) OVER (PARTITION BY ticker, market ORDER BY trade_date)
             AS fin_log_mcap_lag1,

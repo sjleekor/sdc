@@ -61,7 +61,9 @@ FILING_ACTIVITY_TABLE = "feat_filing_activity"
 #: different numbers under an identical run fingerprint.
 #:
 #:   filing_v1 — the 2026-08 definitions as first written (N5-7).
-FILING_ACTIVITY_FORMULA_VERSION = "filing_v1"
+#:   filing_v2 — expose one-session-lag variants used by the expansion Scan.
+#:   filing_v3 — use the registered broad Horizon Scan universe mart.
+FILING_ACTIVITY_FORMULA_VERSION = "filing_v3"
 
 #: 임원ㆍ주요주주 특정증권등 소유상황보고서 — the ``elestock`` event, as a receipt.
 #: The separator is U+318D (ㆍ), not a middle dot, which is why this matches on a
@@ -96,7 +98,7 @@ def _classification_sql() -> str:
 
 
 def build_filing_activity_sql(
-    universe_view: str = "dim_universe_daily",
+    universe_view: str = "dim_universe_broad_daily",
     filing_receipt_view: str = "dart_filing_receipt_raw",
 ) -> str:
     """SQL producing ``feat_filing_activity`` at (trade_date, ticker, market) grain.
@@ -227,6 +229,7 @@ def build_filing_activity_sql(
                 ROWS BETWEEN {RATIO_WINDOW - 1} PRECEDING AND CURRENT ROW
             )
         )
+        , features AS (
         SELECT
             trade_date, ticker, market,
             {", ".join(
@@ -242,6 +245,17 @@ def build_filing_activity_sql(
             own_amendments_{RATIO_WINDOW}d / NULLIF(own_filings_{RATIO_WINDOW}d, 0)
                 AS own_amendment_ratio_1y
         FROM windowed
+        )
+        SELECT
+            *,
+            lag(ev_filing_burst_60d) OVER w AS ev_filing_burst_60d_lag1,
+            lag(ev_amendment_ratio_1y) OVER w AS ev_amendment_ratio_1y_lag1,
+            lag(own_insider_filing_burst_60d) OVER w
+                AS own_insider_filing_burst_60d_lag1,
+            lag(own_major_filing_60d) OVER w AS own_major_filing_60d_lag1,
+            lag(own_amendment_ratio_1y) OVER w AS own_amendment_ratio_1y_lag1
+        FROM features
+        WINDOW w AS (PARTITION BY ticker, market ORDER BY trade_date)
     """
 
 
@@ -249,7 +263,7 @@ def materialize_filing_activity(
     con: duckdb.DuckDBPyConnection,
     config: LakeConfig,
     *,
-    universe_view: str = "dim_universe_daily",
+    universe_view: str = "dim_universe_broad_daily",
     filing_receipt_view: str = "dart_filing_receipt_raw",
     force: bool = False,
 ) -> str:

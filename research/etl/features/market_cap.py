@@ -36,6 +36,7 @@ from research.etl.corporate_actions import (
 from research.etl.mart import materialize, register_mart_view
 
 MARKET_CAP_TABLE = "feat_market_cap"
+MARKET_CAP_FORMULA_VERSION = "market_cap_v2"
 
 
 def build_market_cap_sql(
@@ -56,6 +57,7 @@ def build_market_cap_sql(
         join = ""
         unreliable = "FALSE"
     return f"""
+        WITH base AS (
         SELECT
             m.trade_date,
             m.ticker,
@@ -70,6 +72,13 @@ def build_market_cap_sql(
                  THEN ln(CAST(m.market_cap AS DOUBLE)) END AS mcap_krx_log
         FROM {market_cap_view} m
         {join}
+        )
+        SELECT
+            *,
+            lag(mcap_krx_log) OVER (
+                PARTITION BY ticker, market ORDER BY trade_date
+            ) AS mcap_krx_log_lag1
+        FROM base
     """
 
 

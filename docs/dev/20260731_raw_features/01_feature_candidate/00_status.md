@@ -1,53 +1,98 @@
 # 00. 진행 상태 — 이 디렉터리를 이어받는 사람이 먼저 읽는 문서
 
-- 작성일: 2026-08-11 (갱신: 2026-08-13 13:10 KST)
-- 브랜치: `refactor/parquet-compute-reproducible`
+- 작성일: 2026-08-28 (확장 A/B/AB·T2 validation·sj2 운영 점검 반영)
+- 브랜치: `main` (`v0.11.2-7-g0bf9997`, working tree dirty)
 - 목적: 문서가 8개(합계 30만 자 이상)라 어디까지 왔는지 한눈에 안 보인다. 이 파일은
   **지금 상태와 다음에 할 일만** 적는다. 근거·설계는 각 문서로 넘긴다.
 
-## 0. 새 세션이면 여기부터
+## 0. 2026-08-28 현재 상태
 
-**크리티컬 패스가 끝났다.** 수집 → export → Phase B → Phase A → AB가 전부 official로
-발행됐고, **evidence grade가 확정됐다 — A=5, B=2, C=24, D=7**. 계산으로 급히 돌릴 것은 없다.
+확장 config `889c3e83…`의 Phase A → B → AB와 T2 validation까지 끝냈다. **Phase C는 열지
+않는다.** 실제 부호 반전은 `own_insider_filing_activity`와 `px_resid_mom_12_1` 두 family에만
+있었고 크기가 각각 약 ±0.003, ±0.01이며 discovery가 없었다. N8 regime은 사전등록만 유지한다.
+
+| phase | canonical run_id | 핵심 결과 |
+|---|---|---|
+| A | `20260827T221729-4e0ae8b0` | 75/75 valid, `bh_pass` 57, primary discovery 32 |
+| B | `20260828T123313-4e0ae8b0` | 78/78 ready, `bh_pass` 59, primary discovery 55 |
+| AB | `20260828T165038-4e0ae8b0` | 153가설, discovery 87, `screen_pass` 40, B-cell A23·B17·C35·D3 |
+
+AB 결합 permutation은 `p=0.0099`이고, 기존 Phase A discovery 변화는 0개다. Phase B 10개
+family를 더한 뒤에도 기존 결과가 흔들리지 않았다.
+
+T2 acceptance gate는 AB `screen_pass` family의 primary feature 14개를 baseline 40개에 함께
+붙여 purged walk-forward valid 구간만 비교했다. Rank IC와 비용 반영 spread는 h5·h20·h60
+모두 좋아졌다. h60 비용 반영 값은 `0.0204 → 0.0283`이다. validation 상태는
+`improved_all_horizons`다. **최종 채택은 아직 아니다.** 새 h60 holdout 라벨이 성숙하는
+2026년 10~11월 이후 한 번만 평가한다. 결과는
+`docs/target/01_20_access_return_rank/phase_b_acceptance_gate_results.md`에 있다.
+
+sj2-server 운영 상태도 확인했다. N6 prod 백필은 2015~2025년 122,729슬라이스, 실제 raw
+419,160행, 오류 0으로 끝났다. common feature와 일일 OHLCV·KRX flows는 08-27까지 들어왔다.
+다만 `daily_market_cap`은 08-19, KIS `foreign_holding_shares`는 08-20에 멈췄다. 전자는
+Cronicle 정기 이벤트가 없고, 후자는 KRX·KIS cursor를 합쳐 읽던 코드 버그다. cursor 수정과
+회귀 테스트는 로컬에서 끝냈으며 release·deploy와 Cronicle 변경은 아직 하지 않았다.
+
+## 0a. 2026-08-23 기준선 기록
+
+**8월 23일 새 snapshot 기준 Phase A → B → AB가 모두 official로 완주했다.** Phase B 38개
+candidate cell의 최신 grade는 **A=5, B=7, C=25, D=1**이고 `screen_pass`는 12개다.
+8월 24일 T1 acceptance gate도 새 A0를 재사용해 다시 돌렸지만, 20일 모델의 비채택 결론은
+바뀌지 않았다.
 
 ```bash
-# 지금 위치 확인 — snapshot_date=2026-08-12에 A·B·AB 세 개가 다 있어야 정상이다
-find research/output/horizon_scan -name manifest.json | sort
+# 최신 official 발행물 확인
+find research/output/horizon_scan -path '*snapshot_date=2026-08-23*' -name manifest.json | sort
 ```
 
-발행물 세 개다. 셋 다 `config_hash=e55c3046…`, `snapshot_date=2026-08-12`,
+발행물 세 개다. 셋 다 `config_hash=ab0de634…`, `snapshot_date=2026-08-23`,
 `source=sj2_remote`, `official=true`.
 
-| phase | run_id | 핵심 결과 |
-|---|---|---|
-| A | `20260813T081646-00fa0e76` | 412행, `bh_pass` 58, discovery 31 |
-| B | `20260812T231507-f9117ce1` | 38/38 ready, `bh_pass` 18, discovery 14 |
-| AB | `20260813T130307-f9117ce1` | `m_ab=113`, discovery 45, `screen_pass` 7, grade A5·B2·C24·D7 |
+| phase | run_id | 핵심 결과 | 시간 |
+|---|---|---|---:|
+| A | `20260823T210913-b649a460` | 75/75 valid, `bh_pass` 57, discovery 32 | 60분 11초 |
+| B | `20260823T221441-b649a460` | 38/38 ready, `bh_pass` 28, discovery 24 | 44분 24초 |
+| AB | `20260823T225913-b649a460` | `m_ab=113`, discovery 56, `screen_pass` 12, B-cell grade A5·B7·C25·D1 | 1초 미만 |
 
-**결과부터 보고 싶으면 `09_all_feature_results.md`로 간다.** 25 family 전부를 원천·산식·
-가설·예측력·등급으로 한 표에 정리해뒀다. 아래는 그 문서의 §9.1과 같은 경고다.
+최신 결과의 기준은 위 run 디렉터리의 `03a_horizon_scan_results.md`,
+`03b_horizon_scan_results.md`, `03ab_combined_results.md`다. `09_all_feature_results.md`도
+이 기준선과 같은 25 family 결과를 가리킨다.
 
-**결과를 읽을 때 반드시 같이 볼 것 하나.** grade A 5개를 같은 무게로 읽으면 안 된다.
-`screen_pass` 7셀 중 **temporal placebo를 실제로 거친 건 3셀뿐**이다(`fin_log_mcap`의
-cumulative 0–60·0–120과 bucket 60–120). 나머지 4셀은 h40–60 bucket이라 `nw_lag < 59`,
-즉 `robustness_required=False`로 그 게이트 대상이 아니었다. 사전등록된 설계이지 우회가 아니다.
-→ `08` §3.0.1
+**이번 official run은 기존 25 family·113가설만 다시 검정했다.** 새로 만든
+`mcap_krx_log`, `feat_filing_activity`, N6 후보 4개, N8 고용지표와 N2 업종 중립 variant는 이
+config에 들어 있지 않다. 특히 Horizon Scan의 `fin_log_mcap`은 여전히 DART share 기반
+`market_cap_pit`를 쓴다. 새 원천 피쳐를 검정하려면 별도 config를 사전등록하고 mart 배선부터
+추가해야 한다.
 
-**다음 갈림길은 Phase C·acceptance gate 인계**(§5-1b)다. 계산이 아니라 판단이 필요한 단계라,
-`04_B` §12의 사전등록 인계 목록을 먼저 읽는다. 나머지(B-10 Stage 3, receipt-targeted XBRL 백필,
-T1 h=60 holdout 재평가)는 급하지 않다.
+실행시간 개선 목표는 달성했다. A+B+AB가 약 10시간 11분에서 **약 1시간 44분**으로 줄었다.
+run spec은 `git_dirty=true`다. 8월 27일 같은 코드·입력으로 두 번째 official A → B → AB를
+돌렸고 primary·permutation·grade는 정확히 재현됐다. 다만 non-overlap·rank correlation 집계에
+최대 `1.11e-16`의 마지막 비트 차이가 있어 content hash는 달랐다. canonical 결과는 위 8월 23일
+run을 유지하고, 8월 27일 run은 결정성 검증 lineage로 보존한다. → `08` §3.0.1
 
-참고: Phase A와 B를 동시에 돌리지 않는다. 정합성 문제는 없지만(출력 경로 분리, A는 A0 마트를
-읽기만 함, DuckDB 1.5.4는 같은 `.tmp`를 공유해도 충돌하지 않는 것을 실측으로 확인) DuckDB가
-인스턴스마다 `threads=14`·`memory_limit=28.7GiB`를 기본으로 잡아 14코어/36GB 장비에서 서로를
-느리게 만든다. 실측 소요는 B 5시간 30분, A 4시간 41분, AB 1초 미만이다.
+참고: Phase A와 B는 계속 순서대로 돌린다. B가 A의 permutation artifact를 재사용하고 두 phase의
+mapping hash를 맞춰야 한다. 8월 23일 canonical peak RSS는 A 약 9.94GB, B 약 20.36GB이고,
+8월 27일 결정성 재실행은 A 9.35GB, B 17.59GB였다.
+
+> **2026-08-22 이전 기록.** 8월 13~15일 공식 A/B/AB 발행물은 과거 기록으로 보존한다.
+> 8월 18일 I7 XBRL fallback과 8월 20일 `mcap_krx_log`·권리락 마스킹이 추가됐고
+> prod 원천도 뒤에 갱신됐다. 새 snapshot으로 feature mart와 Phase A → B → AB를 다시
+> 실행하기 전에는 현재 등급을 최종 채택 결과로 쓰지 않는다.
+
+> **2026-08-22 당시 실행 상태.** S-1 DART historical 모집단 3,959개를 다시 세어
+> filings 3,490·financials/XBRL 3,093·share-info 3,430 법인 커버리지를 확인했다.
+> 누락 집합은 대부분 OpenDART `no_data`이며, 2021 financials 오류와 2020 share-info
+> 11013은 재수집했다. KIS flows는 6개 지표 정기 이벤트로 전환했고, KRX는
+> `short_selling_balance_quantity` 보완 경로로 남겼다. 다음 N6 DS002 백필은
+> 2015~2025 historical 3,959개 대상으로 실행 중이다. 이 작업이 끝난 뒤 lake 갱신과
+> Phase A → B → AB를 새 snapshot으로 다시 실행한다.
 
 ## 1. 트랙이 두 개다
 
 | 트랙 | 대상 | 상태 |
 |---|---|---|
 | **T1. px/flow 피쳐 검증** | 가격·수급 피쳐 17 family (Phase A0/A → acceptance gate) | **판정까지 완료**. 20일 모델 채택은 보류(§3) |
-| **T2. 재무/이벤트 피쳐 검증** | fin_*/ev_* 8 family, 38 candidate cell (Phase B) | **A·B·AB 완주, 등급 확정**(A5·B2·C24·D7). 채택 판정은 아직 안 했다(§4) |
+| **T2. 재무/이벤트 피쳐 검증** | 기존 8 family + 확장 10 family | **확장 A·B·AB와 validation 완료**. 세 horizon 모두 개선, 최종 holdout은 10~11월로 미룸 |
 
 ## 2. 문서 지도
 
@@ -78,13 +123,38 @@ Grade A 6개 중 `px_amihud_20d`/`px_near_52w_high`는 baseline 모델에 이미
 
 **결론: 4개 candidate를 20일 모델에 채택하지 않는다.** 남은 건 하나다.
 
+8월 24일 새 A0를 재사용해 walk-forward를 다시 돌렸다. 평균 IC는 baseline→candidate 기준으로
+h5 0.1155→0.1202, h20 0.1436→0.1521, h60 0.1753→0.1840이었다. 비용 반영 차이는 각각
++0.0009, **−0.0025**, +0.0004였다. 배포 대상인 h20이 다시 음수여서 비채택 결론은 그대로다.
+holdout은 다시 열지 않았다.
+
 - **h=60 holdout 재평가** — 2026년 10~11월 이후 **새 구간으로 한 번만**(이번 구간 재사용
   금지). 위 60일 결과도 이때 같이 본다. → `07` §6
 
-## 4. T2 — A·B·AB 완주, 등급이 확정됐다
+## 4. T2 — 8월 23일 최신 A·B·AB
+
+새 snapshot과 I7 `fin_v4`, native scan·artifact 재사용 계약으로 A → B → AB를 다시 완주했다.
+Phase A는 75/75 valid, discovery 32개다. Phase B는 38/38 ready, discovery 24개다. 결합 BH는
+`m_ab=113`, discovery 56개이며 Phase A 강등은 없었다.
+
+Phase B 38셀의 최신 결과는 `screen_pass` 12개, grade A5·B7·C25·D1이다.
+
+| family | 통과 cell | grade |
+|---|---|---|
+| `ev_net_share_issuance_yoy` | 40–60 bucket | A |
+| `fin_log_mcap` | 40–60·60–120 bucket, 0–60·0–120 cumulative | A |
+| `ev_payout_yield` | 40–60 bucket | B |
+| `fin_gross_profitability` | 10–20·20–40·40–60 bucket, 0–20·0–40 cumulative | B |
+| `fin_value_z` | 40–60 bucket | B |
+
+I7 뒤 `fin_gross_profitability` 5셀이 새로 살아난 것이 가장 큰 변화다. 다만 이 결과는 기존
+25 family의 재검정이다. `mcap_krx_log`, 공시 활동, N6·N8 후보와 업종 중립 variant를 반영한
+결과는 아니다. 이 후보들은 기존 `config_hash=ab0de634…`를 바꾸지 말고 새 config로 검정한다.
+
+## 4a. T2 — 8월 12~13일 이전 결과
 
 작업 패키지 B-0~B-9 완료(§5.5 segment 진단 제외), B-10은 Stage 1·2·4·5 완료로 **Stage 3만**
-남았다. 유닛 테스트 939개 통과(2026-08-12).
+남았다. 당시 유닛 테스트는 939개였고, 2026-08-22 현재 `tests/unit` 1,332개가 통과했다.
 
 `M_B_ready=0` 동결이 풀렸다. `run_id=20260812T231507-f9117ce1`에서 **38 candidate 전부
 ready**가 됐고 B-PR11~B-PR15 오케스트레이션이 실제 데이터로 처음 돌았다 — 통합 크래시는 없었다.
@@ -282,7 +352,7 @@ CFS/OFS)으로 바꾸고 회귀 테스트 8개를 추가했다 — 수정 전 �
   `feat_price`/`feat_flow`/`label_scan`(daily_ohlcv·flow 기반)만 읽으므로 이 게이트와
   무관하다. derived mart 자체는 게이트 전에 이미 만들어진다.
 
-### 1b. [지금 가장 위] Phase C·acceptance gate 인계
+### 1b. [8월 13일 당시 기준] Phase C·acceptance gate 인계
 
 크리티컬 패스가 끝났으니 여기가 다음 갈림길이다. `04_B` §12가 인계물 11종을 사전등록해뒀고
 산출물은 대부분 나와 있다(run spec·manifest·`_SUCCESS.json`, frozen role과 raw p-value,
@@ -325,7 +395,7 @@ Phase A와 공유하는 `per_date_market_rank_ic` 내부를 고쳐야 한다. **
 ## 6. 상태 확인 명령
 
 ```bash
-uv run pytest tests/unit -q                                   # 939개 통과가 기준선(2026-08-12)
+uv run pytest tests/unit -q                                   # 1,353개 통과(2026-08-28 로컬 확인)
 uv run ruff check src/ tests/                                 # research/의 fin_vs_price_corr는 기존 미해결
 
 # raw가 붙어 있는지 — 두 테이블이 나와야 한다 (안 나오면 T2가 다시 막힌 상태)
@@ -339,4 +409,45 @@ find research/output/horizon_scan -name "03ab_*"              # AB 리포트 = �
 등급 확정 결과를 한 번에 보려면 AB run의 `03ab_combined_results.md`를 읽는다. 셀 단위로 보려면
 같은 디렉터리의 `combined_ab_primary_hypotheses.parquet`에서 `screen_pass` / `evidence_grade` /
 `robustness_required` / `failed_gates`를 같이 본다. **`robustness_required`를 빼고 읽으면 grade
-A 5개를 과대평가하게 된다**(§4).
+A 5개를 과대평가하게 된다**(§4a).
+
+## 7. 2026-08-27 당시 실행 순서
+
+기존 순서 1~3번을 로컬에서 끝냈다. 8월 27일 결정성 재실행은 통계·판정을 정확히 재현했고,
+N2 V6와 S-4도 닫았다. N6에서는 `hc_employee_growth_yoy`, `hc_revenue_per_employee`,
+`own_major_stake`, `own_major_stake_chg` 네 feature만 골랐다. 감사의견·최대주주 변경은
+final-vintage와 availability 문제로 `NE`다.
+
+1. ~~**N7 KIS 횡단면 대조와 C4/C5 처분**~~ — **완료**. 2,764종목 정상 응답,
+   B/M rank correlation 0.9274. C4·C5는 폐기했고 KIS 밸류를 feature로 올리지 않는다.
+2. ~~**새 feature config를 별도로 사전등록한다.**~~ — **완료**. 확장 config hash는
+   `889c3e83…`이고 Phase B 78개, 결합 BH 153개다. N8은 횡단면 family가 아니라 Phase C
+   regime 후보로 분리했다. N2 업종 중립 variant는 diagnostic-only로 남겼다. → `12`
+3. **mart와 Horizon Scan 배선을 추가한 뒤 A0 → A → B → AB를 실행한다.** Phase A와 B는
+   동시에 돌리지 않는다. 새 BH 모집단과 기존 발견의 변화를 함께 기록한다.
+4. **Phase C를 열지 판단하고 T2 acceptance gate를 돌린다.** 부호 반전이나 경제적으로 설명할
+   수 있는 조건부 패턴만 Phase C 후보로 삼는다. holdout은 selection이 모두 끝난 뒤 한 번만 연다.
+5. **T1 h60은 2026년 10~11월 이후 다시 본다.** 새 구간을 한 번만 쓰며 현재 holdout을
+   재사용하지 않는다.
+
+sj2-server에 다시 접근할 수 있을 때는 별도로 N6 prod run·freshness·Cronicle과 K-0c 약관 게이트를
+확인한다. 현재 다음 순서도 로컬 코드·parquet 범위에서는 sj2-server 없이 진행할 수 있다.
+
+## 8. 남은 작업 — 2026-08-28
+
+1. **KIS cursor 수정 release·deploy** — 로컬 코드와 테스트는 완료했다. 배포 뒤
+   `foreign_holding` plan과 실제 1회 실행으로 08-21 이후 누락을 확인한다. 이 endpoint는 현재
+   스냅샷만 주므로 과거 누락일은 복구할 수 없다.
+2. **`daily_market_cap` 정기 Cronicle 이벤트 등록** — 현재 wrapper는 있지만 event가 없다.
+   gap detection으로 08-20 이후를 채우고 평일 T+1 수집으로 정기화한다.
+3. **freshness event 등록** — `daily_market_cap`은 T+1에 맞춘 별도 2거래일 예산, 다른 일별
+   도메인은 1거래일 예산으로 nightly alert를 건다. domain별 예산 코드는 로컬에서 끝냈다.
+4. **Cronicle job history 비밀정보 정리** — PostgreSQL URI가 평문으로 남은 파일 178개를
+   확인했다. DB credential 회전 뒤 백업 정책에 맞춰 삭제하거나 마스킹한다.
+5. **T1·T2 h60 one-shot holdout** — 2026년 10~11월 이후 새 구간에서 한 번만 연다. 현재
+   holdout은 재사용하지 않는다.
+6. **K-0c/KIS 약관 확인** — 사람이 공식 약관을 읽고 장기 보관·파생물 사용 범위를 정한다.
+
+1~4는 sj2 운영 변경이다. read-only 점검은 끝났지만 release·deploy, Cronicle event 변경,
+credential 회전과 history 정리에는 별도 운영 승인이 필요하다. 5는 시간 게이트, 6은 사람
+판단이라 지금 자동으로 닫을 수 없다.

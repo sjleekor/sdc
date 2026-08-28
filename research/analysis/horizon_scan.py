@@ -515,11 +515,12 @@ def run_phase_a(
     checkpoint_root: Path | None = None,
     workers: int = 1,
     scan_engine: str = DEFAULT_SCAN_ENGINE,
+    config_path: Path | str = CONFIG_PATH,
 ) -> Path:
     if workers < 1:
         raise ValueError("workers must be >= 1")
     validate_scan_engine(scan_engine)
-    config = load_config(CONFIG_PATH)
+    config = load_config(config_path)
     base = LakeConfig(source=source, data_lake_root=data_lake_root or LakeConfig().data_lake_root)
     lake, resolution = resolve_config(
         base, required_inputs=REQUIRED_RAW_INPUTS, snapshot_date=snapshot_date
@@ -899,6 +900,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--snapshot-date", default=None)
     parser.add_argument("--source", default=REMOTE_SOURCE)
     parser.add_argument("--data-lake-root", type=Path, default=None)
+    parser.add_argument("--config", type=Path, default=CONFIG_PATH)
     parser.add_argument("--smoke-family", default=None)
     parser.add_argument("--permutations", type=int, default=None)
     parser.add_argument("--include-holdout", action="store_true")
@@ -956,6 +958,7 @@ def main(argv: list[str] | None = None) -> int:
             checkpoint_root=args.checkpoint_root,
             workers=args.workers,
             scan_engine=args.scan_engine,
+            config_path=args.config,
         )
     elif args.phase == "B":
         published = run_phase_b_core(
@@ -969,6 +972,7 @@ def main(argv: list[str] | None = None) -> int:
             checkpoint_root=args.checkpoint_root,
             workers=args.workers,
             scan_engine=args.scan_engine,
+            config_path=args.config,
         )
     else:
         if args.phase_a_run_dir is None or args.phase_b_run_dir is None:
@@ -978,6 +982,7 @@ def main(argv: list[str] | None = None) -> int:
             phase_b_run_dir=args.phase_b_run_dir,
             output_root=args.output_root,
             command_line=command_line,
+            config_path=args.config,
         )
     print(published)
     return 0

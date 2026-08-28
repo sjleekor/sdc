@@ -37,6 +37,7 @@ from krx_collector.service.backfill_stock_master import DEFAULT_SNAPSHOT_SOURCES
 from krx_collector.service.freshness import (
     DEFAULT_MAX_LAG_CALENDAR_DAYS,
     DEFAULT_MAX_LAG_TRADING_DAYS,
+    DEFAULT_MAX_MARKET_CAP_LAG_TRADING_DAYS,
 )
 from krx_collector.service.sync_kis_flows import (
     DEFAULT_LOOKBACK_DAYS as DEFAULT_KIS_LOOKBACK_DAYS,
@@ -506,6 +507,7 @@ def _handle_ops_freshness_report(args: argparse.Namespace) -> None:
     findings = evaluate_staleness(
         report,
         max_lag_trading_days=args.max_lag_trading_days,
+        max_market_cap_lag_trading_days=args.max_market_cap_lag_trading_days,
         max_lag_calendar_days=args.max_lag_calendar_days,
     )
     if not findings:
@@ -1587,7 +1589,9 @@ def _handle_flows_sync(args: argparse.Namespace) -> None:
                 latest_price_date=storage.get_latest_daily_price_date(tickers=tickers),
                 metric_latest_dates=storage.get_krx_security_flow_metric_max_dates(
                     metric_codes=metric_codes,
-                    sources=(Source.KRX, Source.KIS),
+                    # KIS rows are a separate collection path. They may satisfy
+                    # logical freshness, but must not advance the KRX cursor.
+                    sources=(Source.KRX,),
                 ),
                 lookback_days=args.lookback_days,
                 exclude_groups=exclude_groups,
@@ -2845,6 +2849,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Calendar-day budget for release-lagged sources such as ECOS and FRED "
             f"(default: {DEFAULT_MAX_LAG_CALENDAR_DAYS})."
+        ),
+    )
+    ops_freshness.add_argument(
+        "--max-market-cap-lag-trading-days",
+        type=int,
+        default=DEFAULT_MAX_MARKET_CAP_LAG_TRADING_DAYS,
+        help=(
+            "Trading-day budget for daily_market_cap, whose KRX source is T+1 "
+            f"(default: {DEFAULT_MAX_MARKET_CAP_LAG_TRADING_DAYS})."
         ),
     )
     ops_freshness.set_defaults(handler=_handle_ops_freshness_report)

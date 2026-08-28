@@ -41,7 +41,7 @@ from research.etl.features.flow import materialize_flow
 from research.etl.features.price import materialize_price
 from research.etl.lake import connect, register_derived_marts, register_views
 from research.etl.manifest import build_manifest
-from research.etl.mart import mart_root
+from research.etl.mart import is_materialized, mart_root, register_mart_view
 from research.etl.splits import Fold, walk_forward_splits
 from research.etl.universe import materialize_universe
 from research.models._01_20_access_return_rank.spec import ModelSpec
@@ -73,6 +73,7 @@ def _materialize_source_marts(
     spec: ModelSpec,
     *,
     force: bool = False,
+    reuse_existing: bool = False,
 ) -> None:
     """Materialize the shared feature marts (L2a) and register their views.
 
@@ -87,9 +88,15 @@ def _materialize_source_marts(
     """
     materialize_universe(con, config, spec.universe, force=force)
     if "px" in spec.feature_groups:
-        materialize_price(con, config, force=force)
+        if reuse_existing and is_materialized(config, "feat_price"):
+            register_mart_view(con, config, "feat_price")
+        else:
+            materialize_price(con, config, force=force)
     if "flow" in spec.feature_groups:
-        materialize_flow(con, config, force=force)
+        if reuse_existing and is_materialized(config, "feat_flow"):
+            register_mart_view(con, config, "feat_flow")
+        else:
+            materialize_flow(con, config, force=force)
     if "fin" in spec.feature_groups:
         materialize_fin_pit(con, config, force=force)
     if "cf" in spec.feature_groups:
@@ -169,6 +176,7 @@ def build_dataset(
     created_at: str | None = None,
     write: bool = True,
     force_mart: bool = False,
+    reuse_existing_marts: bool = False,
     feature_cols_override: list[str] | None = None,
 ) -> BuildResult:
     """Build (and optionally write) model 01's dataset. Returns a :class:`BuildResult`.
@@ -176,6 +184,10 @@ def build_dataset(
     ``write=False`` runs the full pipeline in-memory (used by tests/dry-runs) and
     skips parquet/manifest output. ``force_mart=True`` rebuilds the shared feature
     marts even if already materialized for this snapshot (00_shared §5).
+    ``reuse_existing_marts=True`` registers already-materialized source marts
+    without recomputing them. This is intended for consumers such as the
+    acceptance gate that must read the official A0 quality-aware marts without
+    clobbering them with a different SQL contract.
     ``feature_cols_override``, if given, restricts the assembled panel to exactly
     these raw feature columns (plus keys/labels) before standardization/folds —
     for pinning a baseline/candidate column set independent of whatever extra
@@ -221,7 +233,13 @@ def build_dataset(
     if derived:
         register_derived_marts(con, config, which=derived)
 
-    _materialize_source_marts(con, config, spec, force=force_mart)
+    _materialize_source_marts(
+        con,
+        config,
+        spec,
+        force=force_mart,
+        reuse_existing=reuse_existing_marts,
+    )
 
     panel = assemble_panel(con, spec)
     if feature_cols_override is not None:

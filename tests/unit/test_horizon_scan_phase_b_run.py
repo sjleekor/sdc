@@ -60,7 +60,10 @@ def _stub(monkeypatch: pytest.MonkeyPatch, name: str, calls: list[str], *, fail:
 
 def test_register_phase_b_marts_all_succeed(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
+    _stub(monkeypatch, "market_cap", calls)
+    _stub(monkeypatch, "filing_activity", calls)
     _stub(monkeypatch, "stock_metric_vintage_fact", calls)
+    _stub(monkeypatch, "periodic_extras", calls)
     _stub(monkeypatch, "fin_quarterly_metric_vintage", calls)
     _stub(monkeypatch, "fin_scan_daily", calls)
     _stub(monkeypatch, "event_scan_daily", calls)
@@ -74,9 +77,15 @@ def test_register_phase_b_marts_all_succeed(monkeypatch: pytest.MonkeyPatch) -> 
         "feat_fin_scan_daily",
         "feat_event_scan_daily",
         "fin_sue_event",
+        "feat_market_cap",
+        "feat_filing_activity",
+        "feat_periodic_extras",
     }
     assert calls == [
+        "market_cap",
+        "filing_activity",
         "stock_metric_vintage_fact",
+        "periodic_extras",
         "fin_quarterly_metric_vintage",
         "fin_scan_daily",
         "event_scan_daily",
@@ -89,7 +98,10 @@ def test_register_phase_b_marts_stops_at_root_failure(monkeypatch: pytest.Monkey
     ``stock_metric_vintage_fact`` itself fails — nothing downstream should
     even be attempted, and the run must not crash."""
     calls: list[str] = []
+    _stub(monkeypatch, "market_cap", calls)
+    _stub(monkeypatch, "filing_activity", calls)
     _stub(monkeypatch, "stock_metric_vintage_fact", calls, fail=True)
+    _stub(monkeypatch, "periodic_extras", calls)
     _stub(monkeypatch, "fin_quarterly_metric_vintage", calls)
     _stub(monkeypatch, "fin_scan_daily", calls)
     _stub(monkeypatch, "event_scan_daily", calls)
@@ -97,8 +109,8 @@ def test_register_phase_b_marts_stops_at_root_failure(monkeypatch: pytest.Monkey
 
     result = register_phase_b_marts(_con_with_daily_ohlcv(), lake=object())
 
-    assert result == set()
-    assert calls == ["stock_metric_vintage_fact"]
+    assert result == {"feat_market_cap", "feat_filing_activity"}
+    assert calls == ["market_cap", "filing_activity", "stock_metric_vintage_fact"]
 
 
 def test_register_phase_b_marts_partial_availability_degrades_gracefully(
@@ -110,7 +122,10 @@ def test_register_phase_b_marts_partial_availability_degrades_gracefully(
     proving one missing raw source blocks only its dependent families, not
     the whole run."""
     calls: list[str] = []
+    _stub(monkeypatch, "market_cap", calls)
+    _stub(monkeypatch, "filing_activity", calls)
     _stub(monkeypatch, "stock_metric_vintage_fact", calls)
+    _stub(monkeypatch, "periodic_extras", calls)
     _stub(monkeypatch, "fin_quarterly_metric_vintage", calls)
     _stub(monkeypatch, "fin_scan_daily", calls)
     _stub(monkeypatch, "event_scan_daily", calls, fail=True)
@@ -123,6 +138,9 @@ def test_register_phase_b_marts_partial_availability_degrades_gracefully(
         "fin_quarterly_metric_vintage",
         "feat_fin_scan_daily",
         "fin_sue_event",
+        "feat_market_cap",
+        "feat_filing_activity",
+        "feat_periodic_extras",
     }
     assert set(calls) == {
         "stock_metric_vintage_fact",
@@ -130,6 +148,9 @@ def test_register_phase_b_marts_partial_availability_degrades_gracefully(
         "fin_scan_daily",
         "event_scan_daily",
         "sue_event",
+        "market_cap",
+        "filing_activity",
+        "periodic_extras",
     }
 
 
@@ -137,7 +158,10 @@ def test_register_phase_b_marts_stops_after_second_stage_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
+    _stub(monkeypatch, "market_cap", calls)
+    _stub(monkeypatch, "filing_activity", calls)
     _stub(monkeypatch, "stock_metric_vintage_fact", calls)
+    _stub(monkeypatch, "periodic_extras", calls)
     _stub(monkeypatch, "fin_quarterly_metric_vintage", calls, fail=True)
     _stub(monkeypatch, "fin_scan_daily", calls)
     _stub(monkeypatch, "event_scan_daily", calls)
@@ -145,8 +169,19 @@ def test_register_phase_b_marts_stops_after_second_stage_failure(
 
     result = register_phase_b_marts(_con_with_daily_ohlcv(), lake=object())
 
-    assert result == {"stock_metric_vintage_fact"}
-    assert calls == ["stock_metric_vintage_fact", "fin_quarterly_metric_vintage"]
+    assert result == {
+        "feat_market_cap",
+        "feat_filing_activity",
+        "stock_metric_vintage_fact",
+        "feat_periodic_extras",
+    }
+    assert calls == [
+        "market_cap",
+        "filing_activity",
+        "stock_metric_vintage_fact",
+        "periodic_extras",
+        "fin_quarterly_metric_vintage",
+    ]
 
 
 # --- compute_phase_b_gate_updates: §9 B-9 rule wiring, robustness calls mocked ---

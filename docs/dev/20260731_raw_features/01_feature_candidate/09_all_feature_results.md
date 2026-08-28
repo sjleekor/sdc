@@ -1,14 +1,16 @@
 # 09. 전체 피쳐 검증 결과 — 25개 family 한눈에 보기
 
-- 작성일: 2026-08-13
-- 대상 실행: snapshot `2026-08-12` / source `sj2_remote` / config `e55c3046…`
-  - Phase A `20260813T081646-00fa0e76` (px·flow 17 family)
-  - Phase B `20260812T231507-f9117ce1` (fin·ev 8 family)
-  - 결합 AB `20260813T130307-f9117ce1` (등급 확정)
-- **T2(fin·ev) 4개는 2026-08-15 재실행분이다** — Phase B `20260815T133014-8f47b5fc`
-  + AB `20260815T190659-8f47b5fc`. 결함 수정(`10_known_issues.md`) 후 `fin_value_z`
-  IC가 두 배, `ev_net_share_issuance_yoy`가 2.7배가 됐다. Phase A(px·flow 17개)는
-  코드 변경이 없어 재실행하지 않았고 위 run 그대로다.
+- 작성일: 2026-08-13 (갱신: 2026-08-27)
+- 대상 실행: snapshot `2026-08-23` / source `sj2_remote` / config `ab0de634…`
+  - Phase A `20260823T210913-b649a460` (px·flow 17 family, content `46ccf585…`)
+  - Phase B `20260823T221441-b649a460` (fin·ev 8 family, content `f556dd3d…`)
+  - 결합 AB `20260823T225913-b649a460` (content `e380d931…`, 등급 확정)
+- 이 실행은 I7 `fin_v4`, native scan과 Phase A permutation artifact 재사용을 반영했다.
+  기존 25 family·113가설을 다시 검정했으며 새 원천 후보는 추가하지 않았다.
+- 8월 27일 같은 입력으로 A `20260827T082015-b649a460` → B
+  `20260827T092909-b649a460` → AB `20260827T101418-b649a460`를 다시 돌렸다. primary 표와
+  permutation·판정은 정확히 같았다. non-overlap·rank correlation의 최대 차이는
+  `1.11e-16`이라 canonical 결과표와 등급은 8월 23일 run을 그대로 유지한다.
 - 이 문서는 **결과 요약본**이다. 왜 그렇게 판정했는지의 계약은 `04_specific_plan_A.md` /
   `04_specific_plan_B.md`, 실행 기록은 `08_phase_b_implementation_log.md`에 있다.
   T1 6개의 일반 해설은 `05_phase_a_results_explained.md`가 더 자세하다.
@@ -18,49 +20,50 @@
 ## 1. 한 장 요약
 
 25개 family를 전부 넣었다. IC는 **등급이 확정된 셀** 기준이고, 부호까지 그대로 적었다.
-대부분은 |IC|가 가장 큰 셀과 같지만 T2 3개(`ev_payout_yield`·`fin_value_z`·
-`ev_net_share_issuance_yoy`)는 다르다 — 그 셋은 |IC| 최대 셀이 누적 0–120일인데
+대부분은 |IC|가 가장 큰 셀과 같지만 T2 4개(`ev_payout_yield`·`fin_value_z`·
+`fin_gross_profitability`·`ev_net_share_issuance_yoy`)는 다르다 — 이들은 |IC| 최대 셀이
+누적 0–120일인데
 강건성에서 떨어져 C이고, 등급이 붙은 것은 40–60일 셀이다(`10_known_issues.md` I8).
 
 | # | family | 무엇을 재나 | 원천 | 기대 | 실제 | 대표 구간 | IC | 등급 |
 |---|---|---|---|---|---|---|---|---|
-| 1 | `px_idio_vol_60d` | 60일 특이변동성 | OHLCV | − | − | 0–60일 | **−0.1388** | **A** |
-| 2 | `px_amihud_20d` | Amihud 비유동성 | OHLCV | + | + | 0–120일 | **+0.1330** | **A** |
-| 3 | `fin_log_mcap` | 규모(로그 시총) | DART+OHLCV | − | − | 0–120일 | **−0.1115** | **A** |
-| 4 | `px_maxret_20d` | 20일 최대 일간수익률 | OHLCV | − | − | 0–60일 | **−0.1101** | **A** |
-| 5 | `fin_value_z` | 밸류 종합 z | DART+OHLCV | + | + | 40–60일 | **+0.0692** | **B** |
-| 6 | `px_reversal_5d` | 5일 단기반전 | OHLCV | + | + | 0–3일 | **+0.0540** | **A** |
-| 7 | `ev_payout_yield` | 주주환원 수익률 | DART | + | + | 40–60일 | +0.0525 | **B** |
-| 8 | `px_near_52w_high` | 52주 신고가 근접도 | OHLCV | + | + | 40–60일 | +0.0280 | **A** |
+| 1 | `px_idio_vol_60d` | 60일 특이변동성 | OHLCV | − | − | 0–60일 | **−0.1524** | **A** |
+| 2 | `px_amihud_20d` | Amihud 비유동성 | OHLCV | + | + | 0–120일 | **+0.1343** | **A** |
+| 3 | `fin_log_mcap` | 규모(로그 시총) | DART+OHLCV | − | − | 0–120일 | **−0.1149** | **A** |
+| 4 | `px_maxret_20d` | 20일 최대 일간수익률 | OHLCV | − | − | 0–60일 | **−0.1162** | **A** |
+| 5 | `fin_value_z` | 밸류 종합 z | DART+OHLCV | + | + | 40–60일 | **+0.0599** | **B** |
+| 6 | `px_reversal_5d` | 5일 단기반전 | OHLCV | + | + | 0–3일 | **+0.0533** | **A** |
+| 7 | `ev_payout_yield` | 주주환원 수익률 | DART | + | + | 40–60일 | +0.0550 | **B** |
+| 8 | `px_near_52w_high` | 52주 신고가 근접도 | OHLCV | + | + | 40–60일 | +0.0325 | **A** |
 | 9 | `flow_individual_netbuy_to_volume` | 개인 순매수 강도 | KRX flow | 미고정 | + | 0–20일 | +0.0241 | **A** |
 | 10 | `ev_net_share_issuance_yoy` | 순주식발행 | DART | − | − | 40–60일 | −0.0221 | **A** |
+| 11 | `fin_gross_profitability` | 매출총이익성 | DART | + | + | 0–40일 | +0.0275 | **B** |
 | — | | | | | | | | |
-| 11 | `flow_short_interest` | 공매도 잔고비율 | KRX flow | − | − | 0–60일 | −0.0874 | C(보류) |
-| 12 | `flow_days_to_cover` | 상환소요일수 | KRX flow | − | − | 0–60일 | −0.0672 | C(보류) |
-| 13 | `flow_short_turnover` | 공매도 회전율 | KRX flow | − | − | 0–60일 | −0.0668 | C(보류) |
-| 14 | `flow_nat_proxy_20d` | NAT proxy | KRX flow | + | + | 0–60일 | +0.0644 | C(보류) |
+| 12 | `flow_short_interest` | 공매도 잔고비율 | KRX flow | − | − | 0–60일 | −0.0874 | C(보류) |
+| 13 | `flow_days_to_cover` | 상환소요일수 | KRX flow | − | − | 0–60일 | −0.0672 | C(보류) |
+| 14 | `flow_short_turnover` | 공매도 회전율 | KRX flow | − | − | 0–60일 | −0.0668 | C(보류) |
+| 15 | `flow_nat_proxy_20d` | NAT proxy | KRX flow | + | + | 0–60일 | +0.0644 | C(보류) |
 | — | | | | | | | | |
-| 15 | `fin_accruals_to_assets` | 발생액 비중 | DART | − | **+** | 0–120일 | +0.0339 | C |
-| 16 | `fin_gross_profitability` | 매출총이익성 | DART | + | + | 40–60일 | +0.0132 | C |
-| 17 | `fin_asset_growth_yoy` | 자산성장률 | DART | − | **+** | 40–60일 | +0.0023 | C |
+| 16 | `fin_accruals_to_assets` | 발생액 비중 | DART | − | **+** | 0–120일 | +0.0180 | C |
+| 17 | `fin_asset_growth_yoy` | 자산성장률 | DART | − | − | 0–120일 | −0.0044 | C |
 | 18 | `fin_sue` | 실적 서프라이즈 | DART | + | (표본 없음) | — | — | C |
 | — | | | | | | | | |
-| 19 | `px_mom_12_1` | 12-1개월 모멘텀 | OHLCV | + | **−** | — | −0.0368 | D |
-| 20 | `px_turnover_shock` | 회전율 충격 | OHLCV | + | **−** | — | −0.0264 | D |
-| 21 | `flow_inst_netbuy_to_volume` | 기관 순매수 강도 | KRX flow | + | **−** | — | −0.0209 | D |
+| 19 | `px_mom_12_1` | 12-1개월 모멘텀 | OHLCV | + | **−** | — | −0.0333 | D |
+| 20 | `px_turnover_shock` | 회전율 충격 | OHLCV | + | **−** | — | −0.0342 | D |
+| 21 | `flow_inst_netbuy_to_volume` | 기관 순매수 강도 | KRX flow | + | **−** | — | −0.0224 | D |
 | 22 | `flow_foreign_netbuy_to_volume` | 외국인 순매수 강도 | KRX flow | + | **−** | — | −0.0131 | D |
-| 23 | `px_resid_mom_12_1` | 잔차 모멘텀 | OHLCV | + | **−** | — | −0.0108 | D |
+| 23 | `px_resid_mom_12_1` | 잔차 모멘텀 | OHLCV | + | **−** | — | −0.0113 | D |
 | 24 | `flow_foreign_holding_ratio_chg` | 외국인 지분율 변화 | KRX flow | + | **−** | — | −0.0080 | D |
 | — | | | | | | | | |
 | 25 | `px_zero_ret_ratio_20d` | 무변동일 비율 | OHLCV | (기준용) | — | — | — | R |
 
-집계하면 **A 8 · B 2 · C 8 · D 6 · R 1**이다. 트랙별로는 T1(px·flow 17개)이 A 6 · C 4 ·
-D 6 · R 1이고, T2(fin·ev 8개)가 A 2 · B 2 · C 4다.
+family 대표 등급으로 집계하면 **A 8 · B 3 · C 7 · D 6 · R 1**이다. 트랙별로는
+T1(px·flow 17개)이 A 6 · C 4 · D 6 · R 1이고, T2(fin·ev 8개)가 A 2 · B 3 · C 3이다.
 
 ### 세 줄 결론
 
 1. **살아남은 축은 세 개다** — 규모·유동성·변동성(1~4번), 단기 반전과 개인 수급(6·9번),
-   주주환원과 밸류(5·7번). 서로 다른 정보를 보고 있다(§9.3).
+   주주환원·밸류·수익성(5·7·11번). 서로 다른 정보를 보고 있다(§9.3).
 2. **모멘텀 계열은 한국에서 반대로 나온다.** 12-1개월 모멘텀, 잔차 모멘텀, 회전율 충격,
    기관·외국인 순매수가 전부 기대와 반대 부호다(19~24번). 우연이 아니라 일관된 패턴이다.
 3. **공매도 4개는 탈락이 아니라 판정 보류다.** 2020-03 공매도 금지로 표본이 끊겨
@@ -123,13 +126,13 @@ dart_xbrl_fact_raw ───────┘
 
 | family | 유효 시작 | coverage | 왜 늦나 |
 |---|---|---|---|
-| `fin_log_mcap` | 2015-04-15 | 0.79 | 시총만 있으면 되므로 가장 빠르다 |
-| `ev_payout_yield` | 2015-12-30 | 0.72 | 배당 공시 연 1회 → 첫 TTM 확보 시점 |
-| `ev_net_share_issuance_yoy` | 2016-04-15 | 0.52 | 전기 대비이므로 vintage 2년치 필요 |
-| `fin_value_z` | 2019-10-30 | 0.43 | 4개 구성요소 중 2개 이상 유효해야 산출 |
-| `fin_asset_growth_yoy` | 2020-03-30 | 0.45 | 4분기 전 자산이 있어야 함 |
-| `fin_accruals_to_assets` | 2020-05-18 | 0.43 | 순이익·영업현금흐름 동시 필요 |
-| `fin_gross_profitability` | 2021-03-05 | **0.03** | 매출총이익 canonical 매핑률이 낮다 |
+| `fin_log_mcap` | 2015-03-17 | 0.7788 | 시총만 있으면 되므로 가장 빠르다 |
+| `ev_payout_yield` | 2015-12-28 | 0.7090 | 배당 공시 연 1회 → 첫 TTM 확보 시점 |
+| `ev_net_share_issuance_yoy` | 2016-04-15 | 0.4787 | 전기 대비이므로 vintage 2년치 필요 |
+| `fin_value_z` | 2017-02-15 | 0.5641 | 4개 구성요소 중 2개 이상 유효해야 산출 |
+| `fin_asset_growth_yoy` | 2016-06-27 | 0.6307 | 4분기 전 자산이 있어야 함 |
+| `fin_accruals_to_assets` | 2017-02-27 | 0.5958 | 순이익·영업현금흐름 동시 필요 |
+| `fin_gross_profitability` | 2017-02-27 | **0.5835** | I7 XBRL fallback으로 S/P 매핑이 복구됐다 |
 | `fin_sue` | 2025-05-02 | **0.00** | 8분기 EPS 이력 + 접수일 기준 → 사실상 표본 없음 |
 
 **표본 구간.** px/flow는 2014-06-02 ~ 2025-02-05(공통생존 기준)이고, 공매도 4개만
@@ -144,14 +147,14 @@ dart_xbrl_fact_raw ───────┘
 
 ### 통과 5개 — 전부 A등급
 
-**`px_idio_vol_60d` — 60일 특이변동성 · A · IC −0.1388 (0–60일)**
+**`px_idio_vol_60d` — 60일 특이변동성 · A · IC −0.1524 (0–60일)**
 
 252일 rolling market-model 잔차의 60일 표준편차다. 유효 잔차가 126일 이상일 때만 계산한다.
 
 기대는 `−`였다. 변동성이 크면 나중에 수익률이 낮다는 저변동성 이례현상(Ang et al. 2006)이
-근거다. 실제로 −0.1388, 전체 25개 중 |IC|가 가장 크다. 소기간 5구간 중 5구간에서 부호가 같다.
+근거다. 실제로 −0.1524, 전체 25개 중 |IC|가 가장 크다. 소기간 5구간 중 5구간에서 부호가 같다.
 
-**`px_amihud_20d` — Amihud 비유동성 · A · IC +0.1330 (0–120일)**
+**`px_amihud_20d` — Amihud 비유동성 · A · IC +0.1343 (0–120일)**
 
 `mean(|일간수익률| / 거래대금, 20일)`. 거래대금 미수집이라 `종가×거래량`으로 근사한다.
 
@@ -159,7 +162,7 @@ dart_xbrl_fact_raw ───────┘
 이어지는 유일한 가격 피쳐**다. 다만 tradable 유지율이 0.85로 통과 피쳐 중 가장 낮다 —
 비유동 종목에 신호가 몰려 있으니 당연한 결과이고, 실제 거래 가능성은 별도로 봐야 한다.
 
-**`px_maxret_20d` — 20일 최대 일간수익률 · A · IC −0.1101 (0–60일)**
+**`px_maxret_20d` — 20일 최대 일간수익률 · A · IC −0.1162 (0–60일)**
 
 `max(일간수익률, 20일)`. 기대는 `−`. "복권 같은 주식"을 개인이 과대평가해 나중에 손해라는
 가설(Bali et al. 2011)이고, 개인 비중이 높은 한국·대만에서 강하게 보고된다. 그대로 나왔다.
@@ -167,14 +170,14 @@ dart_xbrl_fact_raw ───────┘
 위 특이변동성과 경제적으로 같은 축이라 **둘 다 쓰면 중복**이다. 채택 단계에서 하나만 고르거나
 증분성을 따로 확인해야 한다.
 
-**`px_reversal_5d` — 5일 단기반전 · A · IC +0.0540 (0–3일)**
+**`px_reversal_5d` — 5일 단기반전 · A · IC +0.0533 (0–3일)**
 
 `−sum(log수익률, 5일)`. 즉 최근 5일 많이 떨어진 종목에 높은 점수를 준다.
 
 기대는 `+`. 25개 중 **통계적으로 가장 뚜렷하다**(q ≈ 6.5e-98). 다만 효과가 3일에 정점을 찍고
 5~10일 구간에서 반감된다. 회전이 빠른 만큼 거래비용에 취약하다.
 
-**`px_near_52w_high` — 52주 신고가 근접도 · A · IC +0.0280 (40–60일)**
+**`px_near_52w_high` — 52주 신고가 근접도 · A · IC +0.0325 (40–60일)**
 
 `종가 / max(종가, 252일) − 1`. 기대는 `+`(George & Hwang 2004). 크기는 작지만 40~60일
 구간에서 꾸준하다. 모멘텀 계열이 전멸한 가운데 **유일하게 살아남은 추세성 피쳐**다.
@@ -183,9 +186,9 @@ dart_xbrl_fact_raw ───────┘
 
 | family | 산식 | 기대 | 실제 IC | 해석 |
 |---|---|---|---|---|
-| `px_mom_12_1` | `ln(close[t−21]/close[t−252])` | + | −0.0368 | 12개월 오른 종목이 오히려 덜 오른다 |
-| `px_resid_mom_12_1` | 252일 market-model 잔차 누적(t−252~t−21) | + | −0.0108 | 시장 효과를 걷어내도 마찬가지. q=0.12로 유의하지도 않다 |
-| `px_turnover_shock` | `ln(회전율 / median(회전율, t−60~t−1))` | + | −0.0264 | 거래가 갑자기 몰린 종목이 이후 부진하다 |
+| `px_mom_12_1` | `ln(close[t−21]/close[t−252])` | + | −0.0333 | 12개월 오른 종목이 오히려 덜 오른다 |
+| `px_resid_mom_12_1` | 252일 market-model 잔차 누적(t−252~t−21) | + | −0.0113 | 시장 효과를 걷어내도 마찬가지 |
+| `px_turnover_shock` | `ln(회전율 / median(회전율, t−60~t−1))` | + | −0.0342 | 거래가 갑자기 몰린 종목이 이후 부진하다 |
 
 (가격 쪽 탈락은 이 셋이고, 수급 쪽 탈락 3개는 §5에 있다. 합쳐서 D등급 6개다.)
 
@@ -221,7 +224,7 @@ h ∈ {5, 20, 60}일 창을 전부 채운 날만 계산한다.
 
 | family | 산식 | 기대 | 실제 IC | 해석 |
 |---|---|---|---|---|
-| `flow_inst_netbuy_to_volume` | 기관 순매수 / 거래량 | + | −0.0209 | 기관이 산 종목이 이후 부진 |
+| `flow_inst_netbuy_to_volume` | 기관 순매수 / 거래량 | + | −0.0224 | 기관이 산 종목이 이후 부진 |
 | `flow_foreign_netbuy_to_volume` | 외국인 순매수 / 거래량 | + | −0.0131 | 외국인도 마찬가지. 지연 노출 검정(delay_pass)도 실패 |
 | `flow_foreign_holding_ratio_chg` | (외국인보유/유통주식) 의 h일 차분 | + | −0.0080 | 지분율 변화도 반대 |
 
@@ -260,7 +263,7 @@ h ∈ {5, 20, 60}일 창을 전부 채운 날만 계산한다.
 
 전부 접수일 이후 as-of join이고 `fin_age_days`를 같이 들고 다닌다.
 
-**`fin_log_mcap` — 규모 · A · IC −0.1115 (0–120일)**
+**`fin_log_mcap` — 규모 · A · IC −0.1149 (0–120일)**
 
 `ln(market_cap_pit)`. 기대는 `−`, 즉 소형주가 더 오른다는 고전적 size 효과(Fama & French 1992).
 
@@ -270,36 +273,38 @@ h ∈ {5, 20, 60}일 창을 전부 채운 날만 계산한다.
 
 tradable 유지율이 0.78~0.85로 낮은데, 소형주에 신호가 몰려 있으니 구조적으로 그렇다.
 
-**`fin_value_z` — 밸류 종합 · B · IC +0.0692 (40–60일)**
+**`fin_value_z` — 밸류 종합 · B · IC +0.0599 (40–60일)**
 
 B/M, E/P, CFO/P, S/P 네 개를 각각 (거래일, 시장)별 1/99% 윈저라이즈 → z-score → **유효한
 것만 평균**한다. 2개 이상 유효할 때만 값을 낸다. 적자기업을 버리지 않으려고 단일 지표 대신
 종합 z를 대표로 세웠다.
 
-기대 `+` 그대로 나왔고 4개 셀 전부 통계적으로 유의하다(q ≈ 0). 누적 0–120일에서는 IC가
-**0.1384**까지 올라가 T2에서 `fin_log_mcap` 다음으로 크다. **A로 못 간 이유는 통계가 아니라
+기대 `+` 그대로 나왔고 4개 셀 전부 통계적으로 유의하다. 누적 0–120일에서는 IC가
+**0.1220**까지 올라가 T2에서 `fin_log_mcap` 다음으로 크다. **A로 못 간 이유는 통계가 아니라
 원천 품질이다** — 정정 비율
-`revision_ratio`가 0.1056~0.1259로 임계 0.10을 근소하게 넘어 등급 상한이 B로 묶였다.
+`revision_ratio`가 0.1014로 임계 0.10을 근소하게 넘어 등급 상한이 B로 묶였다.
 
-**`fin_accruals_to_assets` — 발생액 · C · IC +0.0339 — 부호가 반대다**
+**`fin_accruals_to_assets` — 발생액 · C · IC +0.0180 — 부호가 반대다**
 
 `(순이익_ttm − 영업현금흐름_ttm) / 평균자산`. 기대는 `−`(Sloan 1996: 발생액이 크면 이익의
 질이 낮아 이후 수익률이 낮다).
 
-**결과가 흥미롭다. 4개 셀 전부 BH를 통과할 만큼 통계적으로 뚜렷한데, 부호가 정확히
-반대다**(sign_ok 0/4). 한국에서 발생액 이례현상이 반대로 나타나는 것인지, canonical 매핑
-문제인지는 이 실험만으로 못 가른다. 사전등록 규율상 discovery로 세지 않는다.
+4개 셀은 Phase B 단독 BH를 통과했지만 기대 부호와 기간 부호를 통과하지 못해 discovery는
+0개다. 한국에서 발생액 이례현상이 반대로 나타나는 것인지, canonical 매핑 문제인지는 이
+실험만으로 못 가른다. 사전등록 규율상 discovery로 세지 않는다.
 
-**`fin_gross_profitability` — 매출총이익성 · C · IC +0.0132**
+**`fin_gross_profitability` — 매출총이익성 · B · IC +0.0275 (0–40일)**
 
-`매출총이익_ttm / 평균자산`(Novy-Marx 2013). 부호는 기대대로 `+`인데 q가 0.30으로 유의하지
-않다. **신호가 없다기보다 표본이 없다** — coverage 0.0315다. 매출총이익 canonical 매핑률이
-낮아 유효 관측이 209,767건에 그친다. XBRL fallback을 보강한 뒤 다시 봐야 한다.
+`매출총이익_ttm / 평균자산`(Novy-Marx 2013). I7이 XBRL S/P fallback을 고친 뒤 coverage가
+0.0315에서 **0.5835**로 늘었다. 8셀 모두 Phase B discovery이고, 짧은 horizon 5셀
+(10–20·20–40·40–60 bucket, 0–20·0–40 cumulative)이 `screen_pass`를 통과했다. 긴 3셀은
+temporal placebo에서 떨어졌다. 통과 5셀이 A가 아닌 이유는 `revision_ratio=0.1014`와 높은
+mapping fallback에 따른 source 품질 경고다.
 
-**`fin_asset_growth_yoy` — 자산성장률 · C · IC +0.0023**
+**`fin_asset_growth_yoy` — 자산성장률 · C · IC −0.0044**
 
-`총자산 / 총자산(t−4분기) − 1`. 기대 `−`(Cooper et al. 2008). q가 0.85~1.00으로 **신호가
-전혀 없다.** 부호도 미미하게 반대다. 25개 중 가장 결과가 없는 축이다.
+`총자산 / 총자산(t−4분기) − 1`. 기대 `−`(Cooper et al. 2008). 대표 부호는 맞지만
+q가 0.92~1.00이라 **신호가 없다.** 25개 중 가장 결과가 없는 축이다.
 
 **`fin_sue` — 실적 서프라이즈 · C · 측정 불가**
 
@@ -313,13 +318,14 @@ B/M, E/P, CFO/P, S/P 네 개를 각각 (거래일, 시장)별 1/99% 윈저라이
 
 ## 8. 이벤트 피쳐 2개 — 원천 DART 지분·주주환원
 
-**`ev_payout_yield` — 주주환원 수익률 · B · IC +0.0525 (40–60일)**
+**`ev_payout_yield` — 주주환원 수익률 · B · IC +0.0550 (40–60일)**
 
 `(현금배당총액 + 자사주매입현금)_ttm / 시가총액`. 배당만 보는 것보다 자사주매입을 합친
 쪽이 낫다는 근거(Boudoukh et al. 2007)를 따랐다.
 
-기대 `+` 그대로다. 4개 셀 전부 유의하고 누적 0–120일 IC가 0.0975다. `fin_value_z`와 같은
-이유(정정 비율)로 등급이 B에 묶였다.
+기대 `+` 그대로다. 4개 셀 전부 유의하고 누적 0–120일 IC가 0.1021이다. 40–60일 셀만
+`screen_pass`를 통과했고, 긴 3셀은 temporal placebo에서 떨어졌다. `revision_ratio=0.1116`이라
+통과 셀의 등급은 B다.
 
 **`ev_net_share_issuance_yoy` — 순주식발행 · A · IC −0.0221 (40–60일)**
 
@@ -350,43 +356,41 @@ B/M, E/P, CFO/P, S/P 네 개를 각각 (거래일, 시장)별 1/99% 윈저라이
 
 **요구 게이트 3개를 전부 통과한 건 `fin_log_mcap` 하나뿐이다.**
 
-T2에서 `screen_pass`가 붙은 7개 셀 중 시계열 placebo를 실제로 거친 건 3개(전부
-`fin_log_mcap`)다. 나머지 4개는 40–60일 bucket인데, 폭이 20일이라 `nw_lag < 59`가 되어
-**강건성 요구 대상이 아니었다**(`placebo.temporal_min_nw_lag`, rule 7). 사전등록된 설계이지
-빠져나간 게 아니지만, 등급표만 보고 5개를 동렬로 읽으면 4개를 과대평가한다.
+T2에서 `screen_pass`가 붙은 12개 셀 중 시계열 placebo를 실제로 거친 건 3개(전부
+`fin_log_mcap`)다. 나머지 9개는 horizon 폭이 짧아 `nw_lag < 59`가 되고
+**강건성 요구 대상이 아니었다**(`placebo.temporal_min_nw_lag`, rule 7). 사전등록된 설계지만,
+등급표만 보고 모든 통과 셀을 같은 무게로 읽으면 안 된다.
 
 `ev_net_share_issuance_yoy`의 A가 여기 해당한다. 40–60일 셀은 A인데, 같은 family의 다른
 세 셀(60–120, 0–60, 0–120)은 강건성 요구를 받고 **전부 실패해 C**다.
+`fin_gross_profitability`의 B 5셀도 같은 이유로 placebo 미요구 구간이다.
 
 ### 9.2 유의한 신호를 떨어뜨리는 관문은 사실상 하나다
 
-T2 등급 규칙상 C는 "강건성 실패 또는 available 방향 실패"로 라우팅된다. 실측에서는
-**24개 C 셀 전부가 강건성 문**으로 왔고 available 방향으로 떨어진 셀은 0개다. 그중 7개는
-통계적 유의성과 부호를 다 통과하고 **오직 시계열 placebo에서만** 떨어졌다.
+T2 등급 규칙상 C는 "강건성 실패 또는 available 방향 실패"로 라우팅된다. 최신 실행의 C
+25셀 중 **24셀은 강건성 실패**, 나머지 1셀은 `fin_asset_growth_yoy`의 available 방향 실패다.
+그중 12셀은 통계적 유의성과 부호를 통과하고 **오직 시계열 placebo에서만** 떨어졌다.
 
-family로는 `ev_payout_yield` 3 · `fin_value_z` 3 · `ev_net_share_issuance_yoy` 1이다.
+family로는 `ev_payout_yield` 3 · `fin_value_z` 3 · `fin_gross_profitability` 3 ·
+`ev_net_share_issuance_yoy` 3이다.
 IC가 작아서가 아니다. 강건성 요구를 받은 셀들의 placebo p값(임계 0.10)을 나란히 놓으면
 차이가 분명하다.
 
 | family | 셀 | IC | ICIR | NW t | placebo p | 통과 |
 |---|---|---|---|---|---|---|
-| `fin_log_mcap` | cum 0–120 | −0.1115 | −1.02 | −5.41 | **0.0099** | ○ |
-| `fin_log_mcap` | cum 0–60 | −0.0838 | −0.88 | −6.53 | **0.0099** | ○ |
-| `fin_log_mcap` | bucket 60–120 | −0.0653 | −0.68 | −5.18 | **0.0099** | ○ |
-| `ev_payout_yield` | cum 0–120 | +0.0975 | +1.12 | +5.86 | 0.2673 | ✗ |
-| `ev_payout_yield` | cum 0–60 | +0.0768 | +0.93 | +6.94 | 0.2079 | ✗ |
-| `fin_value_z` | cum 0–120 | +0.1384 | +1.81 | +8.06 | 0.2840 | ✗ |
+| `fin_log_mcap` | cum 0–120 | −0.1149 | −1.11 | −5.84 | **0.0099** | ○ |
+| `fin_log_mcap` | cum 0–60 | −0.0868 | −0.95 | −7.02 | **0.0099** | ○ |
+| `fin_log_mcap` | bucket 60–120 | −0.0679 | −0.74 | −5.63 | **0.0099** | ○ |
+| `ev_payout_yield` | cum 0–120 | +0.1021 | +1.21 | +6.36 | 0.2673 | ✗ |
+| `ev_payout_yield` | cum 0–60 | +0.0798 | +1.02 | +7.58 | 0.1287 | ✗ |
+| `fin_value_z` | cum 0–120 | +0.1220 | +1.15 | +5.41 | 0.4851 | ✗ |
+| `fin_gross_profitability` | cum 0–120 | +0.0360 | +0.45 | +2.29 | 0.2673 | ✗ |
 
 `ev_payout_yield`도 `fin_value_z`도 IC·ICIR이 `fin_log_mcap`에 밀리지 않는다. NW t는
 오히려 더 크다.
-그런데 **시계열을 통째로 밀어놓고 만든 가짜 신호와 구분되지 않는다**(p 0.27, 임계 0.10).
+그런데 긴 horizon에서는 **시계열을 통째로 밀어놓고 만든 가짜 신호와 구분되지 않는다**.
 반면 `fin_log_mcap`은 0.0099로 100회 복제에서 나올 수 있는 최솟값이다. 이 게이트는 신호의
 크기가 아니라 **시점 정렬이 진짜인지**를 묻는다.
-
-> 앞서 `00_status.md`와 `08` §3.0.1에 "grade C 24개는 failed_gates에 전부
-> `robustness_pass`가 들어 있다"고 적었는데, 이건 발견이라기보다 등급 규칙상 그렇게
-> 라우팅되는 것에 가깝다. 실제 관측 내용은 "**available 방향 문으로 떨어진 셀이 0개**"라는
-> 쪽이다. 두 문서의 해당 문장을 이 표현으로 고쳤다.
 
 ### 9.3 두 트랙은 서로 다른 정보를 본다
 
@@ -395,18 +399,18 @@ Phase A와 Phase B의 대표 피쳐 84쌍의 일별 rank correlation을 재봤�
 
 | 쌍 | 상관 |
 |---|---|
-| `fin_log_mcap` ↔ `px_amihud_20d` | **−0.7246** |
-| `ev_payout_yield` ↔ `px_idio_vol_60d` | −0.3448 |
-| `fin_value_z` ↔ `px_idio_vol_60d` | −0.1871 |
-| `px_mom_12_1` ↔ `fin_asset_growth_yoy` | +0.1523 |
-| `px_reversal_5d` ↔ `fin_log_mcap` | −0.0208 |
+| `fin_log_mcap` ↔ `px_amihud_20d` | **−0.7213** |
+| `ev_payout_yield` ↔ `px_idio_vol_60d` | −0.3468 |
+| `fin_value_z` ↔ `px_idio_vol_60d` | −0.3506 |
+| `px_mom_12_1` ↔ `fin_asset_growth_yoy` | +0.1568 |
+| `px_reversal_5d` ↔ `fin_log_mcap` | −0.0186 |
 
 **예외가 하나 뚜렷하다** — 규모와 Amihud 비유동성이 −0.72다. 큰 회사일수록 유동성이 좋으니
 당연하지만, 그만큼 **1번과 3번은 사실상 같은 축**이라는 뜻이다. 둘 다 채택하면 중복이다.
 
 BH 모집단을 75개(Phase A만)에서 113개(A+B)로 넓혔는데 강등된 가설이 하나도 없는 것도
 이 낮은 상관과 일관된다. 결합 단면 permutation은 100회 복제에서
-`p_empirical_count = 0.0099`로, 발견 45개가 우연히 나올 수준이 아니다.
+`p_empirical_count = 0.0099`로, 발견 56개가 우연히 나올 수준이 아니다.
 
 ### 9.4 아직 아무것도 채택하지 않았다
 
@@ -414,9 +418,9 @@ BH 모집단을 75개(Phase A만)에서 113개(A+B)로 넓혔는데 강등된 �
 §6.1의 acceptance gate에서 증분성·purged walk-forward OOS·turnover·거래비용을 따로 보고
 정한다.
 
-실제로 T1은 그 관문에서 한 번 걸렸다. A등급 6개 중 baseline에 이미 있던 둘을 뺀 4개를
-20일 모델에 넣어봤더니, 증분성은 충족했는데 **k=100 실매수 리스트 기준 경제성이
-−0.0045로 미충족**이었다. 그래서 채택하지 않았다(→ `07_phase1_acceptance_gate.md`).
+T1은 8월 24일 새 A0를 재사용해 walk-forward를 다시 돌렸다. A등급 6개 중 baseline에 이미
+있던 둘을 뺀 4개를 20일 모델에 넣었을 때 평균 IC는 0.1436→0.1521로 늘었지만,
+비용 반영 spread는 **−0.0025** 나빠졌다. 그래서 채택하지 않았다. holdout은 열지 않았다.
 
 **등급 A가 곧 쓸 수 있는 피쳐라는 뜻이 아니다.** T2도 같은 관문을 아직 안 거쳤다.
 
@@ -425,7 +429,7 @@ BH 모집단을 75개(Phase A만)에서 113개(A+B)로 넓혔는데 강등된 �
 ## 10. 원본을 보고 싶으면
 
 경로는 전부
-`research/output/horizon_scan/phase=<X>/snapshot_date=2026-08-12/source=sj2_remote/config_hash=e55c3046…/run_id=<id>/`.
+`research/output/horizon_scan/phase=<X>/snapshot_date=2026-08-23/source=sj2_remote/config_hash=ab0de634…/run_id=<id>/`.
 
 | 보고 싶은 것 | 파일 |
 |---|---|
@@ -450,14 +454,12 @@ A/B 등급 10개는 `06_grade_a_deep_dive/`에 family당 파일 하나로 상세
 이 문서의 T2 4개는 `08`~`11`(이 문서와 같은 Phase B + AB run 기준)이다. 각 파일 맨 앞
 `§0 쉬운 설명`이 통계 배경 없이 읽는 요약이고, 용어는 `07_glossary.md`에 있다.
 
-T2 상세 조사에서 결함 몇 가지가 나왔다. 전부 `10_known_issues.md`에 모아뒀고,
-처리 순서 제안도 거기 있다. 이 문서의 서술에 직접 걸리는 것은 둘이다.
-
-- `fin_value_z`에 **결측 처리 버그**가 있다. 구성요소가 없는 종목이 그날 그 시장의
-  1분위 값으로 대체돼 전체 행의 19.3%가 "가장 비싼" 끝단에 몰린다. 해당 행을 빼도
-  decile 스프레드는 0.76%p → 0.89%p로 오히려 커져 신호 자체는 유지된다.
-- `ev_net_share_issuance_yoy`는 **음수 값이 한 건도 없다.** 코드가 찾는 문자열은
-  `감자(유상)`인데 데이터는 `유상감자`로 적어 감소가 한 번도 매칭되지 않는다.
+T2 상세 조사에서 찾은 과거 결함은 `10_known_issues.md`에 있다. `fin_value_z` 결측 처리(I1),
+`ev_net_share_issuance_yoy` 감소 사유 카탈로그와 I7 XBRL fallback은 최신 run 전에 고쳤다.
+이번 결과는 그 수정 뒤 `fin_v4` 기준이다. 반면 `mcap_krx_log`, 공시 활동, N8 후보와
+N6에서 고른 `hc_employee_growth_yoy`·`hc_revenue_per_employee`·`own_major_stake`
+level/change는 아직 이 config에 들어 있지 않다. N2 업종 중립 variant는 변동성 진단을
+통과했지만 현재 업종 소급이라는 look-ahead 때문에 diagnostic-only로 남겼다.
   정의는 순발행인데 실제로는 총발행을 재고 있다.
 
 §1 표 머리말의 "IC는 |IC|가 가장 큰 primary 셀 기준"도 정확하지 않다. 실제로는

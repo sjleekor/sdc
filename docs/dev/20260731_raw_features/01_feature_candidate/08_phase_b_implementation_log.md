@@ -34,6 +34,10 @@ list의 vintage 중복 문제가 드러나 plan §4.4.1이 계약 보강으로 �
 **다음 세션은 `00_status.md` §0부터 읽는다** — 백그라운드 수집이 끝났는지 확인하는 명령과,
 끝났을 때 어느 순서로 진행하는지가 거기 있다.
 
+**2026-08-24 최신 기준.** 8월 23일 snapshot으로 native scan·Phase A artifact 재사용 경로를
+적용한 A → B → AB official run이 다시 완주했다. 최신 결과는 §3.0이며, §3.0a 이하의 8월
+12~13일 결과는 이전 계약의 실행 기록으로 읽는다. 8월 27일 `tests/unit`은 1,343개 통과했다.
+
 ## 1. 전체 상태 요약
 
 | PR | 대응 작업 패키지 | 상태 |
@@ -54,8 +58,8 @@ list의 vintage 중복 문제가 드러나 plan §4.4.1이 계약 보강으로 �
 | B-PR14 | 결합 단면 permutation(B-8) | 완료 |
 | B-PR15 | B-10 Stage 1 — readiness_matrix + robustness summary 아카이브 | 완료 |
 
-B-PR1~15 전부 **실데이터로 한 번씩 돌았다** — Phase B(§3.0) → Phase A 재실행 → phase=AB
-(§3.0.1). 통합 크래시는 없었고 등급이 확정됐다(A=5, B=2, C=24, D=7).
+B-PR1~15 전부 실데이터로 돌았다. 최신 Phase B 38셀은 `screen_pass=12`, grade
+**A=5, B=7, C=25, D=1**이다. Phase A 75개와 합친 discovery는 56개다(§3.0).
 
 ## 2. B-PR별 상세
 
@@ -285,9 +289,97 @@ artifact")는 한 PR에 넣기엔 너무 크고 성격도 다양해(값 재사�
 
 ## 3. 현재 실행 상태 — 발행된 run과 데이터 블로커
 
-(2026-08-11 확인, 2026-08-13 갱신. 이 절은 코드가 아니라 **디스크에 실제로 있는 것**을 적는다.)
+(2026-08-11 확인, 2026-08-24 갱신. 이 절은 코드가 아니라 **디스크에 실제로 있는 것**을 적는다.)
 
-### 3.0 snapshot 2026-08-12 Phase B — 처음으로 실데이터 완주 (2026-08-13)
+### 3.0 snapshot 2026-08-23 — native A·B·AB 최신 official run
+
+세 run은 `source=sj2_remote`, `config_hash=ab0de634…`, `official=true`이며 같은 A0 manifest와
+`joint_cs_v2` mapping 계약을 쓴다. 새 원천 후보를 추가한 run은 아니다. I7 `fin_v4`와 최신
+raw, native kernel·A 통계 재사용·worker 2개를 적용해 기존 25 family·113가설을 다시 검정했다.
+
+| phase | run_id | content hash | 핵심 결과 | 시간 |
+|---|---|---|---|---:|
+| A | `20260823T210913-b649a460` | `46ccf585…` | 75/75 valid, `bh_pass` 57, discovery 32 | 60분 11초 |
+| B | `20260823T221441-b649a460` | `f556dd3d…` | 38/38 ready, `bh_pass` 28, discovery 24 | 44분 24초 |
+| AB | `20260823T225913-b649a460` | `e380d931…` | `m_ab=113`, discovery 56, `screen_pass` 12 | 1초 미만 |
+
+Phase B 단독 결과는 다음과 같다.
+
+| family | 셀 | bh_pass | discovery | robustness 통과/요구 | q_min |
+|---|---:|---:|---:|---:|---:|
+| `fin_log_mcap` | 4 | 4 | 4 | 3/3 | 1.74e-11 |
+| `fin_value_z` | 4 | 4 | 4 | 0/3 | 2.41e-14 |
+| `fin_gross_profitability` | 8 | 8 | 8 | 0/3 | 9.10e-7 |
+| `ev_payout_yield` | 4 | 4 | 4 | 0/3 | 2.52e-17 |
+| `ev_net_share_issuance_yoy` | 4 | 4 | 4 | 0/3 | 2.25e-10 |
+| `fin_accruals_to_assets` | 4 | 4 | 0 | 0/3 | 4.08e-4 |
+| `fin_asset_growth_yoy` | 4 | 0 | 0 | 0/3 | 0.9175 |
+| `fin_sue` | 6 | 0 | 0 | 0/6 | 1.0 |
+
+AB에서 확정된 Phase B 38셀의 grade는 **A5·B7·C25·D1**이다. `screen_pass` 12셀은 다음과
+같다.
+
+| family | 통과 horizon | 셀 수 | grade | 대표 IC |
+|---|---|---:|---|---:|
+| `fin_log_mcap` | 40–60·60–120 bucket, 0–60·0–120 cumulative | 4 | A | −0.1149(0–120) |
+| `ev_net_share_issuance_yoy` | 40–60 bucket | 1 | A | −0.0221 |
+| `fin_gross_profitability` | 10–20·20–40·40–60 bucket, 0–20·0–40 cumulative | 5 | B | +0.0275(0–40) |
+| `ev_payout_yield` | 40–60 bucket | 1 | B | +0.0550 |
+| `fin_value_z` | 40–60 bucket | 1 | B | +0.0599 |
+
+12셀 중 temporal placebo가 요구된 것은 `fin_log_mcap` 3셀뿐이며 모두 p=0.0099로 통과했다.
+나머지 9셀은 horizon 폭이 짧아 `robustness_required=false`다. B등급 7셀은 통계 때문이 아니라
+source 품질 경고로 A 상한이 막혔다. `revision_ratio`는 `fin_gross_profitability` 0.1014,
+`fin_value_z` 0.1014, `ev_payout_yield` 0.1116으로 임계 0.10을 넘었다.
+`fin_gross_profitability`와 `fin_value_z`는 `mapping_fallback_ratio`도 각각 0.9440·0.9417로
+임계 0.50을 넘었다.
+
+C 25셀 중 24셀은 `robustness_pass`가 실패했고, 나머지 1셀은
+`available_direction_pass`가 실패한 `fin_asset_growth_yoy`다. D 1셀은
+`fin_accruals_to_assets`의 primary discovery·기간 부호 실패다. I7 뒤
+`fin_gross_profitability` coverage가 0.5835로 늘면서 짧은 horizon 5셀이 새 B등급으로
+살아난 것이 이전 run과 가장 큰 차이다. `fin_sue`는 여전히 표본이 없다.
+
+결합 BH는 A 32개와 B 24개를 모두 유지해 discovery 56개가 됐다. Phase A 강등은 0건이다.
+결합 단면 permutation은 100회에서 `p_empirical_count=0.0099`다. 실행시간은 A+B+AB 약
+1시간 44분이며, peak RSS는 A 9.94GB, B 20.36GB다.
+
+주의할 점이 둘 있다.
+
+- run spec은 `git_dirty=true`다. 8월 27일 두 번째 official run으로 통계·판정 결정성은
+  확인했지만, non-overlap과 rank correlation의 부동소수점 마지막 비트까지 같은 byte-level
+  결정성은 아직 아니다(아래 §3.0.1).
+- 이 config에는 `mcap_krx_log`, `feat_filing_activity`, N2 업종 중립 variant, N6·N8 후보가
+  없다. `fin_log_mcap`은 여전히 DART share 기반 `market_cap_pit`다.
+
+### 3.0.1 2026-08-27 같은 입력 결정성 재실행
+
+8월 23일 A0 manifest와 `config_hash=ab0de634…`, `workers=2`를 그대로 두고 A → B → AB를
+새 checkpoint root에서 다시 돌렸다. 기존 run은 덮어쓰지 않았다.
+
+| phase | 재실행 run_id | content hash | 시간 | peak RSS |
+|---|---|---|---:|---:|
+| A | `20260827T082015-b649a460` | `020b818f…` | 3,758.931초 | 9,352,904,704 bytes |
+| B | `20260827T092909-b649a460` | `0aebbce8…` | 2,686.803초 | 17,587,863,552 bytes |
+| AB | `20260827T101418-b649a460` | `6ab78f52…` | 1초 미만 | artifact 결합만 실행 |
+
+판정에 쓰는 결과는 재현됐다.
+
+- A `horizon_ic.parquet`와 `permutation_cell_stats.parquet`는 파일 SHA-256까지 같다.
+- B `phase_b_primary_hypotheses.parquet`, `horizon_ic.parquet`, `permutation_summary.parquet`,
+  `temporal_placebo_summary.parquet`는 파일 내용이 정확히 같다.
+- AB `combined_ab_primary_hypotheses.parquet`와 `phase_a_card_overlay.parquet`도 정확히 같다.
+- 따라서 discovery 56, `screen_pass` 12, B-cell grade A5·B7·C25·D1,
+  `p_empirical_count=0.0099`가 그대로 재현됐다.
+
+content hash가 달라진 이유는 판정 변경이 아니다. A `family_cards.json`의 non-overlap 평균과
+B `nonoverlap_summary.parquet`·`primary_feature_rank_correlation.parquet`의 집계값이 실행마다
+부동소수점 마지막 비트에서 달랐다. 최대 절대 차이는 **1.11e-16**이고, 문자열·상태·grade 등
+비수치 필드는 같았다. 현 기준선은 **통계·판정 결정성 통과, byte-level 결정성 미완료**로 둔다.
+canonical 결과표는 판정이 같은 8월 23일 run을 계속 가리키고, 8월 27일 run은 결정성 검증
+lineage로 보존한다.
+
+### 3.0a snapshot 2026-08-12 Phase B — 처음으로 실데이터 완주 (2026-08-13, 이전 기록)
 
 `snapshot_date=2026-08-09`를 다룬 §3.1~3.2는 아래 run으로 대체됐다. 그 절들은 블로커가
 어떻게 생겼었는지의 기록으로 남긴다.
@@ -356,9 +448,9 @@ artifact")는 한 PR에 넣기엔 너무 크고 성격도 다양해(값 재사�
 둘 다 q가 1.0 / 0.42로 나온 family와 일치한다 — 신호가 없다기보다 표본이 없다.
 
 **다음.** 같은 snapshot으로 `--phase A` 재실행 → `--phase AB`. 그래야 등급이 정해진다.
-→ 둘 다 끝났다. §3.0.1.
+→ 둘 다 끝났다. §3.0b.
 
-### 3.0.1 Phase A 재실행 → phase=AB — 등급이 정해졌다 (2026-08-13)
+### 3.0b Phase A 재실행 → phase=AB — 등급이 정해졌다 (2026-08-13, 이전 기록)
 
 크리티컬 패스의 마지막 두 계산이다. §3.0이 남겨둔 "등급 미정" 상태가 여기서 풀린다.
 
@@ -466,7 +558,7 @@ run에는 parquet 2개뿐이었다. Phase A × Phase B 피처 간 일별 rank co
 | A (구) | `20260803T063659-93effdb0` | `1d208258…` | Phase B 섹션 추가 **이전** config. 05·06 문서가 인용하는 run |
 | A (신) | `20260810T141014-7212fe82` | `e55c3046…` | 현재 config로 재실행. **family 17개 등급이 구 run과 완전히 동일**(A 6, C 4, D 6, R 1, A 목록도 같음) |
 | B | `20260810T134333-66c929e0` | `e55c3046…` | B-PR15 이전 |
-| B | `20260810T135845-e04c00c7` | `e55c3046…` | 최신. `core/`에 `phase_b_primary_hypotheses.parquet` + `readiness_matrix.{parquet,md}` |
+| B | `20260810T135845-e04c00c7` | `e55c3046…` | 당시 최신. `core/`에 `phase_b_primary_hypotheses.parquet` + `readiness_matrix.{parquet,md}` |
 | AB | `20260810T194651-e04c00c7` | `e55c3046…` | `m_ab=75`, `phase_b_screen_pass_count=0`, `phase_b_evidence_grade_counts={A:0,B:0,C:0,D:0}` |
 
 경로는 모두
@@ -996,7 +1088,11 @@ B-2는 Phase B 전용이라 골든 대상이 아니다.
   (`20260810T194651-e04c00c7`). 단 B가 0개라 내용은 비어 있다.
 - ~~snapshot 2026-08-12로 Phase A 재실행 + 내용 있는 AB~~ → 2026-08-13 완료
   (`20260813T081646-00fa0e76` / `20260813T130307-f9117ce1`). `m_ab=113`,
-  `screen_pass=7`, grade A=5·B=2·C=24·D=7. §3.0.1 참고.
+  `screen_pass=7`, grade A=5·B=2·C=24·D=7. §3.0b 참고.
+- ~~snapshot 2026-08-23로 native Phase A/B/AB 재실행~~ → 2026-08-23 완료.
+  A `20260823T210913-b649a460`, B `20260823T221441-b649a460`, AB
+  `20260823T225913-b649a460`. `m_ab=113`, discovery 56, `screen_pass=12`,
+  grade A=5·B=7·C=25·D=1. §3.0 참고.
 
 ## 5. 재현
 
@@ -1020,18 +1116,18 @@ uv run python -m research.etl.horizon_scan_inputs --source sj2_remote
 `compute_all --features`로 대신할 수 없다. 계약 해시가 달라 A0가
 `mart cache contract mismatch`로 죽는다(그 경우 `--force`). 자세한 이유는 `00_status.md` §5.
 
-마지막으로 실제 실행한 `--phase AB` 인자(§3.0.1의 두 run, snapshot 2026-08-12):
+마지막으로 최신 `--phase AB` 인자(§3.0의 두 run, snapshot 2026-08-23):
 
 ```bash
 BASE=research/output/horizon_scan
-HASH=e55c3046c113a9168d2b64fcbc87124c2fa1783b7682acc0852a718cd800dd3b
+HASH=ab0de63411c40ca3b59c1c7e6f8653a8e16d980108bee42f5f8cea8e7fcb6588
 uv run python -m research.analysis.horizon_scan --phase AB \
-  --phase-a-run-dir "$BASE/phase=A/snapshot_date=2026-08-12/source=sj2_remote/config_hash=$HASH/run_id=20260813T081646-00fa0e76" \
-  --phase-b-run-dir "$BASE/phase=B/snapshot_date=2026-08-12/source=sj2_remote/config_hash=$HASH/run_id=20260812T231507-f9117ce1"
+  --phase-a-run-dir "$BASE/phase=A/snapshot_date=2026-08-23/source=sj2_remote/config_hash=$HASH/run_id=20260823T210913-b649a460" \
+  --phase-b-run-dir "$BASE/phase=B/snapshot_date=2026-08-23/source=sj2_remote/config_hash=$HASH/run_id=20260823T221441-b649a460"
 ```
 
 직전 세대(snapshot 2026-08-09, §3.1의 두 run)는 `run_id=20260810T141014-7212fe82` /
 `20260810T135845-e04c00c7`였다. Phase B가 0셀이던 시절의 기록이다.
 
-이어서 작업할 때 **가장 먼저 볼 것**: §3.0(Phase B 측정값) → §3.0.1(등급 확정) → §4(남은 작업).
-§3.1·§3.2는 `M_B_ready=0`이 어떻게 생겼었는지의 기록으로만 남긴다 — 그 블로커는 해소됐다.
+이어서 작업할 때 **가장 먼저 볼 것**은 §3.0 최신 결과다. §3.0a~§3.2는 이전 실행과
+`M_B_ready=0` 블로커가 어떻게 풀렸는지의 기록으로만 남긴다.
