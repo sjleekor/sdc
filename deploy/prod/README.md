@@ -2,11 +2,11 @@
 
 이 디렉터리는 `sj2-server:/home/whi/apps/sdc`에 배포되는 SDC 운영 파일의 source of truth다.
 
-- 마지막 확인: 2026-06-29 KST
+- 마지막 확인: 2026-08-28 KST
 - 확인한 원천: Cronicle API `GET /api/app/get_schedule/v1`, `GET /api/app/get_event/v1`, 원격 파일 `whi@sj2-server:/home/whi/apps/sdc/{compose.yaml,bin/}`
 - Cronicle UI: `http://sj2-server:3012/#Schedule`
 - 배포 경로: `whi@sj2-server:/home/whi/apps/sdc`
-- 현재 compose image: `ghcr.io/sjleekor/sdc:v0.8.15`
+- 현재 compose image: `ghcr.io/sjleekor/sdc:v0.11.4`
 - 현재 상시 기동 서비스: `db`만 기동. `collector`는 Cronicle wrapper가 `docker compose run --rm collector ...`로 작업마다 실행한다.
 
 원격 `compose.yaml`과 `bin/*.sh` checksum은 현재 로컬 `deploy/prod`와 일치한다.
@@ -47,7 +47,10 @@
 
 ## Cronicle event chain
 
-현재 배포된 Cronicle event는 raw 수집 12개이며 모두 `enabled=1`, `plugin=shellplug`, `category=general`, `target=maingrp`, `timezone=Asia/Seoul`, `max_children=1`, `multiplex=0`, `catch_up=0`이다. `chain_error`는 모두 비어 있으므로 실패 시 별도 실패 분기로 가지 않고 그 지점에서 chain이 멈춘다.
+2026-08-28 Cronicle API 기준 event는 19개다. 정기 event 16개와 수동 one-time event 3개가
+있으며 모두 `enabled=1`, `plugin=shellplug`, `category=general`, `target=maingrp`,
+`timezone=Asia/Seoul`, `max_children=1`, `multiplex=0`, `catch_up=0`이다. `chain_error`는
+모두 비어 있으므로 실패 시 별도 실패 분기로 가지 않고 그 지점에서 chain이 멈춘다.
 
 ```mermaid
 flowchart TD
@@ -81,7 +84,11 @@ flowchart TD
 ```text
 04:00 daily     OpenDART Corp -> Financials -> Share Info -> XBRL
 18:30 Mon-Fri  FDR Universe -> PYKRX Prices -> KRX Flows -> KRX Common
+19:00 Mon-Fri  KIS Foreign Holding
+20:00 Mon-Fri  KRX Open API Market Cap (최근 30일 gap scan, 원천 T+1)
 20:30 Mon-Fri  FDR Common, FRED Common, ECOS Daily -> ECOS Macro
+20:30 Monday    KIS Investor/Shorting
+23:00 daily     Raw Freshness Gate
 ```
 
 `common_build`/coverage/readiness와 `metrics_normalize`는 더 이상 sj2 compute 책임이 아니다. raw 미러/export 후 compute 노드에서 Parquet/DuckDB 게이트를 실행한다.
@@ -94,10 +101,14 @@ flowchart TD
 | `sdc_daily_pykrx_prices` | chain-only | `sdc_daily_krx_flows` | `prices-backfill-incremental.sh` | 전체 시장 일봉 가격을 증분 backfill한다. 기본 lookback은 0일, 자동 range guard는 10일이다. |
 | `sdc_daily_krx_flows` | chain-only | `sdc_daily_krx_common` | `flows-sync.sh` | 가격 최신일을 기준으로 KRX 수급 데이터를 증분 동기화한다. 기본 lookback은 14일, 자동 range guard는 30일이다. |
 | `sdc_daily_krx_common` | chain-only | 없음 | `common-sync-krx.sh` | KRX 계열 common feature raw series를 증분 동기화한다. 현재는 `krx_flows` 성공 후에만 실행된다. |
+| `sdc_kis_flows_trial` | Mon-Fri 19:00 | 없음 | `flows-sync-kis.sh` | KIS `foreign_holding`을 전 종목 동기화한다. |
+| `sdc_daily_market_cap` | Mon-Fri 20:00 | 없음 | `prices-market-cap-backfill.sh` | 최근 30일의 `daily_market_cap` gap을 확인하고 T+1 원천의 빠진 세션을 채운다. |
 | `sdc_daily_fdr_common` | Mon-Fri 20:30 | 없음 | `common-sync-fdr.sh` | FDR common feature raw series를 증분 동기화한다. |
 | `sdc_daily_fred_common` | Mon-Fri 20:30 | 없음 | `common-sync-fred.sh` | FRED common feature raw series를 증분 동기화한다. |
 | `sdc_daily_ecos_common_daily` | Mon-Fri 20:30 | `sdc_daily_ecos_common_macro` | `common-sync-ecos-daily.sh` | ECOS 일간 common feature raw series를 증분 동기화한다. |
 | `sdc_daily_ecos_common_macro` | chain-only | 없음 | `common-sync-ecos-macro.sh` | ECOS 월간 macro series(`macro_cpi`, `macro_ppi`, `macro_m2`, `macro_consumer_sentiment`)를 긴 lookback으로 동기화한다. |
+| `sdc_kis_flows_weekly` | Monday 20:30 | 없음 | `flows-sync-kis.sh` | KIS investor/shorting 지표를 주 1회 동기화한다. |
+| `sdc_daily_freshness` | daily 23:00 | 없음 | `ops-freshness-report.sh` | 저녁 수집이 끝난 뒤 raw 최신일을 검사하고 stale이면 실패한다. |
 | `sdc_daily_opendart_corp` | daily 04:00 | `sdc_daily_opendart_financials` | `dart-sync-corp.sh` | OpenDART corp master를 동기화한다. |
 | `sdc_daily_opendart_financials` | chain-only | `sdc_daily_opendart_share_info` | `dart-sync-financials.sh` | OpenDART 재무제표를 증분 동기화한다. 기본 lookback은 1년, attempt guard는 10,000건이다. |
 | `sdc_daily_opendart_share_info` | chain-only | `sdc_daily_opendart_xbrl` | `dart-sync-share-info.sh` | 주식수, 배당, 자기주식 관련 OpenDART 데이터를 증분 동기화한다. Cronicle script에 `DART_SHARE_INFO_MAX_ATTEMPT_TARGETS=35000` override가 있다. |
@@ -183,8 +194,6 @@ source lock은 `/tmp/sdc-locks/<domain>.lock`에 `flock`을 걸고, lock 획득 
 | `dart-backfill-all-years.sh` | OpenDART 연도별 대량 backfill. 기본은 전체 backfill 구간을 `opendart` lock으로 감싼다. |
 | `flows-backfill-range.sh` | `FLOW_START`, `FLOW_END`로 지정한 수급 range를 수동 backfill한다. 항상 `krx_marketdata` lock을 사용한다. |
 | `db-init.sh` | collector의 `db init` 실행. |
-| `ops-freshness-report.sh` | raw freshness gate. 기본 예산은 일별 1거래일, `daily_market_cap` 2거래일, release-lagged source 14일이다. |
-| `prices-market-cap-backfill.sh` | `daily_market_cap` gap detection/backfill. 2026-08-28 현재 정기 event 등록 전이다. |
 | `pull-image.sh` | collector image pull. |
 | `up-db.sh` | DB service 기동. |
 | `validate.sh` | `validate --market all` 실행. |

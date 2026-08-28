@@ -48,6 +48,11 @@ class CommonSeriesFreshness:
     series_id: str
     source: Source
     latest_observation_date: date | None
+    frequency: str = "D"
+    # ``None`` keeps reports built by callers that do not have catalog metadata
+    # on the CLI's legacy calendar-day fallback. Reports built from Storage
+    # always carry the catalog's series-specific budget.
+    max_stale_business_days: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +96,8 @@ def build_freshness_report(storage: Storage, *, running_limit: int = 20) -> Fres
             series_id=series.series_id,
             source=series.source,
             latest_observation_date=observation_latest.get(series.series_id),
+            frequency=series.frequency,
+            max_stale_business_days=series.max_stale_business_days,
         )
         for series in series_rows
     ]
@@ -130,10 +137,11 @@ def build_freshness_report(storage: Storage, *, running_limit: int = 20) -> Fres
     )
 
 
-# Sources whose observations land on KRX trading days. Everything else (ECOS,
-# FRED) publishes on its own calendar with a release lag, so a trading-day
-# budget would flag it every single day and the gate would be ignored.
-TRADING_DAY_SOURCES = frozenset({Source.KRX, Source.KIS, Source.FDR, Source.PYKRX})
+# Sources whose observations land on KRX trading days with no normal publication
+# lag. FDR includes overseas markets and commodities, so treating all FDR series
+# as same-session KRX data makes legitimate source-market lag fail every night.
+# Those series use their catalog-level business-day budget instead.
+TRADING_DAY_SOURCES = frozenset({Source.KRX, Source.KIS, Source.PYKRX})
 
 DEFAULT_MAX_LAG_TRADING_DAYS = 1
 # KRX Open API publishes daily_market_cap at T+1. At the end of today's
@@ -150,7 +158,7 @@ class StaleFinding:
     domain: str
     latest: date | None
     required_at_or_after: date
-    cadence: str  # "trading" | "calendar"
+    cadence: str  # "trading" | "business" | "calendar"
 
     def describe(self) -> str:
         latest = self.latest.isoformat() if self.latest else "(empty)"
@@ -176,6 +184,24 @@ def _trading_day_threshold(
     if not sessions:
         return None
     return sessions[-lag] if len(sessions) >= lag else sessions[0]
+
+
+def _business_day_threshold(as_of: date, max_lag_business_days: int) -> date:
+    """Oldest weekday allowed by a source series' catalog budget.
+
+    This intentionally uses weekdays rather than the KRX holiday calendar.
+    Overseas market, commodity, ECOS, and FRED series publish on calendars that
+    differ from KRX. Their catalog budgets already include normal publication
+    and holiday lag; binding them to KRX sessions would reintroduce false alarms.
+    """
+    lag = max(1, max_lag_business_days)
+    cursor = as_of
+    weekdays: list[date] = []
+    while len(weekdays) < lag:
+        if cursor.weekday() < 5:
+            weekdays.append(cursor)
+        cursor -= timedelta(days=1)
+    return weekdays[-1]
 
 
 def evaluate_staleness(
@@ -236,6 +262,13 @@ def evaluate_staleness(
                 row.latest_observation_date,
                 trading_threshold,
                 "trading",
+            )
+        elif row.max_stale_business_days is not None:
+            check(
+                f"common:{row.series_id}",
+                row.latest_observation_date,
+                _business_day_threshold(as_of, row.max_stale_business_days),
+                "business",
             )
         else:
             check(

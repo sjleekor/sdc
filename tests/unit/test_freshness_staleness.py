@@ -18,6 +18,7 @@ from datetime import date
 import pytest
 
 from krx_collector.domain.enums import Source
+from krx_collector.domain.models import CommonFeatureSeries
 from krx_collector.service import freshness
 from krx_collector.service.freshness import (
     FLOW_SOURCES,
@@ -77,7 +78,12 @@ def test_reproduces_the_2026_08_14_outage() -> None:
         flows={"investor_net_buy": THURSDAY, "short_selling": THURSDAY},
         common=[
             CommonSeriesFreshness("market_kospi_close_krx", Source.KRX, THURSDAY),
-            CommonSeriesFreshness("fx_usdkrw_fdr", Source.FDR, THURSDAY),
+            CommonSeriesFreshness(
+                "fx_usdkrw_fdr",
+                Source.FDR,
+                THURSDAY,
+                max_stale_business_days=7,
+            ),
         ],
     )
 
@@ -88,7 +94,6 @@ def test_reproduces_the_2026_08_14_outage() -> None:
         "krx_security_flow_raw:investor_net_buy",
         "krx_security_flow_raw:short_selling",
         "common:market_kospi_close_krx",
-        "common:fx_usdkrw_fdr",
     }
     assert all(finding.required_at_or_after == FRIDAY for finding in findings)
     assert all(finding.cadence == "trading" for finding in findings)
@@ -165,6 +170,64 @@ def test_release_lagged_sources_get_a_calendar_budget() -> None:
     findings = _evaluate(_report(common=stale))
     assert [finding.domain for finding in findings] == ["common:us_cpi_fred"]
     assert findings[0].cadence == "calendar"
+
+
+def test_catalog_budget_handles_daily_and_monthly_source_release_lag() -> None:
+    # The production catalog distinguishes daily overseas observations from
+    # monthly macro releases. A single 14-calendar-day limit makes one of those
+    # groups permanently fail.
+    as_of = date(2026, 8, 28)
+    common = [
+        CommonSeriesFreshness(
+            "global_sp500_fdr",
+            Source.FDR,
+            date(2026, 8, 26),
+            frequency="D",
+            max_stale_business_days=7,
+        ),
+        CommonSeriesFreshness(
+            "macro_cpi",
+            Source.ECOS,
+            date(2026, 7, 31),
+            frequency="M",
+            max_stale_business_days=45,
+        ),
+        CommonSeriesFreshness(
+            "macro_m2",
+            Source.ECOS,
+            date(2026, 6, 30),
+            frequency="M",
+            max_stale_business_days=90,
+        ),
+    ]
+
+    current_report = _report(
+        price=as_of,
+        market_cap=as_of,
+        flows={"investor_net_buy": as_of},
+        common=common,
+    )
+    assert _evaluate(current_report, as_of=as_of) == []
+
+    stale = [
+        CommonSeriesFreshness(
+            "global_sp500_fdr",
+            Source.FDR,
+            date(2026, 8, 19),
+            max_stale_business_days=7,
+        )
+    ]
+    stale_report = _report(
+        price=as_of,
+        market_cap=as_of,
+        flows={"investor_net_buy": as_of},
+        common=stale,
+    )
+    findings = _evaluate(stale_report, as_of=as_of)
+
+    assert [finding.domain for finding in findings] == ["common:global_sp500_fdr"]
+    assert findings[0].required_at_or_after == date(2026, 8, 20)
+    assert findings[0].cadence == "business"
 
 
 def test_a_wider_trading_budget_tolerates_one_missed_session() -> None:
@@ -264,6 +327,37 @@ class _FlowStorage:
         return []
 
 
+def test_report_carries_each_common_series_catalog_budget() -> None:
+    series = CommonFeatureSeries(
+        series_id="macro_cpi",
+        source=Source.ECOS,
+        source_series_key="901Y009",
+        category="macro",
+        frequency="M",
+        name_kr="소비자물가지수",
+        max_stale_business_days=45,
+    )
+
+    class CommonStorage(_FlowStorage):
+        def get_common_feature_series(self, active_only=True):
+            return [series]
+
+        def get_common_feature_observation_max_dates(self, series_ids):
+            return {series.series_id: date(2026, 7, 31)}
+
+    report = build_freshness_report(CommonStorage({}))
+
+    assert report.common_series == [
+        CommonSeriesFreshness(
+            series_id="macro_cpi",
+            source=Source.ECOS,
+            latest_observation_date=date(2026, 7, 31),
+            frequency="M",
+            max_stale_business_days=45,
+        )
+    ]
+
+
 def _shorting_storage(balance: date) -> _FlowStorage:
     """KIS-collected shorting metrics current, the KRX-only balance frozen."""
     return _FlowStorage(
@@ -348,8 +442,9 @@ def test_a_fully_discontinued_group_is_not_gated_even_though_it_is_reported(
 
 def test_kis_is_treated_as_a_trading_day_source() -> None:
     # KIS publishes on KRX sessions, so it gets the trading-day budget rather
-    # than the 14-day calendar budget that ECOS/FRED need.
+    # than the catalog-level business-day budget that ECOS/FDR/FRED need.
     assert Source.KIS in TRADING_DAY_SOURCES
+    assert Source.FDR not in TRADING_DAY_SOURCES
 
     stale = [
         CommonSeriesFreshness(

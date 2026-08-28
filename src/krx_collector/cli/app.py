@@ -2847,7 +2847,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_MAX_LAG_CALENDAR_DAYS,
         help=(
-            "Calendar-day budget for release-lagged sources such as ECOS and FRED "
+            "Fallback calendar-day budget when common-series catalog metadata is unavailable; "
+            "stored series use their max_stale_business_days instead "
             f"(default: {DEFAULT_MAX_LAG_CALENDAR_DAYS})."
         ),
     )

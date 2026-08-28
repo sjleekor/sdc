@@ -7,8 +7,9 @@ KRX 정규장 시간: 09:00–15:30 KST. 당일의 온전한 데이터를 확보
 ### 권장 크론탭(cron) 스케줄 (KST 기준)
 
 > **prod은 이 표대로 돌지 않는다.** sj2-server는 crontab이 아니라 **Cronicle**을 쓰고,
-> 체인 셋으로 나뉜다 — **18:30** FDR Universe → Prices → KRX Flows → KRX Common,
-> **20:30** ECOS/FRED/FDR common, **04:00** OpenDART Corp → Financials → Share Info → XBRL.
+> 체인 셋과 독립 event로 나뉜다 — **18:30** FDR Universe → Prices → KRX Flows → KRX Common,
+> **19:00** KIS foreign holding, **20:00** market cap, **20:30** ECOS/FRED/FDR common,
+> **23:00** freshness gate, **04:00** OpenDART Corp → Financials → Share Info → XBRL.
 > 아래는 이 저장소를 새로 배포하는 사람을 위한 최소 예시다. 실제 prod 스케줄은
 > Cronicle API로 확인한다(`sj2-server` 스킬).
 
@@ -74,12 +75,17 @@ krx-collector ops freshness-report --fail-if-stale
 
 | 옵션 | 기본값 | 대상 |
 |---|---|---|
-| `--max-lag-trading-days` | `1` | `daily_ohlcv`, flow 그룹, KRX/FDR/PYKRX 계열 common series. **1 = 최근 세션이 저장돼 있어야 한다** |
-| `--max-lag-calendar-days` | `14` | ECOS·FRED처럼 발표 지연이 있는 시리즈 |
+| `--max-lag-trading-days` | `1` | `daily_ohlcv`, flow 그룹, KRX/KIS/PYKRX 계열 common series. **1 = 최근 세션이 저장돼 있어야 한다** |
+| `--max-lag-calendar-days` | `14` | 카탈로그 metadata가 없는 common series의 fallback |
 
-거래일 예산과 달력 예산을 나눈 이유는, 발표 지연이 있는 시리즈를 거래일 기준으로 재면
-매일 걸려서 **아무도 안 보는 게이트**가 되기 때문이다. 빈 테이블은 "검사 대상 없음"이
-아니라 stale로 센다.
+FDR·ECOS·FRED series는 `common_feature_series.max_stale_business_days`를 쓴다. 빈도와
+원천별 공개 지연을 반영해 일별 series는 보통 7~10영업일, 월별 ECOS series는
+45~90영업일을 허용한다. 해외시장 휴장과 월간 지표 공개 주기를 정상 지연으로 처리하되,
+각 series의 카탈로그 예산을 넘으면 gate가 실패한다.
+
+엄격한 KRX 거래일 예산과 series별 공개 지연 예산을 나눈 이유는, 해외시장과 발표 지연이
+있는 시리즈를 KRX 거래일 기준으로 재면 매일 걸려서 **아무도 안 보는 게이트**가 되기
+때문이다. 빈 테이블은 "검사 대상 없음"이 아니라 stale로 센다.
 
 ## 런북 (Runbook)
 
@@ -670,17 +676,19 @@ KRX 접근이 제한된 상황에서 7년치를 다시 긁을 이유가 없다. 
 
 #### 2026-08-28 재부팅 뒤 운영 점검
 
-sj2-server는 17:42 무렵 다시 올라왔고 Postgres 18.3은 healthy다. collector 배포 버전은
-`v0.11.2`다. Cronicle의 18:30 일일 체인, 20:30 common, 04:00 OpenDART 체인은 enabled지만
-`daily_market_cap`과 nightly freshness event는 여전히 없다.
+sj2-server는 17:42 무렵 다시 올라왔고 Postgres 18.3은 healthy다. collector는
+KIS source별 cursor 수정과 series별 freshness 예산을 담은 `v0.11.4`까지 배포했다.
+Cronicle에 `sdc_daily_market_cap`(평일 20:00)과 `sdc_daily_freshness`(매일 23:00)를
+등록했고 둘 다 enabled다.
 
-prod raw 최신일은 `daily_ohlcv`와 대부분의 KRX flow가 08-27, `daily_market_cap`이 08-19다.
+market cap은 08-20~27의 빠진 6거래일을 복구했다. 각 날짜의 ticker 수는 같은 날
+`daily_ohlcv`와 모두 일치하며 최신일은 T+1 원천에 맞는 08-27이다.
 N6는 Cronicle 일회성 event가 남아 있지 않지만 DB audit에는 08-22~23 run이 success로 닫혀 있다.
 122,729슬라이스를 처리해 employee 92,163행과 governance 326,997행을 저장했고 오류는 0이다.
 
-KIS daily `foreign_holding` event는 실행 자체는 성공했지만 08-21~27에 전 종목을
-`skipped_current`로 넘겼다. KRX·KIS coverage를 합친 cursor가 KRX 당일 행을 KIS 완료 행으로
-잘못 본 것이 원인이다. source별 cursor 수정은 로컬 테스트까지 끝났고, release·deploy 전이다.
+KIS daily `foreign_holding` event가 08-21~27에 전 종목을 `skipped_current`로 넘긴 원인은
+KRX·KIS coverage를 합친 cursor였다. source별 cursor 수정은 `v0.11.3`으로 배포했고,
+08-28 전 종목 1회 수집으로 다시 채우고 있다.
 
 과거 Cronicle job 저장 파일도 비밀정보 패턴으로 검사했다. `/home/whi/apps/cronicle/data/jobs`
 아래 178개 파일에 userinfo가 포함된 PostgreSQL URI가 평문으로 남아 있다. 값은 운영 점검
