@@ -501,9 +501,9 @@ N6은 대상 집합이 N3에서 S-1으로 바뀌었으므로(N6-5) **이제 KRX 
         Cronicle 이벤트 19개의 wrapper를 전부 대조했다. `prices-market-cap-backfill.sh`와
         `dart-sync-filings.sh`가 **어떤 정기 이벤트에도 안 걸려 있다.** 백필이 끝나는
         순간부터 `daily_market_cap`·`dart_filing_receipt_raw`가 멈춘다
-  - [ ] **N1 일별** — 18:30 체인 꼬리(KRX Common 뒤)에 붙인다. `krx_marketdata` 락을 같은
-        체인 안에서 직렬로 쓰고, 하루 2요청이다. **가져오는 건 T-1이다**(원천이 T+1).
-        날짜를 안 넘기면 갭 탐지가 알아서 채운다
+  - [x] **N1 일별** — 2026-08-28 평일 20:00 독립 event `sdc_daily_market_cap`으로 등록했다.
+        최근 30일만 gap scan하고 저장된 slice는 외부 요청 없이 건너뛴다. **가져오는 건
+        T-1이다**(원천이 T+1). 첫 정기 실행은 4.5초, exit 0으로 끝났다
   - [ ] **공시 접수(N5-7 입력)** — 그냥 못 붙인다. skip-if-present가 `(corp_code, year)`
         단위라 현재 연도가 이미 "완료"로 잡혀 한 건도 안 가져온다. `--force`가 필요하고
         그러면 하루 2,763콜이 **S-1과 같은 할당량**을 쓴다 → **S-1 완주 후**
@@ -1409,7 +1409,9 @@ KRX 안내문이 이유를 명시한다 — **약관 제10조 제2호는 자동�
       `daily_ohlcv`·`krx_security_flow_raw`·`common_feature_observation_raw`가
       전부 08-13에 멈춰 있었다. 아무도 몰랐다
   - [x] 재부팅은 systemd 정상 종료(장애 아님). 현재 22시간 연속 가동
-  - [ ] **탐지가 없다는 게 결함이다.** `ops freshness-report`는 있는데 스케줄에 없다 → O-8/D-5
+  - [x] **탐지가 없다는 게 결함이다.** 2026-08-28 `sdc_daily_freshness`를 매일 23:00으로
+        등록했다. KRX/KIS/PYKRX는 최근 거래일을 엄격히 보고, FDR·ECOS·FRED는
+        series별 `max_stale_business_days`를 쓴다. prod 수동 실행에서 gate `OK` 확인
 
 ---
 
@@ -1719,33 +1721,44 @@ sj2-server가 다시 켜진 뒤 read-only로 확인한 운영 상태는 다음�
 
 | 항목 | 확인 결과 | 판정 |
 |---|---|---|
-| 배포 | `ghcr.io/sjleekor/sdc:v0.11.2`, Postgres 18.3 healthy | 서버·compose 정상 |
+| 배포 | `ghcr.io/sjleekor/sdc:v0.11.4`, Postgres 18.3 healthy | 서버·compose 정상 |
 | N6 prod | 2015~2025, 122,729슬라이스, raw 419,160행, 오류 0 | 백필 완료 |
 | 일일 OHLCV·common·KRX flows | 대부분 2026-08-27까지 | 정상 |
-| `daily_market_cap` | 최신 2026-08-19 | 정기 Cronicle event 없음 |
-| KIS `foreign_holding_shares` | 최신 2026-08-20 | 08-21~27 잡이 전 종목 skip |
-| `ingestion_runs` | `running` 0건 | stale run 없음 |
+| `daily_market_cap` | 최신 2026-08-27, 08-20~27 빠진 6거래일 복구 | 평일 20:00 event 등록·첫 실행 성공 |
+| KIS `foreign_holding_shares` | 2026-08-28, 2,767종목 | 전 종목 1회 수집 성공 |
+| freshness | `v0.11.4` 수동 prod 실행 exit 0 | 매일 23:00 event 등록 |
+| `ingestion_runs` | 중단한 첫 market cap run 1건이 `running` | 별도 DB 수정 승인 필요 |
 
 KIS skip 원인은 source 전환용 cursor가 KRX·KIS coverage를 합쳐 읽은 것이다. KRX가 당일 행을
-먼저 쓰면 KIS snapshot까지 완료로 잡혔다. KIS와 KRX cursor를 source별로 분리했고 테스트를
-추가했다. 아직 release·deploy하지 않았다.
+먼저 쓰면 KIS snapshot까지 완료로 잡혔다. KIS와 KRX cursor를 source별로 분리해 `v0.11.3`으로
+배포했다. 08-28 수동 run은 종목 2,767개를 모두 저장했고 빈 응답·오류·재시도는 0건이었다.
+실제 외부 요청은 token 발급 1회와 종목 조회 2,767회, 모두 2,768회다.
+
+market cap은 08-20~27의 빠진 6거래일을 채웠다. 날짜별 ticker 수는 `daily_ohlcv`와 모두
+일치한다. `sdc_daily_market_cap`은 평일 20:00, 최근 30일만 scan하며 첫 정기 실행은 4.5초에
+exit 0으로 끝났다. `sdc_daily_freshness`는 매일 23:00이다. 첫 prod 검증에서 FDR 해외시장과
+ECOS 월간 series의 정상 공개 지연을 오탐해, series별 `max_stale_business_days`를 쓰도록
+`v0.11.4`로 고쳤다. 새 이미지에서 gate `OK`를 확인했다.
 
 남은 순서는 다음과 같다.
 
-1. KIS cursor 수정 release·sj2 deploy
-2. 배포 뒤 KIS `foreign_holding` plan 확인과 1회 실행
-3. `daily_market_cap` 평일 T+1 Cronicle event 등록과 08-20 이후 gap 복구
-4. `daily_market_cap` 2거래일·다른 일별 도메인 1거래일 예산으로 nightly freshness event 등록
+1. ~~KIS cursor 수정 release·sj2 deploy~~ — **v0.11.3 완료**
+2. ~~배포 뒤 KIS `foreign_holding` plan 확인과 1회 실행~~ — **2,767종목 완료**
+3. ~~`daily_market_cap` 평일 T+1 Cronicle event 등록과 08-20 이후 gap 복구~~ — **완료**
+4. ~~nightly freshness event 등록~~ — **v0.11.4와 prod gate `OK`로 완료**
 5. 평문 PostgreSQL URI가 남은 Cronicle job 파일 178개 정리와 DB credential 회전
 6. 2026년 10~11월 T1·T2 h60 holdout 1회 평가
 7. K-0c/KIS 약관을 사람이 확인
 
-1~5는 운영 변경이라 read-only 점검과 분리한다. 6은 시간 게이트, 7은 사람 판단이다.
+첫 market cap run을 중단하면서 남은 `running` audit 행 1건을 `failed`로 닫는 작업은 DB
+수정이므로 별도 승인이 필요하다. 5는 credential 회전과 history 정리 범위를 다시 검토한 뒤
+진행한다. 6은 시간 게이트, 7은 사람 판단이다.
 
 ## 개정 이력
 
 | 날짜 | 내용 |
 |---|---|
+| 2026-08-28 | **운영 후속 1~4 완료.** v0.11.3·v0.11.4 배포, KIS 2,767종목 수집, market cap 6거래일 복구와 평일 event, nightly freshness event 등록·prod gate `OK` |
 | 2026-08-28 | **확장 A/B/AB와 T2 validation 완료.** Phase C는 열지 않음. sj2 N6·freshness·Cronicle 점검 완료, KIS cursor 버그 로컬 수정. prod 반영과 누락 복구는 운영 승인 대기 |
 | 2026-08-27 | **확장 config 사전등록 완료.** hash `889c3e83…`, 기존 Phase A 75개 보존, Phase B 38→78개, 결합 BH 153개. N8은 Phase C regime 후보로 분리 |
 | 2026-08-27 | **N7 KIS 횡단면 대조 완료.** 2,764종목 정상 응답, B/M rank correlation 0.9274, E/P 0.6547. C4·C5 폐기, KIS 밸류 feature 비승격 확정 |

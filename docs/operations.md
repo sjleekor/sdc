@@ -687,8 +687,13 @@ N6는 Cronicle 일회성 event가 남아 있지 않지만 DB audit에는 08-22~2
 122,729슬라이스를 처리해 employee 92,163행과 governance 326,997행을 저장했고 오류는 0이다.
 
 KIS daily `foreign_holding` event가 08-21~27에 전 종목을 `skipped_current`로 넘긴 원인은
-KRX·KIS coverage를 합친 cursor였다. source별 cursor 수정은 `v0.11.3`으로 배포했고,
-08-28 전 종목 1회 수집으로 다시 채우고 있다.
+KRX·KIS coverage를 합친 cursor였다. source별 cursor 수정은 `v0.11.3`으로 배포했다.
+08-28 전 종목 2,767개를 다시 수집해 2,767행을 저장했고 audit run은 `success`다.
+token 발급 1회와 종목 조회 2,767회 외에 재시도나 rate-limit은 없었다.
+
+첫 market cap 복구 run을 터미널에서 중단하면서 audit run
+`2163e76f-6dd0-4555-8765-19eae29fbe54` 하나가 `running`으로 남았다. 뒤이은 복구와
+정기 event는 정상 완료됐지만, 이 감사 행을 `failed`로 닫는 DB 수정은 별도 승인을 받아야 한다.
 
 과거 Cronicle job 저장 파일도 비밀정보 패턴으로 검사했다. `/home/whi/apps/cronicle/data/jobs`
 아래 178개 파일에 userinfo가 포함된 PostgreSQL URI가 평문으로 남아 있다. 값은 운영 점검
