@@ -1727,7 +1727,7 @@ sj2-server가 다시 켜진 뒤 read-only로 확인한 운영 상태는 다음�
 | `daily_market_cap` | 최신 2026-08-27, 08-20~27 빠진 6거래일 복구 | 평일 20:00 event 등록·첫 실행 성공 |
 | KIS `foreign_holding_shares` | 2026-08-28, 2,767종목 | 전 종목 1회 수집 성공 |
 | freshness | `v0.11.4` 수동 prod 실행 exit 0 | 매일 23:00 event 등록 |
-| `ingestion_runs` | 중단한 첫 market cap run 1건이 `running` | 별도 DB 수정 승인 필요 |
+| `ingestion_runs` | `running` 0건 | 중단한 첫 market cap run은 승인 후 `failed`로 정리 |
 
 KIS skip 원인은 source 전환용 cursor가 KRX·KIS coverage를 합쳐 읽은 것이다. KRX가 당일 행을
 먼저 쓰면 KIS snapshot까지 완료로 잡혔다. KIS와 KRX cursor를 source별로 분리해 `v0.11.3`으로
@@ -1746,18 +1746,19 @@ ECOS 월간 series의 정상 공개 지연을 오탐해, series별 `max_stale_bu
 2. ~~배포 뒤 KIS `foreign_holding` plan 확인과 1회 실행~~ — **2,767종목 완료**
 3. ~~`daily_market_cap` 평일 T+1 Cronicle event 등록과 08-20 이후 gap 복구~~ — **완료**
 4. ~~nightly freshness event 등록~~ — **v0.11.4와 prod gate `OK`로 완료**
-5. 평문 PostgreSQL URI가 남은 Cronicle job 파일 178개 정리와 DB credential 회전
+5. ~~평문 PostgreSQL URI가 남은 Cronicle job 파일 178개 정리와 DB credential 회전~~ —
+   **재발 경로가 닫힌 점을 확인하고 더 진행하지 않기로 결정**
 6. 2026년 10~11월 T1·T2 h60 holdout 1회 평가
 7. K-0c/KIS 약관을 사람이 확인
 
-첫 market cap run을 중단하면서 남은 `running` audit 행 1건을 `failed`로 닫는 작업은 DB
-수정이므로 별도 승인이 필요하다. 5는 credential 회전과 history 정리 범위를 다시 검토한 뒤
-진행한다. 6은 시간 게이트, 7은 사람 판단이다.
+첫 market cap run을 중단하면서 남은 audit 행 1건은 승인을 받아 `failed`로 닫았다. prod의
+`running` run은 0건이다. 5는 더 진행하지 않는다. 6은 시간 게이트, 7은 사람 판단이다.
 
 ## 개정 이력
 
 | 날짜 | 내용 |
 |---|---|
+| 2026-08-28 | **운영 정리 완료.** 중단된 market cap audit 1건을 `failed`로 닫아 `running` 0건 확인. credential 회전·Cronicle history 정리는 더 진행하지 않기로 결정 |
 | 2026-08-28 | **운영 후속 1~4 완료.** v0.11.3·v0.11.4 배포, KIS 2,767종목 수집, market cap 6거래일 복구와 평일 event, nightly freshness event 등록·prod gate `OK` |
 | 2026-08-28 | **확장 A/B/AB와 T2 validation 완료.** Phase C는 열지 않음. sj2 N6·freshness·Cronicle 점검 완료, KIS cursor 버그 로컬 수정. prod 반영과 누락 복구는 운영 승인 대기 |
 | 2026-08-27 | **확장 config 사전등록 완료.** hash `889c3e83…`, 기존 Phase A 75개 보존, Phase B 38→78개, 결합 BH 153개. N8은 Phase C regime 후보로 분리 |

@@ -692,8 +692,9 @@ KRX·KIS coverage를 합친 cursor였다. source별 cursor 수정은 `v0.11.3`�
 token 발급 1회와 종목 조회 2,767회 외에 재시도나 rate-limit은 없었다.
 
 첫 market cap 복구 run을 터미널에서 중단하면서 audit run
-`2163e76f-6dd0-4555-8765-19eae29fbe54` 하나가 `running`으로 남았다. 뒤이은 복구와
-정기 event는 정상 완료됐지만, 이 감사 행을 `failed`로 닫는 DB 수정은 별도 승인을 받아야 한다.
+`2163e76f-6dd0-4555-8765-19eae29fbe54` 하나가 `running`으로 남았다. 2026-08-28 20:35 KST에
+승인을 받아 `failed`로 닫았고, prod의 `running` run은 다시 0건이다. 뒤이은 복구와 정기
+event는 모두 정상 완료됐다.
 
 과거 Cronicle job 저장 파일도 비밀정보 패턴으로 검사했다. `/home/whi/apps/cronicle/data/jobs`
 아래 178개 파일에 userinfo가 포함된 PostgreSQL URI가 평문으로 남아 있다. 값은 운영 점검
@@ -702,8 +703,8 @@ token 발급 1회와 종목 조회 2,767회 외에 재시도나 rate-limit은 �
 변경이고 job history 삭제는 되돌리기 어려우므로 별도 승인 전에는 하지 않는다. 178개 모두
 **현재 DB 비밀번호와 일치**한다. 기록 시각은 2026-04-12~06-27이다. 원인은 당시 connection
 pool INFO 로그가 DSN 전체를 찍은 것이며, 현재 코드는 `_mask_dsn()`으로 userinfo를 가린다.
-06-27 뒤 신규 평문 기록은 찾지 못했다. 따라서 재발 경로는 닫혔지만 기존 비밀번호 회전과
-history 정리는 여전히 해야 한다.
+06-27 뒤 신규 평문 기록은 찾지 못했다. 재발 경로가 닫힌 점을 근거로, 2026-08-28 사용자
+결정에 따라 기존 비밀번호 회전과 history 정리는 더 진행하지 않는다.
 
 #### KRX Open API 일별매매정보는 T+1이다
 
