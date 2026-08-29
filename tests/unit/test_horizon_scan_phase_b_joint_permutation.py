@@ -58,6 +58,14 @@ def test_permute_qualifying_sue_ranks_is_deterministic() -> None:
     assert out1["sue_pctrank"].to_list() == out2["sue_pctrank"].to_list()
 
 
+def test_permute_qualifying_sue_ranks_is_input_order_invariant() -> None:
+    frame = _qualifying_frame()
+    canonical = _permute_qualifying_sue_ranks(frame, seed=42)
+    reversed_input = _permute_qualifying_sue_ranks(frame.reverse(), seed=42)
+
+    assert canonical.equals(reversed_input)
+
+
 def test_permute_qualifying_sue_ranks_preserves_group_membership() -> None:
     """Values must only move within their own (date, market) group — the
     multiset of sue_pctrank values per group is unchanged, only their
@@ -118,6 +126,35 @@ def test_scan_sue_null_row_computes_ic_when_cohorts_survive() -> None:
 
     assert row["scan_type"] == "event_bucket"
     assert row["status"] in ("valid", "insufficient")  # depends on the shuffle draw, never crashes
+
+
+def test_scan_sue_null_row_is_input_order_invariant() -> None:
+    rows = []
+    for d_idx, d in enumerate([date(2020, 1, 6), date(2020, 1, 7), date(2020, 1, 8)]):
+        for market in ("KOSPI", "KOSDAQ"):
+            for i in range(16):
+                rows.append(
+                    {
+                        "event_formation_date": d,
+                        "market": market,
+                        "ticker": f"{market[:1]}{i}",
+                        "original_rcept_no": f"{d:%Y%m%d}{market[:1]}{i}",
+                        "sue_pctrank": i / 15,
+                        "excess_pctrank": (15 - i) / 15,
+                        "formation_session_idx": d_idx + 1,
+                    }
+                )
+    qualifying = pl.DataFrame(rows)
+    cell = {"hypothesis_id": "fin_sue|fin_sue|event|0|3", "h_start": 0, "h_end": 3}
+
+    canonical = _scan_sue_null_row(
+        cell, qualifying, seed=7, min_events_per_cohort_total=30
+    )
+    reversed_input = _scan_sue_null_row(
+        cell, qualifying.reverse(), seed=7, min_events_per_cohort_total=30
+    )
+
+    assert canonical == reversed_input
 
 
 # --- run_combined_cross_sectional_permutation: SUE-only path (real DuckDB) ---

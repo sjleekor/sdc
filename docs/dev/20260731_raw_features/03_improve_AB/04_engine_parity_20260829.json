@@ -1,0 +1,136 @@
+{
+  "schema_version": "horizon_scan_engine_parity_v1",
+  "tolerance": {
+    "scaled_absolute": 1e-12
+  },
+  "runs": {
+    "legacy": {
+      "A": "20260829T092904-00dfc5aa",
+      "B": "20260829T125427-00dfc5aa",
+      "AB": "20260829T161238-00dfc5aa"
+    },
+    "native": {
+      "A": "20260827T221729-4e0ae8b0",
+      "B": "20260828T123313-4e0ae8b0",
+      "AB": "20260828T165038-4e0ae8b0"
+    }
+  },
+  "replicates": {
+    "phase_a": 100,
+    "phase_b_joint": 100
+  },
+  "contracts_match": true,
+  "contract_mismatches": [],
+  "sue": {
+    "cells": 6,
+    "all_insufficient": true,
+    "joint_null_contribution": "none"
+  },
+  "artifacts": [
+    {
+      "name": "phase_a_horizon_ic",
+      "rows": 412,
+      "columns": 40,
+      "exact_columns": 26,
+      "tolerant_columns": 14,
+      "max_scaled_delta": 1.6299214021426928e-15,
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "phase_a_permutation_cells",
+      "rows": 7500,
+      "columns": 16,
+      "exact_columns": 13,
+      "tolerant_columns": 3,
+      "max_scaled_delta": 1.6653345369377348e-15,
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "phase_b_horizon_ic",
+      "rows": 288,
+      "columns": 53,
+      "exact_columns": 35,
+      "tolerant_columns": 18,
+      "max_scaled_delta": 0.03145951521402785,
+      "passed": false,
+      "detail": "n_dates: exact mismatch; n_obs: exact mismatch; n_obs_mean: max scaled delta=1.359e-03; n_obs_min: exact mismatch; n_obs_median: max scaled delta=3.146e-02; ic_mean: max scaled delta=5.785e-04; ic_std: max scaled delta=2.694e-04; icir: max scaled delta=1.894e-02"
+    },
+    {
+      "name": "phase_b_event_ic",
+      "rows": 6,
+      "columns": 46,
+      "exact_columns": 44,
+      "tolerant_columns": 2,
+      "max_scaled_delta": 0.0,
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "phase_b_permutation_summary",
+      "rows": 100,
+      "columns": 4,
+      "exact_columns": 4,
+      "tolerant_columns": 0,
+      "max_scaled_delta": 0.0,
+      "passed": false,
+      "detail": "n_discoveries: exact mismatch"
+    },
+    {
+      "name": "phase_ab_primary",
+      "rows": 153,
+      "columns": 79,
+      "exact_columns": 53,
+      "tolerant_columns": 26,
+      "max_scaled_delta": 0.13372093023255813,
+      "passed": false,
+      "detail": "n_dates: exact mismatch; n_obs: exact mismatch; n_obs_mean: max scaled delta=1.098e-03; n_obs_min: max scaled delta=1.337e-01; n_obs_median: max scaled delta=3.146e-02; ic_mean: max scaled delta=5.041e-04; ic_std: max scaled delta=2.694e-04; icir: max scaled delta=1.806e-02"
+    },
+    {
+      "name": "phase_ab_overlay",
+      "rows": 75,
+      "columns": 9,
+      "exact_columns": 7,
+      "tolerant_columns": 2,
+      "max_scaled_delta": 4.440892098500626e-16,
+      "passed": true,
+      "detail": ""
+    }
+  ],
+  "ab_manifest": {
+    "legacy": {
+      "config_hash": "889c3e8377c2f400907611f7402651eee6a23c2765c051e4eb2a4a59ca36cbea",
+      "m_ab": 153,
+      "phase_b_screen_pass_count": 40,
+      "phase_b_evidence_grade_counts": {
+        "A": 23,
+        "B": 17,
+        "C": 35,
+        "D": 3
+      },
+      "phase_b_primary_discovery_count": 55,
+      "phase_a_primary_discovery_count": 32,
+      "phase_a_discovery_change_count": 0,
+      "combined_cross_sectional_permutation_empirical_p": 0.009900990099009901
+    },
+    "native": {
+      "config_hash": "889c3e8377c2f400907611f7402651eee6a23c2765c051e4eb2a4a59ca36cbea",
+      "m_ab": 153,
+      "phase_b_screen_pass_count": 40,
+      "phase_b_evidence_grade_counts": {
+        "A": 23,
+        "B": 17,
+        "C": 35,
+        "D": 3
+      },
+      "phase_b_primary_discovery_count": 55,
+      "phase_a_primary_discovery_count": 32,
+      "phase_a_discovery_change_count": 0,
+      "combined_cross_sectional_permutation_empirical_p": 0.009900990099009901
+    },
+    "matched": true,
+    "mismatches": []
+  },
+  "passed": false
+}

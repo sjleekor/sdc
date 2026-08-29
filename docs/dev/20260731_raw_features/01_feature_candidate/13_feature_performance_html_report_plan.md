@@ -1,4 +1,4 @@
-# 13. 피쳐 성능 HTML 보고서 작성 계획
+# 13. 피쳐 성능 HTML 보고서 설계와 구현 결과
 
 - 작성일: 2026-08-28
 - 상태: 구현 및 자동·브라우저 검증 완료
@@ -466,7 +466,7 @@ fixture만 쓴다. canonical Parquet은 integration test에서만 읽는다. uni
 - 보고서 전용 test 14개가 통과했다. integration test는 canonical 산출물이 없으면 skip한다.
 - canonical 회귀값은 family 35개, AB 153개, discovery 87개, B screen-pass 40개,
   correlation 204행을 포함해 계획값과 맞았다.
-- HTML 크기는 5,061,774바이트다. Plotly JS는 한 번만 들어가며 WebGL trace는 없다.
+- HTML 크기는 5,108,962바이트다. Plotly JS는 한 번만 들어가며 WebGL trace는 없다.
 - 외부 asset tag, 사용자 홈 절대경로, 비밀정보 패턴은 최종 HTML·manifest에서 나오지 않았다.
 - Chrome에서 `file://`로 열어 요약·차트·전체 표를 확인했다. 검색 필터는 `fin_sue` 한 행만
   남겼고, insufficient 6개 cell 상세도 정상적으로 펼쳐졌다.

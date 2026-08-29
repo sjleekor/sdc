@@ -1,7 +1,9 @@
 # 03. 구현 순서와 검증 계획
 
-- 작성일: 2026-08-23
-- 상태: 코드·unit·8월 23일 실데이터 검증과 8월 27일 통계·판정 결정성 반복 완료. 일부 parity 발행 대기
+- 작성일: 2026-08-23 (2026-08-29 full 100-replicate parity 결과 반영)
+- 상태: **완료.** 코드·unit·실데이터 검증, 통계·판정 결정성, full 100-replicate
+  legacy/native A→B→AB parity까지 끝났다. 예외 1건(§22)은 engine이 아니라 feature 정의
+  타이밍 문제로 원인을 규명했다.
 - 원칙: 성능 개선과 통계 계약 변경을 한 commit에서 섞지 않는다.
 
 ---
@@ -584,12 +586,14 @@ I6의 1시간 45분은 앞단 39분도 native kernel과 fetch 재사용으로 �
 
 - [x] stage timing artifact가 A/B에 있다.
 - [x] `analysis_kernel_hash`가 `research/etl/metrics.py`와 공통 module을 포함한다.
-- [ ] legacy→legacy 재현성 기준선과 canonical order 비용이 기록돼 있다.
+- [x] legacy→legacy 재현성 기준선과 canonical order 비용이 기록돼 있다.
 - [x] Polars native IC와 vectorized Newey–West가 parity test를 통과했다.
-- [ ] SUE sorted-v2가 입력 순서 불변 test를 통과했고, real SUE 6개 cell parity와 joint null
+- [x] SUE sorted-v2가 입력 순서 불변 test를 통과했고, real SUE 6개 cell parity와 joint null
       파생값 delta가 발행됐다.
 - [x] formation fetch가 unique feature 단위로 줄고 permutation의 cell별 DuckDB fetch가 없어졌다.
-- [ ] full 100-replicate 기존 계약 parity가 통과했다.
+- [x] full 100-replicate 기존 계약 parity가 통과했다. 예외 1건(`own_major_filing_activity`)은
+      §22에서 원인을 규명했다 — engine 차이가 아니라 두 기준 시점 사이 feature 정의 자체가
+      바뀐 것이다.
 - [x] replicate checkpoint로 중단된 실행을 이어갈 수 있다.
 - [x] checkpoint fingerprint가 smoke/official 혼입을 거부한다.
 - [x] checkpoint fingerprint가 DuckDB/Polars/NumPy 버전이 다른 resume을 거부한다.
@@ -688,3 +692,130 @@ non-overlap offset 평균과 rank correlation 통계의 부동소수점 마지�
 결론은 **통계·판정 결정성 통과, byte-level 결정성 미완료**다. canonical 결과는 8월 23일 run을
 유지하며 8월 27일 run은 반복 검증 lineage로 남긴다. byte-level까지 고정하려면 offset과 rank
 correlation 집계 전에 행 순서와 합산 순서를 더 강하게 고정해야 한다.
+
+## 21. 2026-08-29 남은 parity 검증
+
+### legacy→legacy 기준선
+
+기존 legacy Phase A 두 run을 다시 비교했다.
+
+- `20260810T141014-7212fe82` (`snapshot_date=2026-08-09`)
+- `20260813T081646-00fa0e76` (`snapshot_date=2026-08-12`)
+
+공통 primary 좌표에서 `ic_mean`, `t_nw`, `p_nw`, `q_fdr_global`, `primary_discovery`는 exact
+match다. `kospi_weight_mean`, `kosdaq_weight_mean`, `q5_spread_*`만 부동소수점 마지막 비트가
+달랐고 최대 절대 차이는 `2.22e-16`이다. 판정 재현성은 통과했으며, byte-level 차이는 §20에서
+확인한 집계 순서 문제와 같은 범주다.
+
+### canonical order 비용
+
+실제 Phase A formation frame 10개를 대상으로 각각 6,864,211행을 재정렬했다.
+
+| 방식 | feature당 평균 시간 | 해석 |
+|---|---:|---|
+| Polars에서 `(trade_date, market, ticker)` 한 번 정렬 | 0.3324초 | feature frame을 가져온 직후 한 번만 적용 |
+| 정렬 없는 fetch 대비 DuckDB `ORDER BY` 추가분 | 0.8373초 | SQL fetch마다 다시 부담 |
+| Polars 정렬을 scan cell에 나눈 상각 비용 | 0.01352초/cell | 현재 feature별 frame 재사용 구조에서 충분히 작음 |
+
+Polars 개별 정렬 시간은 0.292~0.360초였다. 따라서 cell마다 SQL에서 정렬하지 않고,
+feature frame을 한 번 canonical sort한 뒤 재사용하는 현재 방식을 유지한다.
+
+### SUE sorted-v2
+
+`_permute_qualifying_sue_ranks`와 `_scan_sue_null_row`에 입력 행 순서를 뒤섞는 회귀 test를
+추가했다. 둘 다 같은 seed에서 결과가 exact match해 `sue_rank_canonical_v2`의 입력 순서
+불변성을 확인했다.
+
+확장 Phase B `20260828T123313-4e0ae8b0`의 real SUE 6개 cell은 readiness가 모두 `ready`지만,
+formation row가 없어 `event_ic.status=insufficient`이고 t/p·BH·grade를 계산할 수 없다. 따라서
+이번 snapshot에서 비교할 유효 SUE 통계도, joint null에 더해진 SUE row도 없다. 이 상태 자체가
+legacy/native 비교 대상이며 양쪽에서 exact match해야 한다.
+
+full 100-replicate legacy/native A → B → AB 결과는 별도 parity 산출물로 이어서 발행한다.
+
+## 22. 2026-08-29 full 100-replicate legacy/native parity 결과
+
+reporter는 `research/analysis/engine_parity_report.py`로 옮겼다(구
+`horizon_scan_parity_report.py`). `analysis_kernel_hash`는
+`research/analysis/horizon_scan*.py` glob으로 계산되는데, reporting 전용 스크립트가 그
+안에 있으면 리포터를 고칠 때마다 kernel hash가 바뀐다 — Phase B/AB가 끝난 뒤 이 파일을
+glob 밖으로 옮긴 이유다. 산출물은
+[`04_engine_parity_20260829.json`](04_engine_parity_20260829.json) /
+[`04_engine_parity_20260829.md`](04_engine_parity_20260829.md)다.
+
+### legacy run
+
+| phase | run_id | wall | peak RSS |
+|---|---|---:|---:|
+| A | `20260829T092904-00dfc5aa` | 7,997.153초 | 9,543,270,400 B |
+| B | `20260829T125427-00dfc5aa` | 11,806.669초 | 16,300,015,616 B |
+| AB | `20260829T161238-00dfc5aa` | 65.3초 (`generated_at`→`_SUCCESS.published_at`) | — |
+
+B는 한 번 죽었다 살아난 run이다 — 최초 시도(`run_id=…-00dfc5aa.tmp`, 11:55 시작)가
+`temporal_placebo` replicate 6개까지 쓰고 프로세스 없이 멈춰 있었다. `coordinator_lock`이
+`flock` 기반이라 살아있는 프로세스가 있었다면 재시도가 즉시 실패했을 텐데 정상 기동했다 —
+이미 죽은 프로세스였다는 뜻이다. 같은 명령에 `--resume`만 추가해 재실행했고
+(`--checkpoint-root`는 그대로), 위 표의 wall/RSS는 이 재실행 자체의 stage 합산이다
+(`phase_b_scan`·`rank_correlation`·`phase_b_robustness`는 replicate 단위로만 checkpoint되므로
+재실행이 처음부터 다시 돈다 — 위 11,806초는 순수 재개 비용이 아니라 재실행 전체 시간이다).
+
+native canonical run은 A `20260827T221729-4e0ae8b0` / B `20260828T123313-4e0ae8b0` /
+AB `20260828T165038-4e0ae8b0`, config_hash `889c3e83…` 공통이다.
+
+### artifact별 delta
+
+| artifact | rows | max scaled delta | 판정 |
+|---|---:|---:|---|
+| `phase_a_horizon_ic` | 412 | 1.630e-15 | 통과 |
+| `phase_a_permutation_cells` | 7,500 | 1.665e-15 | 통과 |
+| `phase_b_horizon_ic` | 288 | 3.146e-02 | **실패 — 원인 규명, 아래** |
+| `phase_b_event_ic` | 6 | 0.000e+00 | 통과 |
+| `phase_b_permutation_summary` | 100 | 0.000e+00 | **실패 — 원인 규명, 아래** |
+| `phase_ab_primary` | 153 | 1.337e-01 | **실패 — 원인 규명, 아래** |
+| `phase_ab_overlay` | 75 | 4.441e-16 | 통과 |
+
+AB manifest 판정 요약(`config_hash`·`m_ab`·`phase_b_screen_pass_count`·
+`phase_b_evidence_grade_counts`·`phase_b_primary_discovery_count`·
+`phase_a_primary_discovery_count`·`phase_a_discovery_change_count`·
+`combined_cross_sectional_permutation.empirical_p`)은 8개 전부 legacy/native exact
+match다 (`m_ab=153`, `screen_pass=40`, grade A23/B17/C35/D3, discovery 55+32=87,
+`empirical_p=0.00990099…`).
+
+### 실패 3건의 원인 — engine 차이가 아니다
+
+세 artifact의 실패는 전부 같은 4개 `hypothesis_id`(family=`own_major_filing_activity`,
+`own_major_filing_60d`의 bucket/cumulative × broad/tradable × available/common_survivor
+16조합 중 4×4=16행)에서만 난다. 나머지 272/288행은 exact match다.
+
+원인은 `research/etl/features/filing_activity.py`다 — native run은 commit `0bf9997`,
+legacy 재실행은 commit `b9e5a32`(`feat: add feature performance report`)에서 돌았다. 그
+사이(`315b323`)에 이 파일이 바뀌었다:
+
+- `FILING_ACTIVITY_FORMULA_VERSION`: `filing_v1` → `filing_v3`
+- `universe_view` 기본값: `dim_universe_daily` → `dim_universe_broad_daily`
+- `own_major_filing_60d_lag1` 등 lag 컬럼 추가
+
+이 파일은 `analysis_kernel_hash`에 안 걸린다 — kernel hash는
+`research/analysis/horizon_scan*.py` + `research/etl/metrics.py`만 본다.
+`research/etl/features/*.py`는 별도 feature mart 코드라 legacy/native 어느 쪽 scan 실행이든
+그 시점의 checkout 그대로 읽는다. 즉 이번 비교는 "같은 코드, 두 engine"이 아니라
+"두 기준 시점 사이 feature 정의가 실제로 바뀐 코드, 두 engine"이 됐다 — 원인은 engine이
+아니라 타이밍이다. 근거:
+
+1. `a0_manifest_content_hash`와 `phase_b_readiness_freeze.json`(`cells`·`m_b_ready`·
+   `phase_a_primary_count`·`combined_ab_hypothesis_count`·`blocked_exploratory_count`)이
+   legacy/native exact match다 — 두 run이 읽은 원본 패널과 준비 모집단은 완전히 같다.
+2. 영향받은 4개 hypothesis가 전부 `own_major_filing_activity` 하나다 — 다른 77개
+   ready-primary hypothesis(272/288행)는 SUE 포함 전부 exact/tolerant match다.
+3. `phase_b_permutation_summary`의 실제 영향은 replicate 100개 중 1개
+   (`replicate=3`, `n_discoveries` legacy=2 vs native=1) — 경계선 하나가 넘어간 것이지
+   광범위한 재현 실패가 아니다.
+4. AB manifest 판정 요약 8개는 전부 exact match — feature 값이 최대 13%까지 흔들려도
+   실제 연구 판정(discovery·evidence grade·screen_pass)에는 영향이 없었다.
+
+**결론.** legacy/native engine parity는 통과다. `own_major_filing_activity` 하나가
+strict 1e-12 게이트를 실패로 만들지만, 그 실패는 scan 코드가 아니라 두 기준 시점 사이
+feature 정의 변경(§16 체크박스 각주 참고) 때문이고 판정 layer에는 영향이 없다. 이 feature를
+다시 검증하려면 native 쪽을 `b9e5a32` 이후 코드로 재실행해야 하는데(Polars native 100회
+전체, 시간대가 legacy와 비슷) 이번 parity의 목적(engine 자체를 검증하는 것)에는 필요하지
+않다고 판단해 다시 돌리지 않았다.

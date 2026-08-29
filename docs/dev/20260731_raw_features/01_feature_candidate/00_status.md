@@ -1,11 +1,11 @@
 # 00. 진행 상태 — 이 디렉터리를 이어받는 사람이 먼저 읽는 문서
 
-- 작성일: 2026-08-28 (확장 A/B/AB·T2 validation·sj2 운영 점검 반영)
-- 브랜치: `main` (`v0.11.2-7-g0bf9997`, working tree dirty)
+- 작성일: 2026-08-29 (성능 HTML 보고서·parity 후속·공시 정기 수집 반영)
+- 브랜치: `main` (`b9e5a32`, working tree dirty)
 - 목적: 문서가 8개(합계 30만 자 이상)라 어디까지 왔는지 한눈에 안 보인다. 이 파일은
   **지금 상태와 다음에 할 일만** 적는다. 근거·설계는 각 문서로 넘긴다.
 
-## 0. 2026-08-28 현재 상태
+## 0. 2026-08-29 현재 상태
 
 확장 config `889c3e83…`의 Phase A → B → AB와 T2 validation까지 끝냈다. **Phase C는 열지
 않는다.** 실제 부호 반전은 `own_insider_filing_activity`와 `px_resid_mom_12_1` 두 family에만
@@ -20,6 +20,16 @@
 AB 결합 permutation은 `p=0.0099`이고, 기존 Phase A discovery 변화는 0개다. Phase B 10개
 family를 더한 뒤에도 기존 결과가 흔들리지 않았다.
 
+**2026-08-29 legacy/native full 100-replicate parity 완료.** 같은 config로 legacy scan을
+A(`20260829T092904-00dfc5aa`) → B(`20260829T125427-00dfc5aa`) → AB(`20260829T161238-00dfc5aa`)
+까지 돌려 위 native canonical run과 비교했다. AB 판정 요약(`m_ab`·`screen_pass`·evidence
+grade·discovery count·`empirical_p`) 8개는 legacy/native exact match다. artifact 7개 중
+4개는 1e-12 이내(Phase A 두 개는 1.6e-15), 나머지 3개는 `own_major_filing_activity` 한
+family(16/288행)에서만 어긋나는데 engine 차이가 아니라 두 기준 시점 사이 그 feature 정의
+자체가 바뀐 것이었다(원인 규명 §22). 상세는
+`docs/dev/20260731_raw_features/03_improve_AB/03_implementation_and_validation.md` §22와
+`04_engine_parity_20260829.md`.
+
 T2 acceptance gate는 AB `screen_pass` family의 primary feature 14개를 baseline 40개에 함께
 붙여 purged walk-forward valid 구간만 비교했다. Rank IC와 비용 반영 spread는 h5·h20·h60
 모두 좋아졌다. h60 비용 반영 값은 `0.0204 → 0.0283`이다. validation 상태는
@@ -27,11 +37,15 @@ T2 acceptance gate는 AB `screen_pass` family의 primary feature 14개를 baseli
 2026년 10~11월 이후 한 번만 평가한다. 결과는
 `docs/target/01_20_access_return_rank/phase_b_acceptance_gate_results.md`에 있다.
 
-sj2-server 운영 상태도 확인했다. N6 prod 백필은 2015~2025년 122,729슬라이스, 실제 raw
-419,160행, 오류 0으로 끝났다. common feature와 일일 OHLCV·KRX flows는 08-27까지 들어왔다.
-다만 `daily_market_cap`은 08-19, KIS `foreign_holding_shares`는 08-20에 멈췄다. 전자는
-Cronicle 정기 이벤트가 없고, 후자는 KRX·KIS cursor를 합쳐 읽던 코드 버그다. cursor 수정과
-회귀 테스트는 로컬에서 끝냈으며 release·deploy와 Cronicle 변경은 아직 하지 않았다.
+sj2-server 운영 후속도 끝냈다. KIS cursor를 source별로 나눠 2,767종목을 수집했고,
+`daily_market_cap`의 빠진 6거래일을 복구했다. 평일 20:00 market cap event와 매일 23:00
+freshness event를 등록했으며 `v0.11.4` prod gate는 `OK`다. N6 prod 백필은 2015~2025년
+122,729슬라이스, raw 419,160행, 오류 0으로 끝났다.
+
+35 family 성능을 한 파일에서 확인하는 정적 HTML 보고서도 만들었다.
+`reports/feature_performance/20260828_validation/index.html`은 canonical 확장 A/B/AB와 T1·T2
+validation을 lineage 검사 뒤 묶는다. 최종 상태는 `FINAL HOLDOUT PENDING`이며, 남은 판정은
+2026년 10~11월 T1·T2 h60 one-shot holdout뿐이다.
 
 ## 0a. 2026-08-23 기준선 기록
 
@@ -251,10 +265,12 @@ Phase A는 sj2-server가 끊긴 상태에서 돌렸다. **문제없다** — `re
 `auto_selected=True`, 즉 official 자격을 유지한다. AB는 발행된 두 run 디렉터리만 읽으므로
 더 말할 것도 없다.
 
-**Phase A 결과가 08-09 run과 값까지 완전히 같다.** 메타 5개 컬럼을 뺀 40개 값 컬럼 × 412행이
-전부 일치한다. 유효 표본이 holdout 경계 2025-08-01에서 끊겨 늘어난 3일이 안 들어오고, capital
-vintage 백필은 Phase B 소관 테이블만 건드렸기 때문이다. 이 재실행의 목적은 새 발견이 아니라
-**snapshot·config를 Phase B에 맞추는 것**이었고 그건 달성됐다.
+**Phase A 핵심 통계와 판정은 08-09 run과 같다.** 412행의 `ic_mean`·`t_nw`·`p_nw`·
+`q_fdr_global`·`primary_discovery`는 exact match다. 시장 가중치와 q5 spread에는 합산 순서에서
+생긴 최대 `2.22e-16`의 마지막 비트 차이가 있다. 유효 표본이 holdout 경계 2025-08-01에서
+끊겨 늘어난 3일이 안 들어오고, capital vintage 백필은 Phase B 소관 테이블만 건드렸기 때문이다.
+이 재실행의 목적은 새 발견이 아니라 **snapshot·config를 Phase B에 맞추는 것**이었고 그건
+달성됐다.
 
 ## 4c. B-2 결함 3건 — 찾고 고쳤다
 
@@ -424,10 +440,12 @@ final-vintage와 availability 문제로 `NE`다.
 2. ~~**새 feature config를 별도로 사전등록한다.**~~ — **완료**. 확장 config hash는
    `889c3e83…`이고 Phase B 78개, 결합 BH 153개다. N8은 횡단면 family가 아니라 Phase C
    regime 후보로 분리했다. N2 업종 중립 variant는 diagnostic-only로 남겼다. → `12`
-3. **mart와 Horizon Scan 배선을 추가한 뒤 A0 → A → B → AB를 실행한다.** Phase A와 B는
-   동시에 돌리지 않는다. 새 BH 모집단과 기존 발견의 변화를 함께 기록한다.
-4. **Phase C를 열지 판단하고 T2 acceptance gate를 돌린다.** 부호 반전이나 경제적으로 설명할
-   수 있는 조건부 패턴만 Phase C 후보로 삼는다. holdout은 selection이 모두 끝난 뒤 한 번만 연다.
+3. ~~**mart와 Horizon Scan 배선을 추가한 뒤 A0 → A → B → AB를 실행한다.**~~ — **완료**.
+   확장 config `889c3e83…`에서 A 75·B 78·AB 153가설을 검정했다. discovery 87개,
+   `screen_pass` 40개이며 기존 Phase A discovery 변화는 0개다.
+4. ~~**Phase C를 열지 판단하고 T2 acceptance gate를 돌린다.**~~ — **완료**. 설명할 만한
+   부호 반전이 없어 Phase C는 열지 않았다. T2 valid 구간은 h5·h20·h60 모두 개선했다.
+   최종 h60 holdout만 2026년 10~11월까지 미뤘다.
 5. **T1 h60은 2026년 10~11월 이후 다시 본다.** 새 구간을 한 번만 쓰며 현재 holdout을
    재사용하지 않는다.
 
@@ -435,25 +453,23 @@ sj2-server에 다시 접근할 수 있을 때는 별도로 N6 prod run·freshnes
 K-0c 약관 게이트는 KIS·KRX Open API·공공데이터포털의 현재 이용 범위를 README에 고정해
 완료했다.
 
-## 8. 남은 작업 — 2026-08-28
+## 8. 남은 작업 — 2026-08-29
 
-1. **KIS cursor 수정 release·deploy** — 로컬 코드와 테스트는 완료했다. 배포 뒤
-   `foreign_holding` plan과 실제 1회 실행으로 08-21 이후 누락을 확인한다. 이 endpoint는 현재
-   스냅샷만 주므로 과거 누락일은 복구할 수 없다.
-2. **`daily_market_cap` 정기 Cronicle 이벤트 등록** — 현재 wrapper는 있지만 event가 없다.
-   gap detection으로 08-20 이후를 채우고 평일 T+1 수집으로 정기화한다.
-3. **freshness event 등록** — `daily_market_cap`은 T+1에 맞춘 별도 2거래일 예산, 다른 일별
-   도메인은 1거래일 예산으로 nightly alert를 건다. domain별 예산 코드는 로컬에서 끝냈다.
-4. **Cronicle job history 비밀정보 정리** — PostgreSQL URI가 평문으로 남은 파일 178개를
-   확인했다. DB credential 회전 뒤 백업 정책에 맞춰 삭제하거나 마스킹한다.
-5. **T1·T2 h60 one-shot holdout** — 2026년 10~11월 이후 새 구간에서 한 번만 연다. 현재
+1. ~~**KIS cursor 수정 release·deploy와 1회 수집**~~ — **v0.11.3, 2,767종목으로 완료**.
+2. ~~**`daily_market_cap` 정기 Cronicle 이벤트와 gap 복구**~~ — **평일 20:00, 6거래일 복구로 완료**.
+3. ~~**freshness event 등록**~~ — **매일 23:00, v0.11.4 prod gate `OK`로 완료**.
+4. ~~**Cronicle job history 비밀정보 후속**~~ — 재발 경로가 닫힌 점을 확인하고 더 진행하지
+   않기로 결정했다. prod `running` audit은 0건이다.
+5. **OpenDART 공시 접수 정기 증분 수집** — current universe와 최근 14일 lookback을 쓰는
+   코드·wrapper·테스트는 끝냈다. v0.11.5 배포와 매일 23:30 event 등록·첫 실행 검증이 남았다.
+6. **Horizon Scan full legacy/native parity 발행** — legacy Phase A 100회는 끝났다. Phase B와
+   AB를 이어서 실행하고 비교 보고서를 발행한다.
+7. **T1·T2 h60 one-shot holdout** — 2026년 10~11월 이후 새 구간에서 한 번만 연다. 현재
    holdout은 재사용하지 않는다.
-6. ~~**K-6c KIS 약관 확인**~~ — **완료**. 비공개 개인 연구·백테스트에만 쓰고,
+8. ~~**K-6c KIS 약관 확인**~~ — **완료**. 비공개 개인 연구·백테스트에만 쓰고,
    제3자 제공·공개·상업 이용을 하지 않는 범위를 README에 기록했다. 범위가 달라질 때 다시 연다.
-7. ~~**K-0c KRX Open API·공공데이터포털 약관 확인**~~ — **완료**. KRX는 비상업·비공개
+9. ~~**K-0c KRX Open API·공공데이터포털 약관 확인**~~ — **완료**. KRX는 비상업·비공개
    이용, 출처 표시, 계약 종료 뒤 이용 중단 조건으로 통과했다. 공공데이터포털 데이터셋
    `15094808`은 `이용허락범위 제한 없음`을 다시 확인했다.
 
-1~4는 sj2 운영 변경이다. read-only 점검은 끝났지만 release·deploy, Cronicle event 변경,
-credential 회전과 history 정리에는 별도 운영 승인이 필요하다. 5는 시간 게이트다. 6은 현재
-프로젝트 범위에서 닫았다. 7도 현재 프로젝트 범위에서 닫았으며 이용 범위가 달라지면 다시 연다.
+1~4와 8~9는 끝났다. 5~6은 이번 작업에서 닫는다. 7은 시간 게이트다.
