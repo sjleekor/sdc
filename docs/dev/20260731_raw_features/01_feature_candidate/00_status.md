@@ -1,7 +1,7 @@
 # 00. 진행 상태 — 이 디렉터리를 이어받는 사람이 먼저 읽는 문서
 
-- 작성일: 2026-08-29 (성능 HTML 보고서·parity 후속·공시 정기 수집 반영)
-- 브랜치: `main` (`b9e5a32`, working tree dirty)
+- 작성일: 2026-08-29 (성능 HTML 보고서·parity 후속·공시 정기 수집 반영, v0.11.5 배포 완료)
+- 브랜치: `main` (`v0.11.5`, working tree clean)
 - 목적: 문서가 8개(합계 30만 자 이상)라 어디까지 왔는지 한눈에 안 보인다. 이 파일은
   **지금 상태와 다음에 할 일만** 적는다. 근거·설계는 각 문서로 넘긴다.
 
@@ -460,10 +460,16 @@ K-0c 약관 게이트는 KIS·KRX Open API·공공데이터포털의 현재 이�
 3. ~~**freshness event 등록**~~ — **매일 23:00, v0.11.4 prod gate `OK`로 완료**.
 4. ~~**Cronicle job history 비밀정보 후속**~~ — 재발 경로가 닫힌 점을 확인하고 더 진행하지
    않기로 결정했다. prod `running` audit은 0건이다.
-5. **OpenDART 공시 접수 정기 증분 수집** — current universe와 최근 14일 lookback을 쓰는
-   코드·wrapper·테스트는 끝냈다. v0.11.5 배포와 매일 23:30 event 등록·첫 실행 검증이 남았다.
-6. **Horizon Scan full legacy/native parity 발행** — legacy Phase A 100회는 끝났다. Phase B와
-   AB를 이어서 실행하고 비교 보고서를 발행한다.
+5. ~~**OpenDART 공시 접수 정기 증분 수집**~~ — **v0.11.5로 완료**. `sdc_daily_opendart_filings`
+   event를 매일 23:30 KST로 등록했고(current universe + 14일 lookback), 첫 수동 실행이
+   13분 19초 만에 `success`로 끝났다 — 대상 2,657개 법인, 3,666행 upsert, 오류 0건.
+   `dart_filing_receipt_raw`는 1,447,329 → 1,450,995행, 최신 `rcept_dt` 2026-08-14 →
+   2026-08-28로 갱신됐다. prod `running` audit은 여전히 0건이다.
+6. ~~**Horizon Scan full legacy/native parity 발행**~~ — **완료**. legacy A(100회)·B(100회)·
+   AB를 native canonical run과 비교했다. AB 판정 요약 8개는 전부 exact match, artifact
+   7개 중 유일한 예외(`own_major_filing_activity`)는 engine이 아니라 두 기준 시점 사이
+   feature 정의 변경 때문임을 규명했다. 상세는
+   `03_improve_AB/03_implementation_and_validation.md` §22.
 7. **T1·T2 h60 one-shot holdout** — 2026년 10~11월 이후 새 구간에서 한 번만 연다. 현재
    holdout은 재사용하지 않는다.
 8. ~~**K-6c KIS 약관 확인**~~ — **완료**. 비공개 개인 연구·백테스트에만 쓰고,
@@ -472,4 +478,4 @@ K-0c 약관 게이트는 KIS·KRX Open API·공공데이터포털의 현재 이�
    이용, 출처 표시, 계약 종료 뒤 이용 중단 조건으로 통과했다. 공공데이터포털 데이터셋
    `15094808`은 `이용허락범위 제한 없음`을 다시 확인했다.
 
-1~4와 8~9는 끝났다. 5~6은 이번 작업에서 닫는다. 7은 시간 게이트다.
+1~6과 8~9는 끝났다. **남은 것은 7 하나, 2026년 10~11월 T1·T2 h60 one-shot holdout뿐이다.**

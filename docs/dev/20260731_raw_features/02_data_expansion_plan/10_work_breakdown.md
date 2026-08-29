@@ -496,7 +496,7 @@ N6은 대상 집합이 N3에서 S-1으로 바뀌었으므로(N6-5) **이제 KRX 
   - [ ] **검증 끝나면 전부 삭제.** 2026-08-19 저녁 기준 **삭제 대기 6개**:
         `emr0r4xgb0h`(07-04 완료) · `emsugdoe907` · `emsuia7tg0e` · `emsugmrjp0a`(재개 안 함) ·
         `sdc_backfill_n1_marketcap` · `sdc_kis_flows_trial`(2일차 후)
-- [ ] **D-5** Cronicle **정기 증분 이벤트** 추가 — N1 일별, N4 월별, N2·N5 주기적 refresh
+- [x] **D-5** Cronicle **정기 증분 이벤트** 추가 — N1 일별, N4 월별, N2·N5 주기적 refresh
   - [x] **2026-08-19 실태 확인 — 지금 raw 표 둘이 일회성 백필로만 채워진다.**
         Cronicle 이벤트 19개의 wrapper를 전부 대조했다. `prices-market-cap-backfill.sh`와
         `dart-sync-filings.sh`가 **어떤 정기 이벤트에도 안 걸려 있다.** 백필이 끝나는
@@ -504,9 +504,18 @@ N6은 대상 집합이 N3에서 S-1으로 바뀌었으므로(N6-5) **이제 KRX 
   - [x] **N1 일별** — 2026-08-28 평일 20:00 독립 event `sdc_daily_market_cap`으로 등록했다.
         최근 30일만 gap scan하고 저장된 slice는 외부 요청 없이 건너뛴다. **가져오는 건
         T-1이다**(원천이 T+1). 첫 정기 실행은 4.5초, exit 0으로 끝났다
-  - [x] **공시 접수(N5-7 입력)** — 현재 연도는 항상 다시 조회하는 기존 계약을 확인했다.
-        정기 경로는 current universe와 최근 14일 lookback으로 제한했다. 과거 연도 백필은
-        full-year·historical 경로를 그대로 쓴다
+  - [x] **N2 일별** — `dart_corp_master` 갱신은 이미 기존 `sdc_daily_opendart_corp`
+        (04:00, Corp → Financials → Share Info → XBRL 체인의 head)이 매일 돈다. 새 event가
+        필요 없었다
+  - [x] **N4 월별** — **범위에서 빠졌다.** 업종 crosswalk 대체안이 2026-08-18에 실패로
+        닫혔고(N4-2~N4-8 취소, `12`), 그 몫의 정기 refresh 자체가 없어졌다
+  - [x] **공시 접수(N5-7 입력) — v0.11.5로 완료.** `sync_dart_filings`에 `lookback_days`를
+        추가해 과거 연도는 `(corp_code, year)` skip-if-present 그대로, 현재 연도만
+        `max(1월 1일, 오늘-lookback)`으로 좁혔다. `sdc_daily_opendart_filings` event를
+        매일 23:30 KST, current universe + 14일 lookback, `opendart` lock 공유로
+        등록했다. 첫 수동 실행이 13분 19초 만에 `success`로 끝났다 — 대상 2,657개 법인,
+        3,666행 upsert, 오류 0건. `dart_filing_receipt_raw` 1,447,329 → 1,450,995행,
+        최신 `rcept_dt` 2026-08-14 → 2026-08-28. prod `ingestion_runs` `running` audit 0건
   - [x] **막는 것은 없다** — compute 게이트(`reports.freshness_violations`)는
         `common_feature_series`만 본다. 갭은 백필로 복구된다(12년치 84분).
         **급한 게 아니라 빠진 것이다**
@@ -1768,6 +1777,40 @@ ECOS 월간 series의 정상 공개 지연을 오탐해, series별 `max_stale_bu
 첫 market cap run을 중단하면서 남은 audit 행 1건은 승인을 받아 `failed`로 닫았다. prod의
 `running` run은 0건이다. 5는 더 진행하지 않는다. 6은 시간 게이트다. 7은 비공개 개인
 연구 범위를 유지하고, 범위가 달라질 때만 다시 연다.
+
+## 2026-08-29 정리
+
+D-5 상위 체크박스를 닫는다. N1(market cap, 08-28)·N2(기존 04:00 OpenDART Corp 체인)는 이미
+정기 이벤트가 있었고, N4는 08-18에 목적 A가 닫히면서 그 몫의 정기 refresh 자체가 없어졌다.
+남은 것은 N5-7 입력인 공시 접수(`dart_filing_receipt_raw`)뿐이었다.
+
+`sync_dart_filings`에 `lookback_days`를 추가했다 — 과거 연도는 기존 `(corp_code, year)`
+skip-if-present 그대로 두고, 현재 연도만 `max(1월 1일, 오늘-lookback)`으로 좁힌다. 음수
+lookback은 run 기록 전에 거부한다. `dart-sync-filings.sh` 기본값을 `universe-scope=current`,
+`lookback-days=14`로 바꾸고, `v0.11.5`로 릴리즈·배포했다.
+
+Cronicle에 `sdc_daily_opendart_filings`(매일 23:30 KST, `opendart` lock을 04:00 체인과
+공유)를 등록하고 그 자리에서 한 번 실행했다. 결과는 다음과 같다.
+
+| 항목 | 확인 결과 |
+|---|---|
+| job | `jmte2dq700g`, `success`, 13분 19초 |
+| 대상 | 2,657개 법인(current universe), 요청 2,657건, 오류 0건 |
+| `dart_filing_receipt_raw` | 1,447,329 → 1,450,995행 (+3,666), 최신 `rcept_dt` 2026-08-14 → 2026-08-28 |
+| `ingestion_runs` | `status=success`, `params.lookback_days=14`, `params.universe_scope=current` |
+| `running` audit | 0건 |
+
+같은 작업에서 `research/analysis/horizon_scan*.py`(legacy scan engine)로 확장 config
+`889c3e83…`의 A→B→AB를 다시 실행해 native canonical run과 비교했다. AB 판정 요약
+(`m_ab`·`screen_pass`·evidence grade·discovery count·`empirical_p`) 8개는 전부 exact
+match였고, artifact 7개 중 유일한 예외(`own_major_filing_activity`, 16/288행)는 engine
+차이가 아니라 두 기준 시점 사이 그 feature 정의(`FILING_ACTIVITY_FORMULA_VERSION`
+filing_v1→v3) 자체가 바뀐 것임을 규명했다. 상세는
+`03_improve_AB/03_implementation_and_validation.md` §22와 `04_engine_parity_20260829.md`.
+
+이 디렉터리(`01_feature_candidate`·`02_data_expansion_plan`·`03_improve_AB`)에 남은 항목은
+**T1·T2 h60 one-shot holdout 하나**뿐이다. 2026년 10~11월 이후 새 구간에서 한 번만 열고,
+현재 holdout은 재사용하지 않는다.
 
 ## 개정 이력
 
