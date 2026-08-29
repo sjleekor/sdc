@@ -5,7 +5,7 @@
 1. [FinanceDataReader](https://github.com/financedata-org/FinanceDataReader) 및 [pykrx](https://github.com/sharebook-kr/pykrx)를 사용하여 **KOSPI / KOSDAQ 종목 유니버스를 동기화**합니다 (종목 마스터 관리).
 2. pykrx를 사용하여 상장일로부터 **종목별 일봉(OHLCV) 이력 데이터를 수집**합니다.
 3. [OpenDART](https://opendart.fss.or.kr)를 사용하여 **재무제표 / 주식수 / 배당 / 자사주 raw 값과 XBRL fact**를 수집합니다.
-4. KRX MDC 소스를 직접 호출하여 **일자별 수급 raw**(투자자별 순매수, 공매도 등)를 수집합니다.
+4. KIS Developers와 KRX MDC 소스를 사용하여 **일자별 수급 raw**(투자자별 순매수, 공매도 등)를 수집합니다.
 5. FDR / pykrx / KRX / ECOS / FRED 기반 **공통 시장·거시 feature raw**를 수집합니다.
 6. PostgreSQL은 **raw 수집/감사 저장소**로 두고, 재무 metric 정규화와 common daily fact 같은 파생 compute는 **Parquet → DuckDB 마트**에서 재계산합니다.
 7. 깔끔한 포트/어댑터(Ports & Adapters) 아키텍처를 적용하여 수집 로직과 저장소 구현을 분리합니다.
@@ -36,7 +36,7 @@ cp .env.example .env
 # .env 파일을 열어 데이터베이스 계정 정보 및 설정을 수정하세요
 # `dart` 계열 명령은 OPENDART_API_KEY 또는 OPENDART_API_KEYS가 반드시 설정되어야 동작합니다
 # `common sync --sources ecos/fred`는 ECOS_API_KEY / FRED_API_KEY가 필요합니다
-# KIS_APP_KEY / KIS_APP_SECRET은 KRX 스크래핑 경로 대체용으로 예약돼 있습니다 (아직 사용 코드 없음)
+# `flows sync-kis`는 KIS_APP_KEY / KIS_APP_SECRET이 필요합니다
 
 # 3. 데이터베이스 스키마 초기화
 uv run krx-collector db init
@@ -97,7 +97,7 @@ bin/parquet-compute-all.sh --features
 
 이 단계는 `stock_metric_fact`와 `common_feature_daily_fact`를 PostgreSQL에 쓰지 않고 raw Parquet 위에서 재계산합니다. 필요한 의존성은 `uv sync --extra research`로 설치합니다.
 
-### 수급 raw (KRX)
+### 수급 raw (KIS / KRX)
 
 ```bash
 # 12. 종목/일자 기준 수급 raw 적재
@@ -105,9 +105,58 @@ uv run krx-collector flows sync --tickers 005930 --start 2026-04-17 --end 2026-0
 
 # 일일 catch-up: 저장된 수급 최신일과 가격 최신일 기준으로 최근 window만 갱신
 uv run krx-collector flows sync --incremental --lookback-days 14
+
+# KIS 요청 계획만 확인(외부 요청과 token 발급 없음)
+uv run krx-collector flows sync-kis --plan-only
+
+# KIS 수급 증분 수집
+uv run krx-collector flows sync-kis
 ```
 
 `flows sync`는 KRX MDC JSON endpoint를 직접 호출합니다. 적재 row의 `source` 컬럼은 `KRX`로 기록됩니다. KRX MDC가 비로그인 응답을 거부하면 `.env`의 `KRX_ID` / `KRX_PW` 자격증명으로 자동 로그인 후 재시도합니다.
+
+`flows sync-kis`는 KIS Developers API를 호출하며 적재 row의 `source`는 `KIS`로 기록합니다.
+`KIS_APP_KEY`, `KIS_APP_SECRET`, `KIS_BASE_URL`을 설정해야 합니다.
+
+#### KIS 데이터 이용 범위
+
+이 프로젝트의 KIS Developers API 데이터는 **사용자가 직접 관리하는 비공개 환경에서 개인
+연구와 백테스트 용도로만** 사용합니다. API key와 수집 데이터에는 사용자 본인만 접근합니다.
+
+현재 다음 용도는 계획하지 않습니다.
+
+- KIS raw 테이블이나 Parquet 파일 공유
+- KIS 데이터를 GitHub에 업로드
+- 다른 사용자가 조회할 수 있는 API, 웹 서비스 또는 대시보드 제공
+- 종목별 KIS 데이터를 포함한 보고서 배포
+- 상업 모델, 투자자문 또는 고객 대상 서비스에 연결
+- KIS 이용계약이 끝난 뒤에도 데이터를 무기한 보관하는 방침 확정
+
+위 범위가 달라지면 구현이나 배포 전에 KIS Developers 이용약관과 필요한 거래소 정보이용계약을
+다시 확인합니다. 이 운영 방침은 제3자 제공을 금지하는
+[KIS Developers 고객 이용약관](https://apiportal.koreainvestment.com/api/terms/public?termsType=MARKET)을
+따르기 위한 현재 프로젝트 범위입니다.
+
+#### KRX Open API·공공데이터포털 이용 범위
+
+KRX Open API 데이터도 KIS와 같은 **비공개 개인 연구·백테스트 범위**에서만 사용합니다.
+[KRX Open API 이용약관](https://openapi.krx.co.kr/contents/OPP/INFO/OPPINFO002.jsp)에 따라
+다음 운영 조건을 적용합니다.
+
+- 비상업 목적으로만 사용하고 API 결과나 수집 데이터를 제3자에게 제공하지 않습니다.
+- KRX 데이터를 사용한 화면을 만들면 `한국거래소 통계정보`를 사용했다는 문구를 표시합니다.
+- `source=KRX_OPENAPI` provenance를 raw와 파생 산출물에 유지합니다.
+- 인증키 이용기간을 연장하지 않거나 계약이 끝나면 KRX 데이터 수집과 분석 사용을 중단합니다.
+  기존 raw·Parquet은 연장 또는 삭제 방침을 정할 때까지 compute 입력에서 격리하며, 계약 종료
+  뒤에도 계속 이용하거나 무기한 보관하는 방침은 두지 않습니다.
+- 공개, 제3자 제공 또는 상업 이용이 필요해지면 구현 전에 KRX 데이터 상품·분배 계약을 다시
+  확인합니다.
+
+공공데이터포털의
+[금융위원회_주식시세정보](https://www.data.go.kr/data/15094808/openapi.do)는 무료이며
+`이용허락범위 제한 없음`으로 제공됩니다. 현재 `DATAGO_KEY`는 KRX Open API 값 대조용으로만
+설정할 수 있고 정기 수집 경로에는 연결돼 있지 않습니다. 나중에 수집 경로로 사용하더라도
+`source`와 데이터셋 ID `15094808`을 provenance에 남깁니다.
 
 ### 공통 시장 / 거시 feature
 
@@ -551,3 +600,7 @@ krx-data-pipeline/
 ## 라이선스
 
 MIT
+
+MIT 라이선스는 이 저장소의 소스 코드에만 적용됩니다. KIS, KRX, OpenDART, 공공데이터포털 등
+외부 원천에서 수집한 raw·Parquet 데이터에는 각 제공기관의 이용조건이 적용되며 이 저장소의
+MIT 라이선스로 재배포되지 않습니다.

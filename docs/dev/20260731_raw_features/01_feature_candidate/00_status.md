@@ -106,6 +106,7 @@ mapping hash를 맞춰야 한다. 8월 23일 canonical peak RSS는 A 약 9.94GB,
 | `07_phase1_acceptance_gate.md` | 증분성·경제성·holdout 판정과 채택 결론 | T1 |
 | `08_phase_b_implementation_log.md` | B-PR1~15 구현 기록, **현재 실행 상태(§3)·남은 작업(§4)** | T2 |
 | `09_all_feature_results.md` | **25 family 결과 한눈에** — 원천·산식·가설·예측력·등급 | 공통 |
+| `13_feature_performance_html_report_plan.md` | **35 family HTML 성능 보고서 계획** — 차트·표·lineage·검증·h60 갱신 | 공통 |
 
 계약(`04_*`)과 기록(`08`)의 역할이 다르다. 임계값·판정 기준은 **결과를 보기 전에** `04`에
 적고, 실행 결과와 실측치는 `08`에 적는다. 이 구분을 깨지 않는 게 이 트랙의 핵심 규율이다.
@@ -430,8 +431,9 @@ final-vintage와 availability 문제로 `NE`다.
 5. **T1 h60은 2026년 10~11월 이후 다시 본다.** 새 구간을 한 번만 쓰며 현재 holdout을
    재사용하지 않는다.
 
-sj2-server에 다시 접근할 수 있을 때는 별도로 N6 prod run·freshness·Cronicle과 K-0c 약관 게이트를
-확인한다. 현재 다음 순서도 로컬 코드·parquet 범위에서는 sj2-server 없이 진행할 수 있다.
+sj2-server에 다시 접근할 수 있을 때는 별도로 N6 prod run·freshness·Cronicle을 확인한다.
+K-0c 약관 게이트는 KIS·KRX Open API·공공데이터포털의 현재 이용 범위를 README에 고정해
+완료했다.
 
 ## 8. 남은 작업 — 2026-08-28
 
@@ -446,8 +448,12 @@ sj2-server에 다시 접근할 수 있을 때는 별도로 N6 prod run·freshnes
    확인했다. DB credential 회전 뒤 백업 정책에 맞춰 삭제하거나 마스킹한다.
 5. **T1·T2 h60 one-shot holdout** — 2026년 10~11월 이후 새 구간에서 한 번만 연다. 현재
    holdout은 재사용하지 않는다.
-6. **K-0c/KIS 약관 확인** — 사람이 공식 약관을 읽고 장기 보관·파생물 사용 범위를 정한다.
+6. ~~**K-6c KIS 약관 확인**~~ — **완료**. 비공개 개인 연구·백테스트에만 쓰고,
+   제3자 제공·공개·상업 이용을 하지 않는 범위를 README에 기록했다. 범위가 달라질 때 다시 연다.
+7. ~~**K-0c KRX Open API·공공데이터포털 약관 확인**~~ — **완료**. KRX는 비상업·비공개
+   이용, 출처 표시, 계약 종료 뒤 이용 중단 조건으로 통과했다. 공공데이터포털 데이터셋
+   `15094808`은 `이용허락범위 제한 없음`을 다시 확인했다.
 
 1~4는 sj2 운영 변경이다. read-only 점검은 끝났지만 release·deploy, Cronicle event 변경,
-credential 회전과 history 정리에는 별도 운영 승인이 필요하다. 5는 시간 게이트, 6은 사람
-판단이라 지금 자동으로 닫을 수 없다.
+credential 회전과 history 정리에는 별도 운영 승인이 필요하다. 5는 시간 게이트다. 6은 현재
+프로젝트 범위에서 닫았다. 7도 현재 프로젝트 범위에서 닫았으며 이용 범위가 달라지면 다시 연다.
