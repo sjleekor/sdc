@@ -1272,7 +1272,7 @@ def _handle_dart_sync_filings(args: argparse.Namespace) -> None:
 
     print(
         f"→ dart sync-filings: years={years}, tickers={tickers}, "
-        f"rate_limit={args.rate_limit_seconds}"
+        f"rate_limit={args.rate_limit_seconds}, lookback_days={args.lookback_days}"
     )
 
     from krx_collector.adapters.opendart_filings.provider import OpenDartFilingReceiptProvider
@@ -1298,6 +1298,7 @@ def _handle_dart_sync_filings(args: argparse.Namespace) -> None:
         rate_limit_seconds=args.rate_limit_seconds,
         force=args.force,
         scope=UniverseScope(args.universe_scope),
+        lookback_days=args.lookback_days,
     )
 
     if result.errors:
@@ -2899,9 +2900,9 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["current", "historical"],
         default="current",
         help=(
-            "Which universe to target. 'current' = currently-listed corps "
-            "(2,657). 'historical' = every corp that ever had a ticker (3,959); "
-            "delisted names are unreachable otherwise."
+            "Which universe to target. 'current' = currently-listed corps. "
+            "'historical' = every corp that ever had a ticker; delisted names are "
+            "unreachable otherwise."
         ),
     )
     dart_sync_corp_profile.set_defaults(handler=_handle_dart_sync_corp_profile)
@@ -3195,6 +3196,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Re-download even when receipts already exist for a (corp, year) window.",
+    )
+    dart_sync_filings.add_argument(
+        "--lookback-days",
+        type=int,
+        default=None,
+        help=(
+            "For the current calendar year, request only this many recent calendar days. "
+            "Past years remain full-year windows. Default: current year to date."
+        ),
     )
     dart_sync_filings.add_argument(
         "--universe-scope",

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 from krx_collector.adapters.opendart_common.client import OpenDartRequestExecutor
 from krx_collector.domain.enums import RunStatus, RunType, UniverseScope
@@ -40,6 +40,7 @@ def sync_dart_filings(
     force: bool = False,
     today: date | None = None,
     scope: UniverseScope = UniverseScope.CURRENT,
+    lookback_days: int | None = None,
 ) -> DartFilingReceiptSyncResult:
     """Synchronise OpenDART disclosure-receipt (list.json) history.
 
@@ -51,7 +52,12 @@ def sync_dart_filings(
     that year's window fully succeeded on some earlier run. The current
     calendar year is always re-fetched since it keeps accumulating new
     receipts (and corrections to earlier filings can still land within it).
+    ``lookback_days`` narrows only that current-year window for the scheduled
+    incremental path. Past years always keep their full calendar-year window.
     """
+    if lookback_days is not None and lookback_days < 0:
+        raise ValueError("lookback_days must be >= 0")
+
     run = IngestionRun(
         run_type=RunType.DART_FILING_RECEIPT_SYNC,
         started_at=now_kst(),
@@ -62,6 +68,7 @@ def sync_dart_filings(
             "rate_limit_seconds": rate_limit_seconds,
             "force": force,
             "universe_scope": scope.value,
+            "lookback_days": lookback_days,
         },
     )
     executor = _get_executor(filing_receipt_provider)
@@ -98,6 +105,8 @@ def sync_dart_filings(
                     continue
 
                 bgn_de = date(year, 1, 1)
+                if year == today.year and lookback_days is not None:
+                    bgn_de = max(bgn_de, today - timedelta(days=lookback_days))
                 end_de = date(year, 12, 31) if year != today.year else today
                 result.requests_attempted += 1
                 fetch_result = call_with_retry(

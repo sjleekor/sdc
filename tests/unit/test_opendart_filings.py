@@ -1,5 +1,7 @@
 from datetime import date
 
+import pytest
+
 from krx_collector.adapters.opendart_filings.provider import (
     OpenDartFilingReceiptProvider,
     parse_filing_receipt_page,
@@ -357,6 +359,63 @@ def test_sync_dart_filings_never_skips_current_year() -> None:
     assert result.requests_attempted == 1
     assert result.requests_skipped == 0
     assert provider.calls[0][2] == date(2026, 8, 10)
+
+
+def test_sync_dart_filings_limits_current_year_to_incremental_lookback() -> None:
+    storage = MockFilingReceiptStorage()
+    provider = MockFilingReceiptProvider()
+
+    result = sync_dart_filings(
+        filing_receipt_provider=provider,
+        storage=storage,
+        years=[2026],
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+        today=date(2026, 8, 10),
+        lookback_days=14,
+    )
+
+    assert result.errors == {}
+    assert provider.calls[0][1] == date(2026, 7, 27)
+    assert provider.calls[0][2] == date(2026, 8, 10)
+    assert storage.runs[-1].params["lookback_days"] == 14
+
+
+def test_sync_dart_filings_keeps_past_year_as_full_window_with_lookback() -> None:
+    storage = MockFilingReceiptStorage()
+    provider = MockFilingReceiptProvider()
+
+    sync_dart_filings(
+        filing_receipt_provider=provider,
+        storage=storage,
+        years=[2025],
+        tickers=["005930"],
+        rate_limit_seconds=0.0,
+        today=date(2026, 8, 10),
+        lookback_days=14,
+    )
+
+    assert provider.calls[0][1] == date(2025, 1, 1)
+    assert provider.calls[0][2] == date(2025, 12, 31)
+
+
+def test_sync_dart_filings_rejects_negative_lookback() -> None:
+    storage = MockFilingReceiptStorage()
+    provider = MockFilingReceiptProvider()
+
+    with pytest.raises(ValueError, match="lookback_days must be >= 0"):
+        sync_dart_filings(
+            filing_receipt_provider=provider,
+            storage=storage,
+            years=[2026],
+            tickers=["005930"],
+            rate_limit_seconds=0.0,
+            today=date(2026, 8, 10),
+            lookback_days=-1,
+        )
+
+    assert provider.calls == []
+    assert storage.runs == []
 
 
 def test_sync_dart_filings_force_bypasses_existing_check() -> None:

@@ -9,7 +9,8 @@ KRX 정규장 시간: 09:00–15:30 KST. 당일의 온전한 데이터를 확보
 > **prod은 이 표대로 돌지 않는다.** sj2-server는 crontab이 아니라 **Cronicle**을 쓰고,
 > 체인 셋과 독립 event로 나뉜다 — **18:30** FDR Universe → Prices → KRX Flows → KRX Common,
 > **19:00** KIS foreign holding, **20:00** market cap, **20:30** ECOS/FRED/FDR common,
-> **23:00** freshness gate, **04:00** OpenDART Corp → Financials → Share Info → XBRL.
+> **23:00** freshness gate, **23:30** OpenDART filing receipt, **04:00** OpenDART Corp →
+> Financials → Share Info → XBRL.
 > 아래는 이 저장소를 새로 배포하는 사람을 위한 최소 예시다. 실제 prod 스케줄은
 > Cronicle API로 확인한다(`sj2-server` 스킬).
 
@@ -52,6 +53,10 @@ KRX 정규장 시간: 09:00–15:30 KST. 당일의 온전한 데이터를 확보
 # daily_market_cap은 T+1 원천이라 별도 기본 예산 2거래일을 씁니다. 다른 일별 도메인은
 # 기본 1거래일 예산을 그대로 씁니다 — 아래 "KRX Open API 일별매매정보는 T+1이다".
   0  23  *  *  *    cd /opt/krx-data-pipeline && uv run krx-collector ops freshness-report --fail-if-stale
+
+# OpenDART 공시 접수 증분 — 매일 23:30 KST
+# 현재 상장사와 현재 연도의 최근 14일만 다시 받아 신규·정정 접수를 upsert합니다.
+  30 23  *  *  *    cd /opt/krx-data-pipeline && deploy/prod/bin/dart-sync-filings.sh
 ```
 
 > **Tip:** crontab 맨 위에 `TZ=Asia/Seoul`을 설정하거나, systemd timer의 `OnCalendar=`를 사용하여 UTC 혼동을 방지하는 것이 좋습니다.
@@ -270,14 +275,18 @@ uv run krx-collector flows sync --tickers 005930 --start 2026-04-17 --end 2026-0
 # 6) 공시 접수 이력 적재 (Phase B: 원공시/정정 관계, SUE original-event source)
 uv run krx-collector dart sync-filings --tickers 005930 --years 2025
 
+# 현재 연도 최근 14일 증분 수집
+uv run krx-collector dart sync-filings --universe-scope current --lookback-days 14
+
 # 7) 증자(감자) 현황은 sync-share-info에 포함되어 함께 수집됨 (irdsSttus)
 ```
 
 재무 metric 정규화와 common daily fact 생성은 PostgreSQL CLI가 아니라 아래 "Parquet compute 파이프라인"에서 DuckDB 마트로 실행합니다.
 
-`dart sync-filings`는 `dart-backfill-all-years.sh`에 포함돼 있습니다(아래 "OpenDART 전체
-사업연도 백필"). 일일 wrapper에는 아직 없습니다 — 접수 이력은 Phase B 전용이라 매일 돌릴
-이유가 없고, 백필 스크립트가 현재 연도를 매번 다시 받으므로 최신분도 그때 따라옵니다.
+`dart sync-filings`는 historical 백필과 정기 증분 경로를 나눕니다. 과거 이력은
+`dart-backfill-all-years.sh`가 맡습니다. 정기 경로는 `dart-sync-filings.sh`가 현재 상장사와
+현재 연도의 최근 14일만 다시 받습니다. 신규 접수뿐 아니라 같은 기간의 정정 접수도 upsert합니다.
+`DART_FILINGS_LOOKBACK_DAYS`를 빈 값으로 두면 현재 연도 전체를 다시 받습니다.
 `dart sync-share-info`는 기존 주식수/배당/자사주 raw와 함께
 `dart_capital_change_raw`(증자·감자 현황)도 같은 실행에서 수집합니다.
 
@@ -655,9 +664,9 @@ prod에서 stale로 남은 financial/share-info run도 닫았고, 남은 원천 
 KRX 접근이 제한된 상황에서 7년치를 다시 긁을 이유가 없다. 감사·교차검증용으로
 2014~2018 구간은 남아 있다.
 
-### 일일 잡이 없는 raw 테이블 둘 (2026-08-19 확인)
+### 일일 잡이 없던 raw 테이블 둘 (2026-08-19 확인, 08-29 해소)
 
-`daily_market_cap`과 `dart_filing_receipt_raw`는 **일회성 백필로만 채워졌다.** Cronicle 이벤트
+`daily_market_cap`과 `dart_filing_receipt_raw`는 당시 **일회성 백필로만 채워졌다.** Cronicle 이벤트
 19개의 wrapper를 전부 대조해서 확인했다 — `prices-market-cap-backfill.sh`와
 `dart-sync-filings.sh`는 어떤 정기 이벤트에도 걸려 있지 않다. 백필이 끝나는 순간부터
 두 표는 그냥 멈춘다.
@@ -670,9 +679,10 @@ KRX 접근이 제한된 상황에서 7년치를 다시 긁을 이유가 없다. 
 `ops freshness-report --fail-if-stale`에서만 돌고 어떤 Cronicle 이벤트에도 안 걸려 있다.
 그리고 갭은 백필로 복구된다 — 12년치를 84분에 채웠다. **급한 것이 아니라 빠진 것이다.**
 
-**공시 접수는 그냥 붙일 수 없다.** skip-if-present가 `(corp_code, year)` 단위라 현재 연도가
-이미 "완료"로 잡혀 있어서, 그대로 돌리면 한 건도 안 가져온다. `--force`가 필요하고 그러면
-하루 2,763콜이 S-1과 같은 할당량을 쓴다. **S-1이 끝난 뒤에 붙인다.**
+현재 구현은 과거 연도만 `(corp_code, year)` coverage로 건너뜁니다. 현재 연도는 항상 다시
+조회합니다. 정기 경로에는 `--lookback-days 14`를 넣어 API 응답 범위와 페이지 수를 줄이고,
+현재 상장사만 대상으로 삼습니다. 법인별 요청 수는 유지되므로 OpenDART daily chain과 겹치지
+않는 23:30에 실행합니다.
 
 #### 2026-08-28 재부팅 뒤 운영 점검
 
