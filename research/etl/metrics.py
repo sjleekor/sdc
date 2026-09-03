@@ -119,9 +119,20 @@ def _per_date_market_rank_ic_native(
     """Native date×market Spearman implementation used by Horizon Scan.
 
     Polars' Spearman correlation uses average ranks for ties, matching
-    :func:`_spearman`.  Null/non-finite filtering is deliberately kept before
-    the group-by so the native and legacy paths have the same eligibility
-    contract.
+    :func:`_spearman` — but *only* where at least one side actually varies.
+    On a cross-section whose predictor (or realized value) is completely
+    constant it returns a spurious non-zero correlation instead of a NaN, for
+    some group sizes and not others (measured on polars 1.41.2: NaN at n=50,
+    a number at n=745). A constant column carries no rank information, so the
+    correlation is undefined and the date must drop out; the degeneracy guard
+    below restores that, matching :func:`_spearman`'s own ``ps == 0`` check.
+
+    This mattered in practice: a count feature's history begins with whole
+    cross-sections at zero, and without the guard those dates entered the IC
+    series with invented values (``10_known_issues.md`` I13).
+
+    Null/non-finite filtering is deliberately kept before the group-by so the
+    native and legacy paths have the same eligibility contract.
     """
     clean = df.select([date_col, market_col, pred_col, realized_col]).drop_nulls()
     clean = clean.filter(pl.col(pred_col).is_finite() & pl.col(realized_col).is_finite())
@@ -139,13 +150,23 @@ def _per_date_market_rank_ic_native(
         .agg(
             pl.corr(pred_col, realized_col, method="spearman").alias("rank_ic"),
             pl.len().alias("n"),
+            pl.col(pred_col).n_unique().alias("_pred_unique"),
+            pl.col(realized_col).n_unique().alias("_realized_unique"),
         )
         .filter(pl.col("n") >= min_names)
         # The legacy path keeps degenerate groups as a row with NaN and lets
         # callers decide whether to drop it. Match that contract instead of
         # silently changing the valid date×market population in the native
-        # path (Polars represents the same correlation as null).
-        .with_columns(pl.col("rank_ic").fill_null(float("nan")))
+        # path (Polars represents the same correlation as null) — and force
+        # the NaN where a constant column makes the correlation undefined,
+        # which Polars does not always do on its own.
+        .with_columns(
+            pl.when((pl.col("_pred_unique") <= 1) | (pl.col("_realized_unique") <= 1))
+            .then(float("nan"))
+            .otherwise(pl.col("rank_ic").fill_null(float("nan")))
+            .alias("rank_ic")
+        )
+        .drop(["_pred_unique", "_realized_unique"])
         .with_columns(pl.col("n").cast(pl.Int64))
         .sort([date_col, market_col])
     )
@@ -295,6 +316,109 @@ def newey_west_tstat(
     if variance_mean <= 0 or not np.isfinite(variance_mean):
         return float("nan")
     return mean / float(np.sqrt(variance_mean))
+
+
+def newey_west_ols(
+    y: np.ndarray | list[float],
+    x: np.ndarray | list[float] | None,
+    session_index: np.ndarray | list[int],
+    lag: int,
+) -> dict[str, float]:
+    """HAC-corrected OLS of ``y`` on a constant, optionally plus one regressor.
+
+    Same gap-aware kernel as :func:`newey_west_tstat`: only pairs whose KRX
+    session distance is within ``lag`` enter the autocovariance, so a market
+    closure never lets two observations count as adjacent. With ``x=None`` the
+    design is the constant alone and ``t_alpha`` reproduces
+    ``newey_west_tstat(y, session_index, lag)`` exactly — the two are the same
+    estimator written twice, and a test pins that down.
+
+    Stage 1b estimates ``IC_t = alpha + delta * s_t + e_t`` with ``s_t`` the
+    regime indicator, which makes ``delta`` exactly the difference of the two
+    conditional means (§4.1) and ``alpha`` the mean in the ``s=0`` regime.
+    Fitting it as a regression rather than differencing two means is what puts
+    one HAC variance over both, on the session axis the cell's own ``t_nw``
+    already uses.
+
+    A degenerate regressor — one regime never occurring in the sample — gives
+    NaN for the slope rather than an arbitrary number, and the intercept is
+    still reported from the constant-only fit. G1 is what catches that case
+    first; this only makes sure it cannot be papered over.
+    """
+    y_arr = np.asarray(y, dtype=float)
+    idx = np.asarray(session_index, dtype=int)
+    x_arr = None if x is None else np.asarray(x, dtype=float)
+    if x_arr is not None and not (y_arr.size == x_arr.size == idx.size):
+        raise ValueError("y, x and session_index must have the same length")
+    if x_arr is None and y_arr.size != idx.size:
+        raise ValueError("y and session_index must have the same length")
+
+    mask = np.isfinite(y_arr) & np.isfinite(idx)
+    if x_arr is not None:
+        mask &= np.isfinite(x_arr)
+    y_arr, idx = y_arr[mask], idx[mask]
+    x_arr = None if x_arr is None else x_arr[mask]
+    n = y_arr.size
+    empty = {
+        "alpha": float("nan"),
+        "se_alpha": float("nan"),
+        "t_alpha": float("nan"),
+        "p_alpha": float("nan"),
+        "delta": float("nan"),
+        "se_delta": float("nan"),
+        "t_delta": float("nan"),
+        "p_delta": float("nan"),
+        "n": n,
+    }
+    if n < 2:
+        return empty
+    _validate_session_index(idx)
+
+    def _fit(design: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+        xtx = design.T @ design
+        if np.linalg.matrix_rank(xtx) < design.shape[1]:
+            return None
+        xtx_inv = np.linalg.inv(xtx)
+        beta = xtx_inv @ (design.T @ y_arr)
+        scores = design * (y_arr - design @ beta)[:, None]
+        meat = scores.T @ scores
+        for distance, left, right in _hac_pair_indices(idx, lag):
+            cross = scores[left].T @ scores[right]
+            meat = meat + (1.0 - distance / (lag + 1.0)) * (cross + cross.T)
+        return beta, xtx_inv @ meat @ xtx_inv
+
+    def _stats(beta: np.ndarray, cov: np.ndarray, position: int) -> dict[str, float]:
+        variance = float(cov[position, position])
+        coefficient = float(beta[position])
+        if variance <= 0 or not math.isfinite(variance):
+            return {"value": coefficient, "se": float("nan"), "t": float("nan"), "p": float("nan")}
+        se = math.sqrt(variance)
+        t_stat = coefficient / se
+        return {"value": coefficient, "se": se, "t": t_stat, "p": two_sided_normal_p(t_stat)}
+
+    ones = np.ones(n)
+    full = None if x_arr is None else _fit(np.column_stack([ones, x_arr]))
+    if full is not None:
+        beta, cov = full
+        alpha, delta = _stats(beta, cov, 0), _stats(beta, cov, 1)
+    else:
+        constant_only = _fit(ones[:, None])
+        if constant_only is None:
+            return empty
+        beta, cov = constant_only
+        alpha = _stats(beta, cov, 0)
+        delta = {"value": float("nan"), "se": float("nan"), "t": float("nan"), "p": float("nan")}
+    return {
+        "alpha": alpha["value"],
+        "se_alpha": alpha["se"],
+        "t_alpha": alpha["t"],
+        "p_alpha": alpha["p"],
+        "delta": delta["value"],
+        "se_delta": delta["se"],
+        "t_delta": delta["t"],
+        "p_delta": delta["p"],
+        "n": n,
+    }
 
 
 def n_hac_pairs(session_index: np.ndarray | list[int], lag: int) -> int:

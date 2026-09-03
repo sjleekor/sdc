@@ -44,3 +44,48 @@ def build_full_panel_sql(price_view: str = "daily_ohlcv") -> str:
         FROM {price_view} p
         LEFT JOIN valid v USING (trade_date, ticker, market)
     """
+
+
+def build_market_model_sql(source_cte: str) -> str:
+    """The ``market``/``modeled``/``residuals`` CTE trio, over ``source_cte``.
+
+    One market-model definition, shared by every mart that needs a residual
+    return: equal-weighted per-(date, market) market return, a 252-session
+    market model fitted on the *prior* sessions only, and the residual it
+    leaves — which is only produced once the window is completely full
+    (``model_n_252 >= 252``), never from a partial fit.
+
+    ``feat_price`` and ``feat_macro_exposure`` must agree on this exactly:
+    ``px_idio_vol_60d``/``px_resid_mom_12_1`` and the ``macro_beta_*`` family
+    are all statements about the same ``resid_ret``, and A0's input lineage is
+    keyed on ``feat_price``'s SQL text (``mart._sql_hash``), so this returns
+    that text verbatim rather than a tidied-up equivalent.
+    """
+    return f"""market AS (
+            SELECT *, AVG(log_ret) OVER (PARTITION BY trade_date, market) AS market_ret
+            FROM {source_cte}
+        ),
+        modeled AS (
+            SELECT *,
+                REGR_SLOPE(log_ret, market_ret) OVER (
+                    PARTITION BY ticker, market ORDER BY trade_date
+                    ROWS BETWEEN 252 PRECEDING AND 1 PRECEDING
+                ) AS beta_252,
+                REGR_INTERCEPT(log_ret, market_ret) OVER (
+                    PARTITION BY ticker, market ORDER BY trade_date
+                    ROWS BETWEEN 252 PRECEDING AND 1 PRECEDING
+                ) AS alpha_252,
+                COUNT(CASE WHEN log_ret IS NOT NULL AND market_ret IS NOT NULL THEN 1 END)
+                    OVER (
+                        PARTITION BY ticker, market ORDER BY trade_date
+                        ROWS BETWEEN 252 PRECEDING AND 1 PRECEDING
+                    ) AS model_n_252
+            FROM market
+        ),
+        residuals AS (
+            SELECT *,
+                   CASE WHEN model_n_252 >= 252
+                        THEN log_ret - (alpha_252 + beta_252 * market_ret)
+                   END AS resid_ret
+            FROM modeled
+        )"""

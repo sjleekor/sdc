@@ -58,6 +58,7 @@ import duckdb
 import numpy as np
 import polars as pl
 
+from research.analysis.horizon_scan_daily_ic import DailyIcSink
 from research.analysis.horizon_scan_phase_b_source_quality import source_quality_allows_grade_a
 from research.analysis.horizon_scan_runner import (
     apply_global_bh,
@@ -163,6 +164,7 @@ def run_phase_b_continuous_scan(
     quantile_count: int,
     min_dates_per_cell: int,
     scan_engine: str = "legacy",
+    daily_sink: DailyIcSink | None = None,
 ) -> list[dict[str, Any]]:
     """Scan every ready continuous candidate cell via Phase A's own runner.
 
@@ -172,6 +174,10 @@ def run_phase_b_continuous_scan(
     queried here (their dependency mart view may not even be registered).
     Returns ``len(ready_continuous_cells) * 4`` rows (one per universe ×
     sample_kind combo), exactly like ``run_registry_scan`` for Phase A.
+
+    ``daily_sink`` (Stage 0) is handed straight through. The SUE event family
+    has its own grain and its own scan, so it contributes nothing here —
+    ``cohort_ic.parquet`` is deliberately not written (00_overview §1.4).
     """
     registry = [
         {**cell, "scan_type": "cum" if cell["cell_type"] == "cumulative" else "bucket"}
@@ -187,6 +193,7 @@ def run_phase_b_continuous_scan(
         quantile_count=quantile_count,
         min_dates_per_cell=min_dates_per_cell,
         scan_engine=scan_engine,
+        daily_sink=daily_sink,
     )
 
 

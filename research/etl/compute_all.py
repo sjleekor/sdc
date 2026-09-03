@@ -169,6 +169,7 @@ def _build_features(con, cfg: LakeConfig) -> None:
     from research.etl.features import common as cf_feat
     from research.etl.features import fin_pit
     from research.etl.features.flow import materialize_flow
+    from research.etl.features.macro_exposure import materialize_macro_exposure
     from research.etl.features.market_cap import materialize_market_cap
     from research.etl.features.price import materialize_price
     from research.etl.labels import materialize_label_scan
@@ -196,6 +197,10 @@ def _build_features(con, cfg: LakeConfig) -> None:
     materialize_price_quality(con, cfg, pit_view=PIT_TABLE, force=False)
     materialize_named_universes(con, cfg, force=False)
     materialize_price(con, cfg, quality_view=QUALITY_TABLE, force=False)
+    # feat_macro_exposure reads common_feature_daily_fact, which the marts step
+    # has already registered (and persisted) on this connection — so the mart
+    # and the readiness gate above are looking at the same fact.
+    materialize_macro_exposure(con, cfg, force=False)
     materialize_flow(
         con,
         cfg,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 
 import duckdb
+import pytest
 from research.analysis.horizon_scan_runner import (
     build_offset_formation_sql,
     run_nonoverlap_offsets,
@@ -165,3 +166,33 @@ def test_run_nonoverlap_offsets_marks_some_insufficient_when_a_bucket_is_thin() 
     )
     assert summary["n_offsets_valid"] == 0
     assert summary["offset_status"] == "insufficient"
+
+
+def test_offset_subsampling_never_reaches_the_daily_ic_sink(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§A-5's offsets have their own IC path and never touch ``scan_cell``, so
+    a Stage 0 sink can never be threaded into them by accident — an offset's
+    subsampled daily IC is a diagnostic, not the cell's stored series."""
+    from research.analysis import horizon_scan_runner
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("run_nonoverlap_offsets must not call scan_cell")
+
+    monkeypatch.setattr(horizon_scan_runner, "scan_cell", _fail)
+    con = duckdb.connect()
+    _seed_offset_panel(con)
+    summary = run_nonoverlap_offsets(
+        con,
+        feature_col="px_feature",
+        scan_type="cum",
+        h_start=0,
+        h_end=5,
+        universe="broad",
+        sample_kind="common_survivor",
+        sample_start="2024-01-01",
+        min_names=5,
+        nonoverlap_min_dates=5,
+        alignment_sign=1.0,
+    )
+    assert summary["n_offsets_total"] == 5

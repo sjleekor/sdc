@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import duckdb
+import polars as pl
 import pytest
 from research.analysis.horizon_scan_runner import build_formation_sql, run_registry_scan, scan_cell
 
@@ -288,6 +290,173 @@ def test_scan_cell_bucket_scan_type_uses_bucket_columns() -> None:
     assert result["status"] == "valid"
     assert result["width"] == 5
     assert result["ic_mean"] > 0.9
+
+
+# --- Stage 0: the daily_sink side channel (01_stage0_daily_ic_persistence §2) ---
+
+
+class RecordingSink:
+    """A DailyIcSink that keeps what it was handed instead of writing it."""
+
+    def __init__(self) -> None:
+        self.emitted: list[dict[str, Any]] = []
+        self.flushed: list[str] = []
+
+    def emit(
+        self,
+        cell: dict[str, Any],
+        *,
+        daily: pl.DataFrame,
+        market_ic: pl.DataFrame,
+        daily_spread: pl.DataFrame | None = None,
+        market_spread: pl.DataFrame | None = None,
+    ) -> None:
+        self.emitted.append(
+            {
+                "cell": cell,
+                "daily": daily,
+                "market_ic": market_ic,
+                "daily_spread": daily_spread,
+                "market_spread": market_spread,
+            }
+        )
+
+    def flush_feature(self, feature: str) -> None:
+        self.flushed.append(feature)
+
+
+_CELL_IDENTITY = {
+    "hypothesis_id": "fam|px_feature|cum|0|5",
+    "family": "fam",
+    "feature": "px_feature",
+    "scan_type": "cum",
+    "h_start": 0,
+    "h_end": 5,
+    "universe": "broad",
+    "sample_kind": "common_survivor",
+    "hypothesis_role": "primary",
+}
+
+
+def _scan_cell_kwargs(**overrides: Any) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "feature_col": "px_feature",
+        "scan_type": "cum",
+        "h_start": 0,
+        "h_end": 5,
+        "universe": "broad",
+        "sample_kind": "common_survivor",
+        "sample_start": "2024-01-01",
+        "min_names": 5,
+        "min_names_for_spread": 5,
+        "quantile_count": 5,
+        "min_dates_per_cell": 5,
+        "expected_sign": "+",
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_scan_cell_returns_the_same_dict_with_and_without_a_sink() -> None:
+    con = duckdb.connect()
+    _seed_scan_panel(con)
+    without = scan_cell(con, **_scan_cell_kwargs())
+    with_sink = scan_cell(
+        con, **_scan_cell_kwargs(), cell_identity=_CELL_IDENTITY, daily_sink=RecordingSink()
+    )
+    assert with_sink == without
+
+
+def test_scan_cell_emits_once_for_a_valid_cell() -> None:
+    con = duckdb.connect()
+    _seed_scan_panel(con)
+    sink = RecordingSink()
+    result = scan_cell(con, **_scan_cell_kwargs(), cell_identity=_CELL_IDENTITY, daily_sink=sink)
+    assert result["status"] == "valid"
+    assert len(sink.emitted) == 1
+    assert sink.emitted[0]["cell"] == _CELL_IDENTITY
+
+
+def test_scan_cell_does_not_emit_an_insufficient_cell() -> None:
+    con = duckdb.connect()
+    _seed_scan_panel(con)
+    sink = RecordingSink()
+    result = scan_cell(
+        con,
+        **_scan_cell_kwargs(min_dates_per_cell=60),
+        cell_identity=_CELL_IDENTITY,
+        daily_sink=sink,
+    )
+    assert result["status"] == "insufficient"
+    assert sink.emitted == []
+
+
+def test_scan_cell_does_not_emit_when_there_are_no_formation_rows() -> None:
+    con = duckdb.connect()
+    _seed_scan_panel(con)
+    con.execute("UPDATE analysis_panel SET in_broad = false")
+    sink = RecordingSink()
+    result = scan_cell(con, **_scan_cell_kwargs(), cell_identity=_CELL_IDENTITY, daily_sink=sink)
+    assert result["status_reason"] == "no_formation_rows"
+    assert sink.emitted == []
+
+
+def test_emitted_daily_frame_reproduces_ic_mean_and_n_dates() -> None:
+    con = duckdb.connect()
+    _seed_scan_panel(con)
+    sink = RecordingSink()
+    result = scan_cell(con, **_scan_cell_kwargs(), cell_identity=_CELL_IDENTITY, daily_sink=sink)
+    daily = sink.emitted[0]["daily"]
+    assert daily.height == result["n_dates"]
+    assert daily["rank_ic"].mean() == pytest.approx(result["ic_mean"], abs=1e-12)
+
+
+def test_emitted_spread_frame_reproduces_q5_spread_raw() -> None:
+    con = duckdb.connect()
+    _seed_scan_panel(con)
+    sink = RecordingSink()
+    result = scan_cell(con, **_scan_cell_kwargs(), cell_identity=_CELL_IDENTITY, daily_sink=sink)
+    daily_spread = sink.emitted[0]["daily_spread"]
+    assert daily_spread["spread"].mean() == pytest.approx(result["q5_spread_raw"], abs=1e-12)
+
+
+def test_emitted_spread_frame_keeps_dates_the_ic_frame_dropped() -> None:
+    """§2.3: a date whose realized ranks are constant has a NaN rank IC in
+    every market and leaves ``daily`` entirely, but still has a real quantile
+    spread. Storing the two together would lose that date's spread and make
+    ``mean(spread) != q5_spread_raw``."""
+    con = duckdb.connect()
+    _seed_scan_panel(con)
+    con.execute("UPDATE analysis_panel SET y_rank_5d = 0.0 WHERE formation_session_idx = 7")
+    sink = RecordingSink()
+    result = scan_cell(con, **_scan_cell_kwargs(), cell_identity=_CELL_IDENTITY, daily_sink=sink)
+    daily = sink.emitted[0]["daily"]
+    daily_spread = sink.emitted[0]["daily_spread"]
+    assert 7 not in daily["formation_session_idx"].to_list()
+    assert daily_spread.height == daily.height + 1
+    assert daily_spread["spread"].mean() == pytest.approx(result["q5_spread_raw"], abs=1e-12)
+
+
+def test_scan_cell_requires_an_identity_when_a_sink_is_given() -> None:
+    con = duckdb.connect()
+    _seed_scan_panel(con)
+    with pytest.raises(ValueError, match="cell_identity"):
+        scan_cell(con, **_scan_cell_kwargs(), daily_sink=RecordingSink())
+
+
+def test_scan_cell_passes_no_spread_frames_when_spread_is_skipped() -> None:
+    con = duckdb.connect()
+    _seed_scan_panel(con)
+    sink = RecordingSink()
+    scan_cell(
+        con,
+        **_scan_cell_kwargs(),
+        compute_spread=False,
+        cell_identity=_CELL_IDENTITY,
+        daily_sink=sink,
+    )
+    assert sink.emitted[0]["daily_spread"] is None
+    assert sink.emitted[0]["market_spread"] is None
 
 
 def test_run_registry_scan_covers_every_universe_sample_combo() -> None:

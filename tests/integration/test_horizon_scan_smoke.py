@@ -28,6 +28,14 @@ import duckdb
 import polars as pl
 import pytest
 from research.analysis.horizon_scan_config import load_config
+from research.analysis.horizon_scan_daily_ic import (
+    DAILY_IC_DIR_NAME,
+    DAILY_SPREAD_DIR_NAME,
+    ParquetDailyIcSink,
+    assert_daily_ic_reconciled,
+    daily_ic_success_fields,
+    reconcile_daily_ic,
+)
 from research.analysis.horizon_scan_permutation import (
     run_cross_sectional_permutation,
     run_lookahead_canary,
@@ -250,9 +258,23 @@ def test_full_phase_a_pipeline_runs_end_to_end_on_a_synthetic_lake(
         quantile_count=5,
         min_dates_per_cell=10,
     )
+    # Phase A keeps the Stage 0 series under `core/`, so the sink writes
+    # straight into the tmp run directory the publish step later renames.
+    run_dir_root = tmp_path
+    tmp_run_dir = run_dir_root / "run_id.tmp"
+    core_dir = tmp_run_dir / "core"
 
-    # --- A-2/A-3: core scan + global BH ---
-    rows = run_registry_scan(con, PRIMARY_REGISTRY, **scan_kwargs)
+    # --- A-2/A-3: core scan + global BH (+ Stage 0 daily IC persistence) ---
+    daily_sink = ParquetDailyIcSink(core_dir)
+    rows = run_registry_scan(con, PRIMARY_REGISTRY, **scan_kwargs, daily_sink=daily_sink)
+    daily_ic_summary = daily_sink.finalize()
+    daily_ic_reconcile = assert_daily_ic_reconciled(
+        reconcile_daily_ic(
+            rows,
+            daily_ic_dir=core_dir / DAILY_IC_DIR_NAME,
+            daily_spread_dir=core_dir / DAILY_SPREAD_DIR_NAME,
+        )
+    )
     assert len(rows) == len(PRIMARY_REGISTRY) * 4  # 4 universe x sample_kind combos
     assert all(r["status"] == "valid" for r in rows), rows
 
@@ -395,8 +417,6 @@ def test_full_phase_a_pipeline_runs_end_to_end_on_a_synthetic_lake(
         )
 
     # --- A-9: plots, markdown report, run_spec/manifest, atomic publish ---
-    run_dir_root = tmp_path
-    tmp_run_dir = run_dir_root / "run_id.tmp"
     plots_dir = tmp_run_dir / "plots"
     for card in cards:
         render_family_plots(
@@ -453,7 +473,10 @@ def test_full_phase_a_pipeline_runs_end_to_end_on_a_synthetic_lake(
     )
     assert run_spec["official"] is False
     write_run_spec(tmp_run_dir, run_spec)
-    (tmp_run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (tmp_run_dir / "manifest.json").write_text(
+        json.dumps({**manifest, "artifacts": daily_ic_summary.as_manifest_artifacts()}),
+        encoding="utf-8",
+    )
 
     core_dir = tmp_run_dir / "core"
     core_dir.mkdir(parents=True, exist_ok=True)
@@ -506,12 +529,23 @@ def test_full_phase_a_pipeline_runs_end_to_end_on_a_synthetic_lake(
     write_markdown_report(tmp_run_dir / "03a_horizon_scan_results.md", report_context)
 
     final_run_dir = run_dir_root / run_spec["run_id"]
-    published = publish_run(tmp_run_dir, final_run_dir, run_spec=run_spec)
+    published = publish_run(
+        tmp_run_dir,
+        final_run_dir,
+        run_spec=run_spec,
+        success_extra=daily_ic_success_fields(daily_ic_reconcile),
+    )
 
     assert published == final_run_dir
     assert not tmp_run_dir.exists()
     assert (final_run_dir / "_SUCCESS.json").is_file()
     assert (final_run_dir / "core" / "horizon_ic.parquet").is_file()
+    assert (final_run_dir / "core" / DAILY_IC_DIR_NAME).is_dir()
+    assert (final_run_dir / "core" / DAILY_SPREAD_DIR_NAME).is_dir()
+    success = json.loads((final_run_dir / "_SUCCESS.json").read_text(encoding="utf-8"))
+    assert success["daily_ic_reconciled"] is True
+    assert success["daily_ic_reconcile_max_abs_diff"] < 1e-12
+    assert daily_ic_summary.daily_ic.row_count == sum(r["n_dates"] for r in rows)
     assert (final_run_dir / "cards" / "family_cards.json").is_file()
     assert (final_run_dir / "03a_horizon_scan_results.md").is_file()
     assert len(list((final_run_dir / "plots").glob("*.png"))) == 7 * len(cards)

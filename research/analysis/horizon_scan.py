@@ -39,6 +39,14 @@ from research.analysis.horizon_scan_config import (
     load_config,
     validate_scan_engine,
 )
+from research.analysis.horizon_scan_daily_ic import (
+    DAILY_IC_DIR_NAME,
+    DAILY_SPREAD_DIR_NAME,
+    ParquetDailyIcSink,
+    assert_daily_ic_reconciled,
+    daily_ic_success_fields,
+    reconcile_daily_ic,
+)
 from research.analysis.horizon_scan_permutation import (
     run_cross_sectional_permutation,
     run_lookahead_canary,
@@ -557,6 +565,21 @@ def run_phase_a(
     run_spec["a0_manifest_content_hash"] = a0_manifest_content_hash
     run_spec["scan_engine"] = scan_engine
 
+    # The run directory is named from the run_spec alone, so it can be
+    # resolved here — before the scan — which is what lets the Stage 0 sink
+    # write straight into `core/` instead of buffering a run's worth of daily
+    # rows in memory. `write_run_spec` still creates and guards the directory
+    # later; this only computes the paths.
+    run_dir_root = (
+        output_root
+        / "phase=A"
+        / f"snapshot_date={resolution.snapshot_date}"
+        / f"source={resolution.source}"
+        / f"config_hash={config.config_hash}"
+    )
+    tmp_run_dir = run_dir_root / f"run_id={run_spec['run_id']}.tmp"
+    core_dir = tmp_run_dir / "core"
+
     timings.start("setup_and_register")
     con = connect(lake)
     register_a0_marts(con, lake)
@@ -575,8 +598,25 @@ def run_phase_a(
     q_threshold = float(config.raw["stats"]["global_bh_q"])
 
     timings.start("real_scan")
-    all_rows = run_registry_scan(con, primary_registry, **scan_kwargs) if primary_registry else []
-    short_rows = run_registry_scan(con, short_registry, **scan_kwargs) if short_registry else []
+    daily_sink = ParquetDailyIcSink(core_dir)
+    all_rows = (
+        run_registry_scan(con, primary_registry, **scan_kwargs, daily_sink=daily_sink)
+        if primary_registry
+        else []
+    )
+    short_rows = (
+        run_registry_scan(con, short_registry, **scan_kwargs, daily_sink=daily_sink)
+        if short_registry
+        else []
+    )
+    daily_ic_summary = daily_sink.finalize()
+    daily_ic_reconcile = assert_daily_ic_reconciled(
+        reconcile_daily_ic(
+            all_rows + short_rows,
+            daily_ic_dir=core_dir / DAILY_IC_DIR_NAME,
+            daily_spread_dir=core_dir / DAILY_SPREAD_DIR_NAME,
+        )
+    )
     timings.stop("real_scan")
 
     broad_common_survivor = [
@@ -746,14 +786,6 @@ def run_phase_a(
         for f in phase_a_families
     }
 
-    run_dir_root = (
-        output_root
-        / "phase=A"
-        / f"snapshot_date={resolution.snapshot_date}"
-        / f"source={resolution.source}"
-        / f"config_hash={config.config_hash}"
-    )
-    tmp_run_dir = run_dir_root / f"run_id={run_spec['run_id']}.tmp"
     plots_dir = tmp_run_dir / "plots"
     timings.start("artifact_render")
     for fam_name, result in family_results.items():
@@ -788,10 +820,13 @@ def run_phase_a(
         )
 
     write_run_spec(tmp_run_dir, run_spec)
+    run_manifest = {
+        **manifest,
+        "artifacts": {**manifest.get("artifacts", {}), **daily_ic_summary.as_manifest_artifacts()},
+    }
     (tmp_run_dir / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8"
+        json.dumps(run_manifest, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8"
     )
-    core_dir = tmp_run_dir / "core"
     core_dir.mkdir(parents=True, exist_ok=True)
     timings.write(tmp_run_dir / "timings.json")
     # §6.2: the broad/common-survivor primary rows must carry their BH fields
@@ -891,7 +926,12 @@ def run_phase_a(
     timings.write(tmp_run_dir / "timings.json")
 
     final_run_dir = run_dir_root / f"run_id={run_spec['run_id']}"
-    return publish_run(tmp_run_dir, final_run_dir, run_spec=run_spec)
+    return publish_run(
+        tmp_run_dir,
+        final_run_dir,
+        run_spec=run_spec,
+        success_extra=daily_ic_success_fields(daily_ic_reconcile),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

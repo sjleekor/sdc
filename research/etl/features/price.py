@@ -24,7 +24,7 @@ import duckdb
 
 from research.etl.config import LakeConfig
 from research.etl.mart import materialize, register_mart_view
-from research.etl.trading_panel import build_valid_session_sql
+from research.etl.trading_panel import build_market_model_sql, build_valid_session_sql
 
 PRICE_TABLE = "feat_price"
 
@@ -62,34 +62,7 @@ def build_price_sql(
             SELECT v.*, {ca_event} AS ca_event
             FROM valid v {quality_join}
         ),
-        market AS (
-            SELECT *, AVG(log_ret) OVER (PARTITION BY trade_date, market) AS market_ret
-            FROM valid_q
-        ),
-        modeled AS (
-            SELECT *,
-                REGR_SLOPE(log_ret, market_ret) OVER (
-                    PARTITION BY ticker, market ORDER BY trade_date
-                    ROWS BETWEEN 252 PRECEDING AND 1 PRECEDING
-                ) AS beta_252,
-                REGR_INTERCEPT(log_ret, market_ret) OVER (
-                    PARTITION BY ticker, market ORDER BY trade_date
-                    ROWS BETWEEN 252 PRECEDING AND 1 PRECEDING
-                ) AS alpha_252,
-                COUNT(CASE WHEN log_ret IS NOT NULL AND market_ret IS NOT NULL THEN 1 END)
-                    OVER (
-                        PARTITION BY ticker, market ORDER BY trade_date
-                        ROWS BETWEEN 252 PRECEDING AND 1 PRECEDING
-                    ) AS model_n_252
-            FROM market
-        ),
-        residuals AS (
-            SELECT *,
-                   CASE WHEN model_n_252 >= 252
-                        THEN log_ret - (alpha_252 + beta_252 * market_ret)
-                   END AS resid_ret
-            FROM modeled
-        ),
+        {build_market_model_sql("valid_q")},
         features AS (
             SELECT
                 trade_date, ticker, market, valid_session_idx,

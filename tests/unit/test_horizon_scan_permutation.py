@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import math
+
+import duckdb
 import numpy as np
 import polars as pl
 import pytest
@@ -203,3 +206,81 @@ def test_temporal_placebo_p_passes_when_real_t_is_extreme_under_the_null() -> No
     result = temporal_placebo_p(10.0, [1.0] * 99)
     assert result["p_temporal_nw"] == pytest.approx(1 / 100)
     assert result["temporal_null_pass"] is True
+
+
+# --- Stage 0: the replicate loops must stay out of daily_ic.parquet ---
+
+
+def _seed_replicate_panel(con) -> None:
+    rows = []
+    for session in range(1, 31):
+        d = f"2024-01-01' + {session - 1}"
+        for market in ("KOSPI", "KOSDAQ"):
+            for t in range(10):
+                wobble = 3.0 * math.sin(t + 0.7 * session)
+                label = float(t) * 2.0 + wobble
+                rows.append(
+                    f"(DATE '{d}, '{market[:1]}{t}', '{market}', {session}, "
+                    f"{float(t) + 0.01 * session}, {label}, {label}, "
+                    "true, true, true, true, true, false)"
+                )
+    con.execute(
+        "CREATE TABLE analysis_panel AS SELECT "
+        "trade_date, ticker, market, formation_session_idx, "
+        "CAST(px_feature AS DOUBLE) AS px_feature, "
+        "CAST(y_rank_5d AS DOUBLE) AS y_rank_5d, "
+        "CAST(raw_label_5d AS DOUBLE) AS raw_label_5d, "
+        "label_ok_5d, in_broad, in_tradable, common_formation_120d, "
+        "common_survivor_120d, ca_mask FROM (VALUES "
+        + ",".join(rows)
+        + ") t(trade_date, ticker, market, formation_session_idx, px_feature, "
+        "y_rank_5d, raw_label_5d, label_ok_5d, in_broad, in_tradable, "
+        "common_formation_120d, common_survivor_120d, ca_mask)"
+    )
+
+
+_REPLICATE_REGISTRY = [
+    {
+        "hypothesis_id": "fam|px_feature|cum|0|5",
+        "family": "fam",
+        "feature": "px_feature",
+        "scan_type": "cum",
+        "h_start": 0,
+        "h_end": 5,
+        "expected_sign": "+",
+        "hypothesis_role": "primary",
+    }
+]
+
+
+def test_cross_sectional_replicate_scan_never_passes_a_daily_sink(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The replicate loop reuses ``scan_cell`` verbatim and must keep doing so
+    without the Stage 0 side channel — 100 replicates x 412 cells of stored
+    daily IC is not an artifact anyone asked for, and A-6's null distribution
+    does not read it."""
+    from research.analysis import horizon_scan_permutation as perm
+
+    calls: list[dict] = []
+    real = perm.scan_cell
+
+    def _recorder(con, **kwargs):
+        calls.append(kwargs)
+        return real(con, **kwargs)
+
+    monkeypatch.setattr(perm, "scan_cell", _recorder)
+    con = duckdb.connect()
+    _seed_replicate_panel(con)
+    perm._scan_registry_once(
+        con,
+        _REPLICATE_REGISTRY,
+        panel_view="analysis_panel",
+        sample_start="2024-01-01",
+        min_names=5,
+        min_names_for_spread=5,
+        quantile_count=5,
+        min_dates_per_cell=5,
+    )
+    assert calls
+    assert all(kwargs.get("daily_sink") is None for kwargs in calls)

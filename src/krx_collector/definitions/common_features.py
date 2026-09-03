@@ -1341,6 +1341,22 @@ def default_common_feature_catalog() -> list[CommonFeatureCatalogEntry]:
             ),
         ),
         _feature(
+            "commodity_wti_spot_level",
+            "WTI 현물 레벨",
+            "commodity",
+            "USD/bbl",
+            "level",
+            "commodity_wti_fred",
+            description=(
+                "feature_date is a KRX session date; the value is the latest FRED "
+                "DCOILWTICO spot price available by that session under the "
+                "same_krx_session_morning policy, i.e. the NY t-1 close. Added "
+                "alongside commodity_wti_spot_ret_20d because a per-session oil "
+                "shock (ln(wti_t / wti_t-1)) cannot be recovered from a 20-day "
+                "return: macro_beta_wti regresses residual stock returns on it."
+            ),
+        ),
+        _feature(
             "commodity_wti_fred_ret_20d",
             "WTI 20일 수익률(FRED)",
             "commodity",

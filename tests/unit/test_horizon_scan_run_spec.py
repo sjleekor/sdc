@@ -8,6 +8,7 @@ import pytest
 from research.analysis.horizon_scan_config import HorizonScanConfig, load_config
 from research.analysis.horizon_scan_run_spec import (
     REQUIRED_A0_MARTS,
+    REQUIRED_RUN_ARTIFACTS,
     PreflightError,
     assert_a0_manifest_matches,
     assert_family_registry_complete,
@@ -315,3 +316,41 @@ def test_publish_run_refuses_to_overwrite_an_existing_final_dir(tmp_path: Path) 
     final_dir.mkdir()
     with pytest.raises(FileExistsError, match="immutable"):
         publish_run(tmp_run_dir, final_dir, run_spec={})
+
+
+# --- Stage 0: _SUCCESS.json extras, REQUIRED_RUN_ARTIFACTS unchanged (§2.5) ---
+
+
+def test_required_run_artifacts_still_names_only_the_pre_stage_0_pair() -> None:
+    """A run published before Stage 0 has no ``daily_ic.parquet``; adding it to
+    the required list would retroactively invalidate every one of them."""
+    assert REQUIRED_RUN_ARTIFACTS == ("run_spec.json", "manifest.json")
+
+
+def test_publish_run_records_the_daily_ic_reconciliation_in_success(tmp_path: Path) -> None:
+    tmp_run_dir = _seed_tmp_run_dir(tmp_path)
+    (tmp_run_dir / "core" / "daily_ic.parquet" / "family=fam").mkdir(parents=True)
+    (tmp_run_dir / "core" / "daily_ic.parquet" / "family=fam" / "f.parquet").write_text(
+        "daily", encoding="utf-8"
+    )
+    published = publish_run(
+        tmp_run_dir,
+        tmp_path / "run_id",
+        run_spec={"run_id": "r", "config_hash": "c"},
+        success_extra={"daily_ic_reconciled": True, "daily_ic_reconcile_max_abs_diff": 0.0},
+    )
+    success = json.loads((published / "_SUCCESS.json").read_text(encoding="utf-8"))
+    assert success["daily_ic_reconciled"] is True
+    assert success["daily_ic_reconcile_max_abs_diff"] == 0.0
+    assert success["content_hash"] == compute_run_content_hash(published)
+
+
+def test_publish_run_omits_the_daily_ic_fields_when_no_sink_ran(tmp_path: Path) -> None:
+    """A run directory with no ``daily_ic`` (an older published run, or a
+    caller that never built a sink) still publishes — the manifest and
+    _SUCCESS keys are additive, not required."""
+    published = publish_run(
+        _seed_tmp_run_dir(tmp_path), tmp_path / "run_id", run_spec={"run_id": "r"}
+    )
+    success = json.loads((published / "_SUCCESS.json").read_text(encoding="utf-8"))
+    assert "daily_ic_reconciled" not in success

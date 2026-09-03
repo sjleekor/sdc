@@ -115,6 +115,104 @@ _PHASE_B_FIXED_PROTOCOL_VALUES = {
 }
 _PHASE_B_EVENT_BUCKETS = [[0, 3], [3, 5], [5, 10], [10, 20], [20, 40], [40, 60]]
 
+# 01_design/03_stage1b §3.2 — the conditional-IC contract's own frozen shape.
+_PHASE_C_PRIMARY_PAIR_COUNT = 15
+_PHASE_C_REFERENCE_PAIR_COUNT = 2
+_PHASE_C_PAIR_ROLES = {"primary", "reference"}
+
+
+def _validate_phase_c(raw: dict[str, Any]) -> None:
+    """Check the Phase C block, when one carries preregistered pairs.
+
+    The base config and the expansion overlay both have a ``phase_c`` block
+    with nothing but an open policy and dormant N8 regime candidates; only a
+    layer that actually registers ``pairs`` is a conditional-IC contract, and
+    only that one is checked here.
+
+    What these checks protect is the BH population. ``m`` for Phase C is
+    exactly the 15 primary pairs — a pair silently dropped by a typo'd family
+    name, or an extra one added later, changes every q-value in the run. The
+    same applies to the regimes: a pair naming a regime that does not exist
+    would be scanned against nothing.
+    """
+    phase_c = raw.get("phase_c")
+    if not isinstance(phase_c, dict) or "pairs" not in phase_c:
+        return
+
+    registered = raw.get("families", [])
+    horizons_by_family: dict[str, set[int]] = {
+        f["family"]: set(f.get("primary_horizon_set", [])) for f in registered
+    }
+
+    regimes = phase_c.get("regimes", [])
+    regime_ids = [r.get("id") for r in regimes]
+    if len(set(regime_ids)) != len(regime_ids) or any(not rid for rid in regime_ids):
+        raise ValueError("phase_c.regimes ids must be unique and non-empty")
+    regime_id_set = set(regime_ids)
+
+    pairs = phase_c["pairs"]
+    pair_ids = [p.get("id") for p in pairs]
+    if len(set(pair_ids)) != len(pair_ids) or any(not pid for pid in pair_ids):
+        raise ValueError("phase_c.pairs ids must be unique and non-empty")
+
+    role_counts = {
+        role: sum(1 for p in pairs if p.get("role") == role) for role in _PHASE_C_PAIR_ROLES
+    }
+    unknown_roles = sorted({p.get("role") for p in pairs} - _PHASE_C_PAIR_ROLES)
+    if unknown_roles:
+        raise ValueError(f"phase_c.pairs has unknown roles: {unknown_roles}")
+    if role_counts["primary"] != _PHASE_C_PRIMARY_PAIR_COUNT:
+        raise ValueError(
+            f"phase_c must register exactly {_PHASE_C_PRIMARY_PAIR_COUNT} primary pairs, "
+            f"got {role_counts['primary']}"
+        )
+    if role_counts["reference"] != _PHASE_C_REFERENCE_PAIR_COUNT:
+        raise ValueError(
+            f"phase_c must register exactly {_PHASE_C_REFERENCE_PAIR_COUNT} reference pairs, "
+            f"got {role_counts['reference']}"
+        )
+
+    def _check_cell(where: str, entry: dict[str, Any]) -> None:
+        family = entry.get("family")
+        if family not in horizons_by_family:
+            raise ValueError(f"{where}: unknown family {family!r}")
+        regime = entry.get("regime")
+        if regime not in regime_id_set:
+            raise ValueError(f"{where}: unknown regime {regime!r}")
+        cell = entry.get("cell", {})
+        if cell.get("scan_type") != "cum":
+            raise ValueError(f"{where}: only cumulative cells are registered, got {cell!r}")
+        # §3.1: the cell is picked from the family's own preregistered primary
+        # horizons, so a Phase C result can never rest on a horizon Phase A/B
+        # never judged.
+        if cell.get("h_end") not in horizons_by_family[family]:
+            raise ValueError(
+                f"{where}: h_end={cell.get('h_end')} is not in {family}'s primary_horizon_set "
+                f"{sorted(horizons_by_family[family])}"
+            )
+
+    for pair in pairs:
+        _check_cell(f"phase_c.pairs[{pair['id']}]", pair)
+        if pair.get("direction") not in {"+", "-", None}:
+            raise ValueError(f"phase_c.pairs[{pair['id']}]: direction must be '+', '-' or null")
+    for index, entry in enumerate(phase_c.get("exploratory_grid", {}).get("extra", [])):
+        _check_cell(f"phase_c.exploratory_grid.extra[{index}]", entry)
+
+    # N8's dormant regime candidates are a different list with a different
+    # role; a pair pointing at one would quietly open a regime the expansion
+    # round deliberately left closed (00_overview §1.4).
+    candidate_codes = {c.get("feature_code") for c in phase_c.get("regime_candidates", [])}
+    overlap = candidate_codes & regime_id_set
+    if overlap:
+        raise ValueError(
+            f"phase_c.regime_candidates must stay dormant, but {sorted(overlap)} is also a regime"
+        )
+
+    if not isinstance(phase_c.get("sample_start"), date):
+        raise ValueError("phase_c.sample_start must be a date")
+    if not isinstance(phase_c.get("placebo", {}).get("seed"), int):
+        raise ValueError("phase_c.placebo.seed must be an integer")
+
 
 def validate_config(raw: dict[str, Any]) -> None:
     required = {
@@ -203,8 +301,7 @@ def validate_config(raw: dict[str, Any]) -> None:
             raise ValueError(f"{family['family']}: event_buckets differs from the frozen grid")
         if (
             schema_version == 4
-            and
-            family.get("role") == "ready"
+            and family.get("role") == "ready"
             and family.get("family") != "flow_individual_netbuy_to_volume"
             and family.get("expected_sign") not in {"+", "-"}
         ):
@@ -250,6 +347,24 @@ def validate_config(raw: dict[str, Any]) -> None:
         raise ValueError("schema v4 phase_b.primary_candidate_count_max must be 38")
     if phase_b_count != max_candidates:
         raise ValueError(f"Phase B candidate count must be {max_candidates}, got {phase_b_count}")
+    _validate_registered_at(raw)
+    _validate_phase_c(raw)
+
+
+def _validate_registered_at(raw: dict[str, Any]) -> None:
+    """A preregistration layer's date must be a real date, not a placeholder.
+
+    ``registered_at`` goes into the config hash, so committing a layer that
+    still reads "TBD" (or an ISO string YAML never parsed) would freeze a
+    placeholder into the contract's identity (review M7).
+    """
+    prereg = raw.get("preregistration")
+    if not isinstance(prereg, dict):
+        return
+    if not isinstance(prereg.get("registered_at"), date):
+        raise ValueError(
+            "preregistration.registered_at must be a date, got " f"{prereg.get('registered_at')!r}"
+        )
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:

@@ -219,3 +219,38 @@ def test_flow_short_balance_null_before_coverage(flow_con) -> None:
 
 def test_flow_metric_codes_count() -> None:
     assert len(flow.METRIC_CODES) == 7
+
+
+# --- A0 input lineage: feat_price's SQL text is a cache key ---
+
+
+def test_feat_price_sql_text_is_frozen() -> None:
+    """``mart._sql_hash`` keys the A0 mart cache on this exact string, and every
+    published Phase A/B run records the lineage that follows from it.
+
+    So a change here is never cosmetic: it invalidates the materialized mart
+    and detaches new runs from the canonical ones. These two hashes are the
+    text as of the Stage 1a work, which extracted the shared market-model CTE
+    into ``trading_panel.build_market_model_sql`` — extraction only, byte for
+    byte. Update them deliberately, with the rebuild that implies.
+    """
+    import hashlib
+
+    def _hash(**kwargs) -> str:
+        return hashlib.sha256(price.build_price_sql(**kwargs).encode()).hexdigest()
+
+    assert _hash() == "6886ddd45d33c6a13f0d1fd1653a8dd37518bfaa5189ae1227f853bb3b2a4bf3"
+    assert (
+        _hash(quality_view="dim_price_quality_daily")
+        == "110617482d64a50d4ef92ad70defcc23b5b276e2a025452f92a845ccbacec228"
+    )
+
+
+def test_feat_price_and_feat_macro_exposure_share_one_market_model() -> None:
+    """``px_idio_vol_60d`` and every ``macro_beta_*`` are statements about the
+    same ``resid_ret``; they must not drift into two definitions of it."""
+    from research.etl.features.macro_exposure import build_macro_exposure_sql
+    from research.etl.trading_panel import build_market_model_sql
+
+    assert build_market_model_sql("valid_q") in price.build_price_sql()
+    assert build_market_model_sql("valid") in build_macro_exposure_sql()

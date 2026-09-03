@@ -10,10 +10,12 @@ known by ``t`` are used.
 Grain after pivot: one row per ``feature_date`` (= trade_date ``t``); the panel
 join broadcasts it across all tickers on that date (etl_00 §4.1). ``cf_`` prefix.
 
-Coverage caveat (etl_00 §1.1, §3.5): the daily history starts 2025-12-15, so for
-the 2015+ training panel this is mostly NULL -> a *secondary* "market-regime"
-feature, not a core one. The ``*_isna`` flags (P5) carry that, and the design
-keeps only the join path ready for the eventual long backfill (3rd milestone).
+Coverage (measured on snapshot 2026-08-23, not the stale figure this docstring
+carried): the daily series start **2014-06-16** and the monthly macro ones
+**2013-06-20** — the backfill this file was written before has since happened.
+So over the 2015+ training panel these are populated, not mostly NULL. The
+``*_isna`` flags (P5) still carry per-feature gaps, which are now warm-up
+windows (a 20-day return needs 20 prior sessions) rather than a missing history.
 
 See ``etl_00`` §3.5, ``etl_03_implementation_plan.md`` §4 (P8).
 """

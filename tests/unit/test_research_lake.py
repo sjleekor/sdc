@@ -162,3 +162,43 @@ def test_mart_cache_accepts_legacy_metadata_without_sql_hash(
     metadata_path.write_text(json.dumps(legacy), encoding="utf-8")
 
     mart.materialize(con, synthetic_lake, "t", "SELECT 1 AS a")
+
+
+# --- persisted derived marts (Stage 1a §3) ---
+
+
+def test_register_persisted_derived_mart_binds_the_snapshots_own_parquet(
+    synthetic_lake: LakeConfig,
+) -> None:
+    """``feat_macro_exposure`` and the readiness gate that decides whether its
+    families are ready must read the same ``common_feature_daily_fact``. This
+    reads the parquet ``compute_all --from-step marts`` persisted rather than
+    rebuilding the fact from raw, which is the only way to guarantee that."""
+    table_dir = synthetic_lake.derived_mart_root / "common_feature_daily_fact"
+    table_dir.mkdir(parents=True, exist_ok=True)
+    writer = duckdb.connect()
+    writer.execute(
+        f"COPY (SELECT DATE '2024-01-02' AS feature_date, 'fx_usdkrw_level' AS feature_code, "
+        f"1300.0 AS value_numeric) TO '{(table_dir / 'part-000000.parquet').as_posix()}' "
+        "(FORMAT PARQUET)"
+    )
+    writer.close()
+
+    con = duckdb.connect()
+    name = lake.register_persisted_derived_mart(con, synthetic_lake, "common_feature_daily_fact")
+
+    assert name == "common_feature_daily_fact"
+    assert con.execute("SELECT feature_code FROM common_feature_daily_fact").fetchall() == [
+        ("fx_usdkrw_level",)
+    ]
+
+
+def test_register_persisted_derived_mart_raises_when_the_snapshot_has_none(
+    synthetic_lake: LakeConfig,
+) -> None:
+    """A snapshot whose marts step never ran must fail loudly here — the Phase B
+    orchestrator turns that into ``blocked`` for the dependent families, which
+    is not the same as quietly computing a different fact."""
+    con = duckdb.connect()
+    with pytest.raises(FileNotFoundError, match="common_feature_daily_fact"):
+        lake.register_persisted_derived_mart(con, synthetic_lake, "common_feature_daily_fact")

@@ -1,15 +1,42 @@
 # 00. 진행 상태 — 이 디렉터리를 이어받는 사람이 먼저 읽는 문서
 
-- 작성일: 2026-08-29 (성능 HTML 보고서·parity 후속·공시 정기 수집 반영, v0.11.5 배포 완료)
-- 브랜치: `main` (`v0.11.5`, working tree clean)
+- 작성일: 2026-08-30 (매크로 라운드 단계 0·1a·1b 실행 결과와 I13 native 엔진 결함 수정 반영).
+  2026-09-03에 그 라운드의 코드·문서·config를 한 커밋으로 `main`에 올렸다.
+- 브랜치: `main` (`v0.11.5` + 매크로 라운드 커밋. prod 이미지는 `v0.11.5` 그대로 — 이 라운드는
+  `research/`와 카탈로그 정의만 바꿨고 수집기 동작은 건드리지 않았다)
 - 목적: 문서가 8개(합계 30만 자 이상)라 어디까지 왔는지 한눈에 안 보인다. 이 파일은
   **지금 상태와 다음에 할 일만** 적는다. 근거·설계는 각 문서로 넘긴다.
 
 ## 0. 2026-08-29 현재 상태
 
-확장 config `889c3e83…`의 Phase A → B → AB와 T2 validation까지 끝냈다. **Phase C는 열지
-않는다.** 실제 부호 반전은 `own_insider_filing_activity`와 `px_resid_mom_12_1` 두 family에만
-있었고 크기가 각각 약 ±0.003, ±0.01이며 discovery가 없었다. N8 regime은 사전등록만 유지한다.
+확장 config `889c3e83…`의 Phase A → B → AB와 T2 validation까지 끝냈다.
+
+**Phase C는 이 확장 라운드에서는 열지 않았다.** 실제 부호 반전은 `own_insider_filing_activity`와
+`px_resid_mom_12_1` 두 family에만 있었고 크기가 각각 약 ±0.003, ±0.01이며 discovery가 없었다.
+N8 regime은 사전등록만 유지한다.
+
+> **후속 (2026-08-30): 매크로 라운드가 Phase C를 열었고, 조건이 충족됐다.** 부호 반전을 근거로
+> 여는 대신, `docs/dev/20260829_macro_features/`가 국면별 조건부 IC를 **사전등록 계약**으로
+> 새로 등록하고(config `horizon_scan_macro_20260829.yaml`, hash `236d0d35…`) 실행했다.
+>
+> | phase | run_id | 결과 |
+> |---|---|---|
+> | A | `20260830T085718-efd35e70` | 412 cell valid, discovery 32 — **canonical A와 exact match** |
+> | B | `20260830T100518-efd35e70` | 102 cell 전부 ready·valid (매크로 24 포함) |
+> | AB | `20260830T122850-efd35e70` | 177 가설, discovery 103, `screen_pass` 53 |
+> | C | `20260830T122850-phasec` | primary 15쌍, **`screen_pass` 4** (P3·P9·P12·P15) |
+>
+> **`12`가 정한 "경제적으로 설명할 수 있는 조건부 패턴" 조건이 처음으로 충족됐다.**
+> `px_reversal_5d`×`vix_high`(방향까지 사전등록대로), `px_turnover_shock`×`liq_high`,
+> `flow_foreign_netbuy_to_volume`×`liq_high`, `px_market_beta`×`market_up` 넷이다.
+> 국면 circular-shift placebo가 15쌍에서 BH와 한 번도 엇갈리지 않았다.
+> **기존 Phase A discovery 변화 0개**, 공통 153 가설의 등급 변화 0개.
+> 해설은 `01_design/05_results_stage1a_20260830.md`·`05_results_stage1b_20260830.md`.
+
+**부수 효과: Stage 0 `daily_ic.parquet`이 생겼다.** 본 스캔이 만들고 버리던 일별 IC 시계열을
+저장한다(`08` §4.3 Stage 3, `00_읽는_법` §7(a)의 오래된 공백). 요약 통계는 하나도 바뀌지 않는다 —
+sink를 주지 않으면 이전과 완전히 같은 경로이고, 저장값에서 요약을 재계산해 대조하는 검사가
+run마다 돈다(`_SUCCESS.json`의 `daily_ic_reconciled`).
 
 | phase | canonical run_id | 핵심 결과 |
 |---|---|---|
@@ -412,7 +439,7 @@ Phase A와 공유하는 `per_date_market_rank_ic` 내부를 고쳐야 한다. **
 ## 6. 상태 확인 명령
 
 ```bash
-uv run pytest tests/unit -q                                   # 1,353개 통과(2026-08-28 로컬 확인)
+uv run pytest tests/unit -q                                   # 1,535개 통과(2026-09-03 로컬 확인, 매크로 라운드 포함)
 uv run ruff check src/ tests/                                 # research/의 fin_vs_price_corr는 기존 미해결
 
 # raw가 붙어 있는지 — 두 테이블이 나와야 한다 (안 나오면 T2가 다시 막힌 상태)
@@ -478,4 +505,24 @@ K-0c 약관 게이트는 KIS·KRX Open API·공공데이터포털의 현재 이�
    이용, 출처 표시, 계약 종료 뒤 이용 중단 조건으로 통과했다. 공공데이터포털 데이터셋
    `15094808`은 `이용허락범위 제한 없음`을 다시 확인했다.
 
-1~6과 8~9는 끝났다. **남은 것은 7 하나, 2026년 10~11월 T1·T2 h60 one-shot holdout뿐이다.**
+1~6과 8~9는 끝났다. **이 목록에서 남은 것은 7 하나, 2026년 10~11월 T1·T2 h60 one-shot holdout뿐이다.**
+
+10. ~~**매크로 라운드 (2026-08-29 시작)**~~ — **완료 2026-08-30**.
+    `docs/dev/20260829_macro_features/`. 코드·사전등록 계약·실행·결과 문서가 모두 끝났다.
+
+    | | 상태 |
+    |---|---|
+    | PR-0 Stage 0 `daily_ic` 저장 | 완료 (parity 하네스 비교 포함) |
+    | PR-1a-1 `commodity_wti_spot_level` 카탈로그 | 완료 |
+    | PR-1a-2 `feat_macro_exposure` 마트 | 완료 (snapshot 2026-08-23 persist, 7,024,118행) |
+    | PR-1a-3 overlay 사전등록 `236d0d35…` | 완료 |
+    | PR-1b `newey_west_ols` + Phase C 모듈 | 완료 |
+    | 실행 1~3a (fact·마트 빌드, 국면 사전 계산) | 완료 |
+    | 실행 4~9 (A0 재빌드 → A → B → AB → C → parity → 결과 문서) | **완료 2026-08-30** |
+
+    **후속 둘도 끝냈다.**
+
+    - **I13 native 엔진 결함 수정** (§9.9) — 상수 횡단면에서 NaN 대신 가짜 상관이 나오던 것을 고치고
+      계보 전체를 재실행했다. 판정 변화 0개, legacy/native `daily_ic` parity가 행 집합까지 일치한다.
+    - **§4 진단 반영** — secondary 진단이 **잔차 정의가 옳았음을 직접 보였다**(`macro_beta_vix`·
+      `macro_beta_sp500_lag`은 원수익률로 재면 부호가 뒤집힌다). 상관 진단은 `|ρ| ≥ 0.7` 쌍 0개.

@@ -38,6 +38,18 @@ ARTIFACTS = (
     ("phase_ab_overlay", "AB", "phase_a_card_overlay.parquet"),
 )
 
+# Stage 0's per-date series. Optional because every run published before it
+# existed has none, and the harness still has to be able to compare those.
+# Only the main scan writes it — the replicate loops take no sink — so this
+# compares exactly the cells `phase_*_horizon_ic` summarizes, one row per date
+# instead of one per cell.
+OPTIONAL_ARTIFACTS = (
+    ("phase_a_daily_ic", "A", "core/daily_ic.parquet"),
+    ("phase_a_daily_spread", "A", "core/daily_spread.parquet"),
+    ("phase_b_daily_ic", "B", "daily_ic.parquet"),
+    ("phase_b_daily_spread", "B", "daily_spread.parquet"),
+)
+
 
 def _normalise_scalar(value: Any) -> str:
     if isinstance(value, np.ndarray):
@@ -62,6 +74,7 @@ def _sort_frame(frame: pd.DataFrame) -> pd.DataFrame:
         "sample_kind",
         "offset",
     ]
+    preferred = [*preferred, "trade_date"]  # daily_ic has many rows per cell
     keys = [column for column in preferred if column in frame.columns]
     if not keys:
         keys = list(frame.columns)
@@ -72,9 +85,25 @@ def _sort_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return sortable.sort_values(keys, kind="mergesort", na_position="first").reset_index(drop=True)
 
 
+def _read_artifact(path: Path) -> pd.DataFrame:
+    """Read one parquet file, or a whole hive-partitioned tree as one frame.
+
+    ``daily_ic.parquet`` is a directory of ``family=<f>/<feature>.parquet``.
+    The files are concatenated in sorted path order rather than handed to
+    pandas as a dataset, so the ``family=`` directory never turns into a
+    second, partition-derived ``family`` column beside the real one.
+    """
+    if path.is_dir():
+        files = sorted(p for p in path.rglob("*.parquet") if p.is_file())
+        if not files:
+            raise FileNotFoundError(f"no parquet files under {path}")
+        return pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
+    return pd.read_parquet(path)
+
+
 def compare_parquet(name: str, legacy_path: Path, native_path: Path) -> ArtifactResult:
-    legacy = pd.read_parquet(legacy_path)
-    native = pd.read_parquet(native_path)
+    legacy = _read_artifact(legacy_path)
+    native = _read_artifact(native_path)
     if legacy.shape != native.shape:
         return ArtifactResult(
             name, len(legacy), len(legacy.columns), 0, 0, math.inf, False,
@@ -212,6 +241,23 @@ def build_report(
         compare_parquet(name, legacy[phase] / relative, native[phase] / relative)
         for name, phase, relative in ARTIFACTS
     ]
+    skipped: list[str] = []
+    for name, phase, relative in OPTIONAL_ARTIFACTS:
+        legacy_path = legacy[phase] / relative
+        native_path = native[phase] / relative
+        if not legacy_path.exists() and not native_path.exists():
+            skipped.append(name)
+            continue
+        if legacy_path.exists() != native_path.exists():
+            # One engine wrote it and the other did not — that is a real
+            # asymmetry between the two runs, not a missing-input condition.
+            detail = (
+                f"present in only one run: legacy={legacy_path.exists()}, "
+                f"native={native_path.exists()}"
+            )
+            results.append(ArtifactResult(name, 0, 0, 0, 0, math.inf, False, detail))
+            continue
+        results.append(compare_parquet(name, legacy_path, native_path))
 
     legacy_a_spec = _read_json(legacy_a / "run_spec.json")
     native_a_spec = _read_json(native_a / "run_spec.json")
@@ -275,6 +321,7 @@ def build_report(
             "joint_null_contribution": "none" if sue_insufficient else "present",
         },
         "artifacts": [asdict(result) for result in results],
+        "skipped_artifacts": skipped,
         "ab_manifest": ab_manifest,
         "passed": passed,
     }
@@ -300,6 +347,14 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"| `{artifact['name']}` | {artifact['rows']} | "
             f"{artifact['max_scaled_delta']:.3e} | "
             f"{'통과' if artifact['passed'] else '실패'} |"
+        )
+    if report.get("skipped_artifacts"):
+        lines.extend(
+            [
+                "",
+                "두 run 모두 다음 artifact가 없어 비교하지 않았습니다 (Stage 0 이전 run): "
+                + ", ".join(f"`{name}`" for name in report["skipped_artifacts"]),
+            ]
         )
     lines.extend(
         [

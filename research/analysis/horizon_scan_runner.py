@@ -19,6 +19,7 @@ import duckdb
 import numpy as np
 import polars as pl
 
+from research.analysis.horizon_scan_daily_ic import DailyIcSink, normalize_cell_identity
 from research.etl.metrics import (
     benjamini_hochberg,
     choose_nw_lag,
@@ -514,6 +515,8 @@ def scan_cell(
     compute_spread: bool = True,
     scan_engine: str = "legacy",
     formation_frame: pl.DataFrame | None = None,
+    cell_identity: dict[str, Any] | None = None,
+    daily_sink: DailyIcSink | None = None,
 ) -> dict[str, Any]:
     """One (feature, horizon/bucket, universe, sample_kind) cell's IC/NW/spread.
 
@@ -526,7 +529,17 @@ def scan_cell(
     stay ``None``) — the A-6 permutation/placebo replicate loops call this
     tens of thousands of times and never read the spread fields, so skipping
     it is a pure performance win with no effect on IC/NW/BH.
+
+    ``daily_sink`` (Stage 0) is a pure side channel: the per-date frames this
+    function already built are handed to it once the cell is ``valid``, and
+    nothing about the returned dict or the path that produced it changes.
+    Omitting it — as every replicate, period-split and lag1 caller does —
+    leaves the old behaviour byte for byte. ``cell_identity`` is the
+    normalized registry identity written onto those rows and is required
+    whenever a sink is given.
     """
+    if daily_sink is not None and cell_identity is None:
+        raise ValueError("daily_sink requires cell_identity")
     lag = choose_nw_lag(
         scan_type=scan_type,
         horizon=h_end if scan_type == "cum" else None,
@@ -641,6 +654,8 @@ def scan_cell(
         }
     )
 
+    market_spread: pl.DataFrame | None = None
+    daily_spread: pl.DataFrame | None = None
     if compute_spread:
         market_spread = per_date_market_quantile_spread(
             frame,
@@ -657,6 +672,14 @@ def scan_cell(
             result["q5_spread_aligned"] = sign * q5_raw
 
     result["status"] = "valid"
+    if daily_sink is not None:
+        daily_sink.emit(
+            cell_identity,
+            daily=daily,
+            market_ic=market_ic,
+            daily_spread=daily_spread,
+            market_spread=market_spread,
+        )
     return result
 
 
@@ -801,13 +824,27 @@ def run_registry_scan(
     universe_sample_combos: tuple[tuple[str, str], ...] = UNIVERSE_SAMPLE_COMBOS,
     scan_engine: str = "legacy",
     reuse_formation_frames: bool = True,
+    daily_sink: DailyIcSink | None = None,
 ) -> list[dict[str, Any]]:
     """Run :func:`scan_cell` for every registered hypothesis across every
     (universe, sample_kind) combo (A-2 steps 4-5) — one row per combination,
     each carrying the hypothesis's own registry fields alongside the cell's
     computed stats so downstream stages never need to re-join back to config.
+
+    ``daily_sink`` (Stage 0) persists each valid cell's per-date IC/spread
+    series. This is the *only* ``scan_cell`` caller that passes one, which is
+    what keeps the replicate loops, the period-split scans and the direct lag1
+    calls out of ``daily_ic.parquet`` (and their cost unchanged). Flushing
+    happens on the same per-feature boundary the formation-frame reuse already
+    works in, so the sink's peak memory is one feature's daily rows.
     """
     rows: list[dict[str, Any]] = []
+
+    def _identity(hyp: dict[str, Any], universe: str, sample_kind: str) -> dict[str, Any] | None:
+        if daily_sink is None:
+            return None
+        return normalize_cell_identity(hyp, universe=universe, sample_kind=sample_kind)
+
     if reuse_formation_frames and registry:
         # A feature frame is only live while that feature's hypotheses are
         # being scanned. Holding the whole registry's frames here multiplies
@@ -868,8 +905,12 @@ def run_registry_scan(
                         expected_sign=hyp.get("expected_sign"),
                         scan_engine=scan_engine,
                         formation_frame=frame,
+                        cell_identity=_identity(hyp, universe, sample_kind),
+                        daily_sink=daily_sink,
                     )
                     rows.append({**hyp, **cell})
+            if daily_sink is not None:
+                daily_sink.flush_feature(feature)
         return rows
 
     for hyp in registry:
@@ -890,8 +931,18 @@ def run_registry_scan(
                 min_dates_per_cell=min_dates_per_cell,
                 expected_sign=hyp.get("expected_sign"),
                 scan_engine=scan_engine,
+                cell_identity=_identity(hyp, universe, sample_kind),
+                daily_sink=daily_sink,
             )
             rows.append({**hyp, **cell})
+    # Without frame reuse the registry is walked in its own order, so a
+    # feature's hypotheses need not be contiguous; flushing per feature here
+    # would risk a second write for the same file. Flush all features once the
+    # walk is over instead — the memory argument above only applies to the
+    # reuse path, which is what every real run uses.
+    if daily_sink is not None:
+        for feature in dict.fromkeys(entry["feature"] for entry in registry):
+            daily_sink.flush_feature(feature)
     return rows
 
 

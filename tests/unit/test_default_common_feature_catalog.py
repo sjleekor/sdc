@@ -137,6 +137,7 @@ def test_default_common_feature_catalog_contains_phase1_mvp_features() -> None:
     assert "fx_usdkrw_level" in feature_codes
     assert "commodity_wti_ret_20d" in feature_codes
     assert "commodity_wti_spot_ret_20d" in feature_codes
+    assert "commodity_wti_spot_level" in feature_codes
     assert "rate_us10y_level" in feature_codes
 
 
@@ -678,3 +679,38 @@ def test_the_daily_stale_limit_clears_the_longest_krx_closure() -> None:
     assert DAILY_MAX_STALE_BUSINESS_DAYS > longest_observed_closure_business_days
     # ...and not so generous that a dead collector goes unnoticed for weeks.
     assert DAILY_MAX_STALE_BUSINESS_DAYS <= 10
+
+
+def test_default_common_feature_wti_spot_level_is_registered_for_macro_betas() -> None:
+    """The catalog carried WTI only as a 20-day return, from which a per-session
+    oil shock cannot be recovered — ``macro_beta_wti`` regresses residual stock
+    returns on ``ln(wti_t / wti_t-1)``, so it needs the level.
+
+    See ``docs/dev/20260829_macro_features/01_design/02_stage1a_exposure_beta_families.md``
+    §2.2/§2.5. Reading the FRED spot series (not the FDR CL=F futures fallback)
+    is deliberate: it is the one the spot return feature already uses.
+    """
+    series_by_id = {item.series_id: item for item in default_common_feature_series()}
+    catalog_by_code = {item.feature_code: item for item in default_common_feature_catalog()}
+
+    level = catalog_by_code["commodity_wti_spot_level"]
+    assert level.active is True
+    assert level.transform_code == "level"
+    assert level.category == "commodity"
+    assert level.frequency == "D"
+    assert level.input_series_ids == ("commodity_wti_fred",)
+    # Every other level feature reports its source series' own unit.
+    assert level.unit == series_by_id["commodity_wti_fred"].unit
+
+    # The pairing in §2.2 rests on this policy: the value on KRX session t is
+    # the NY t-1 close, which is what makes beta_wti a spillover exposure.
+    assert series_by_id["commodity_wti_fred"].availability_policy == "same_krx_session_morning"
+
+
+def test_default_common_feature_wti_spot_level_leaves_the_existing_wti_features_alone() -> None:
+    catalog_by_code = {item.feature_code: item for item in default_common_feature_catalog()}
+
+    assert catalog_by_code["commodity_wti_ret_20d"].input_series_ids == ("commodity_wti",)
+    assert catalog_by_code["commodity_wti_spot_ret_20d"].input_series_ids == ("commodity_wti_fred",)
+    assert catalog_by_code["commodity_wti_spot_ret_20d"].transform_code == "ret_20d"
+    assert catalog_by_code["commodity_wti_fred_ret_20d"].active is False

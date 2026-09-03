@@ -416,3 +416,73 @@ def test_assert_receipt_value_pairing_verified_raises_on_mismatch() -> None:
     )
     with pytest.raises(PreflightError, match="receipt-value pairing failed"):
         assert_receipt_value_pairing_verified(report)
+
+
+# --- macro overlay readiness (02_stage1a §3, 05_preregistration_record) ---
+
+
+def _macro_config():
+    from research.analysis.horizon_scan_config import CONFIG_PATH
+
+    return load_config(CONFIG_PATH.with_name("horizon_scan_macro_20260829.yaml"))
+
+
+_MACRO_FAMILIES = {
+    "macro_beta_usdkrw",
+    "macro_beta_wti",
+    "macro_beta_kr10y",
+    "macro_beta_sp500_lag",
+    "macro_beta_vix",
+    "px_market_beta",
+}
+
+
+def test_macro_families_are_blocked_without_the_exposure_mart() -> None:
+    """A snapshot whose ``common_feature_daily_fact`` was never built has no
+    ``feat_macro_exposure`` either — both names are absent, and the six
+    families take the ordinary blocked path rather than failing the run."""
+    config = _macro_config()
+    rows = build_phase_b_readiness_rows(
+        config, available_assets={"feat_fin_scan_daily", "label_scan"}
+    )
+    macro = [r for r in rows if r["family"] in _MACRO_FAMILIES]
+    assert len(macro) == 24  # 6 families x 4 cells
+    assert all(r["role"] == "blocked_exploratory" for r in macro)
+    assert all("feat_macro_exposure" in r["missing_dependencies"] for r in macro)
+
+
+def test_macro_families_need_the_fact_as_well_as_the_mart() -> None:
+    """``common_feature_daily_fact`` is a declared dependency in its own right:
+    the readiness gate and the mart have to be looking at the same fact, so a
+    run that has the mart but never bound the fact is not ready."""
+    config = _macro_config()
+    rows = build_phase_b_readiness_rows(
+        config, available_assets={"feat_macro_exposure", "label_scan"}
+    )
+    macro = [r for r in rows if r["family"] in _MACRO_FAMILIES]
+    assert all(r["role"] == "blocked_exploratory" for r in macro)
+    assert all("common_feature_daily_fact" in r["missing_dependencies"] for r in macro)
+
+
+def test_macro_families_are_ready_once_both_dependencies_exist() -> None:
+    config = _macro_config()
+    rows = build_phase_b_readiness_rows(
+        config,
+        available_assets={"feat_macro_exposure", "common_feature_daily_fact", "label_scan"},
+    )
+    macro = [r for r in rows if r["family"] in _MACRO_FAMILIES]
+    assert len(macro) == 24
+    assert all(r["role"] == "ready_primary" for r in macro)
+    summary = summarize_phase_b_readiness(config, rows)
+    assert summary["m_b_ready"] == 24
+    # Phase A's 75 are untouched by the append; the combined population grows
+    # only by what actually became ready.
+    assert summary["combined_ab_hypothesis_count"] == 75 + 24
+
+
+def test_macro_overlay_freezes_102_phase_b_candidates() -> None:
+    config = _macro_config()
+    rows = build_phase_b_readiness_rows(config, available_assets=set())
+    assert len(rows) == 102
+    summary = summarize_phase_b_readiness(config, rows)
+    assert summary["blocked_exploratory_count"] == 102

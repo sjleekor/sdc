@@ -4,7 +4,14 @@ import math
 from datetime import date, timedelta
 
 import duckdb
+import polars as pl
 import pytest
+from research.analysis.horizon_scan_daily_ic import (
+    DAILY_IC_DIR_NAME,
+    DAILY_SPREAD_DIR_NAME,
+    ParquetDailyIcSink,
+    reconcile_daily_ic,
+)
 from research.analysis.horizon_scan_phase_b_scan import (
     apply_combined_ab_bh,
     apply_phase_b_only_bh,
@@ -830,3 +837,47 @@ def test_compute_phase_b_evidence_grade_filing_windows_none_is_not_applicable() 
     """Continuous cells never compute ``n_independent_filing_windows`` — the
     default ``None`` must not itself block grade A."""
     assert compute_phase_b_evidence_grade(**_GRADE_ALL_PASS_KWARGS) == "A"
+
+
+def test_run_phase_b_continuous_scan_hands_the_daily_sink_through(tmp_path) -> None:
+    """Stage 0 through the Phase B wrapper: the sink sees Phase-B-shaped
+    registry rows (``cell_type``/``role``) and stores them under one normalized
+    identity."""
+    con = duckdb.connect()
+    _seed_continuous_panel(con)
+    sink = ParquetDailyIcSink(tmp_path)
+    rows = run_phase_b_continuous_scan(
+        con,
+        [
+            {
+                "hypothesis_id": "fin_log_mcap|fin_log_mcap|cum|0|60",
+                "family": "fin_log_mcap",
+                "feature": "fin_log_mcap",
+                "cell_type": "cumulative",
+                "h_start": 0,
+                "h_end": 60,
+                "expected_sign": "-",
+                "role": "ready_primary",
+            }
+        ],
+        sample_start="2024-01-01",
+        min_names=5,
+        min_names_for_spread=5,
+        quantile_count=5,
+        min_dates_per_cell=30,
+        daily_sink=sink,
+    )
+    summary = sink.finalize()
+    assert summary.daily_ic.file_count == 1
+    stored = pl.read_parquet(
+        tmp_path / DAILY_IC_DIR_NAME / "family=fin_log_mcap" / "fin_log_mcap.parquet"
+    )
+    assert set(stored["hypothesis_role"].to_list()) == {"ready_primary"}
+    assert set(stored["scan_type"].to_list()) == {"cum"}
+    result = reconcile_daily_ic(
+        rows,
+        daily_ic_dir=tmp_path / DAILY_IC_DIR_NAME,
+        daily_spread_dir=tmp_path / DAILY_SPREAD_DIR_NAME,
+    )
+    assert result["reconciled"] is True
+    assert result["n_cells"] == 4

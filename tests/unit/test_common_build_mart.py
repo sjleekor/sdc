@@ -386,3 +386,45 @@ def test_mart_matches_golden(scenario, golden, monkeypatch):
     expected = golden[scenario.name]
     mart = _run_mart(scenario, monkeypatch)
     _assert_parity(expected, mart, is_vol=scenario.is_vol)
+
+
+def test_adding_a_catalog_feature_only_adds_rows(monkeypatch):
+    """PR-1a-1's contract: a new catalog entry adds fact rows and moves none.
+
+    ``build_common_feature_facts_sql`` emits one independent SELECT per feature
+    and UNIONs them, so a feature cannot reach another feature's rows — this
+    pins that structural property down rather than trusting it, and is why the
+    two golden fixtures above did not have to move when
+    ``commodity_wti_spot_level`` was added.
+    """
+    series, catalog, obs, start, end = _sc_level()
+    added = _feature("market_kospi_ret_1d", transform_code="ret_1d")
+
+    def _rows(active_catalog):
+        import research.etl.marts.common_build as mod
+
+        monkeypatch.setattr(mod, "default_common_feature_series", lambda: series)
+        monkeypatch.setattr(mod, "default_common_feature_catalog", lambda: active_catalog)
+        con = duckdb.connect()
+        _load_observations(con, obs)
+        mod.register_common_feature_daily_fact_view(
+            con,
+            trading_days=_krx_days(date(2026, 1, 5), end),
+            feature_dates=_krx_days(start, end),
+        )
+        return {
+            (r[0], r[1]): (r[2], r[3], r[4])
+            for r in con.execute(
+                "SELECT feature_date, feature_code, value_numeric, unit, "
+                "asof_available_date FROM common_feature_daily_fact"
+            ).fetchall()
+        }
+
+    before = _rows(catalog)
+    after = _rows([*catalog, added])
+
+    assert before, "the baseline scenario must produce rows for this to mean anything"
+    assert {k: v for k, v in after.items() if k in before} == before
+    assert {code for _date, code in after} - {code for _date, code in before} == {
+        "market_kospi_ret_1d"
+    }

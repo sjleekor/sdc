@@ -800,6 +800,79 @@ rank IC 기준 평균 순위 이동이 0.34%p라 **결론의 방향이 바뀔 �
    (`fin_scan`, `event_scan`, `metric_vintages`, `financial_quarters`).
 3. 두 빌드 완전 일치를 확인한 뒤 재실행한다.
 
+## 9.9 I13 — native 엔진이 상수 횡단면에서 가짜 상관을 냈다 (2026-08-30 발견·수정 완료)
+
+`per_date_market_rank_ic(engine="polars_native_v1")`가 **예측자가 완전히 상수인 `(거래일, 시장)`
+횡단면에서 NaN 대신 0이 아닌 상관값을 낸다.** legacy `_spearman`은 `ps == 0` 가드로 정확히 NaN을
+낸다(`metrics.py:534`).
+
+상수 횡단면의 Spearman은 정의되지 않는다 — 순위에 정보가 없다. 그런 날은 버려야 하는데, native
+엔진은 그것을 유효한 관측으로 만든다.
+
+### 실측
+
+2026-08-30 Phase B parity(같은 config·같은 snapshot·같은 코드로 두 엔진 실행)에서 나왔다.
+
+- 2014-06-16 KOSPI, `own_major_filing_60d`: 745종목의 고유값이 **1개**, rank std = 0.
+  legacy `nan`, native **−0.014574**.
+- 최소 재현: 길이 745 상수 열 + 임의 realized → polars가 seed마다 −0.049 ~ +0.022를 낸다.
+  같은 입력에는 결정적이지만 길이 50·100·200·300·400·500·1000에서는 NaN이다 —
+  **크기·데이터에 따라 갈린다.** polars 1.41.2.
+- `_per_date_market_rank_ic_native`의 docstring이 "Polars' Spearman correlation uses average ranks
+  for ties, matching `_spearman`"이라고 적고 있는데, **완전 동점 경우에는 사실이 아니다.**
+
+### 영향 범위
+
+`daily_ic` 868,874행 중 **474행(0.05%)**. 전부 `own_major_filing_activity` 한 family이고 **472행이
+2014년** — 그 count 피쳐의 이력이 시작되는 구간이라 횡단면이 통째로 0이다.
+
+- 그 family 4 cell의 `n_dates`가 2,478 → 2,514~2,527로 늘고 `ic_mean`이 약 5e-4 움직인다.
+- **판정 변화는 0이다** — legacy/native 102 cell 전부 `primary_discovery_phase_b` 동일.
+- 매크로 exposure 베타 6 family와 Phase C 15쌍은 영향받지 않는다. rolling 베타·가격·수급 피쳐는
+  횡단면이 상수가 되지 않는다.
+- 위험이 있는 것은 **count·flag 계열 피쳐의 이력 시작 구간**이다. `ev_filing_activity`,
+  `own_insider_filing_activity`, `own_amendment_ratio` 등이 같은 성질을 갖는다(이번 표본에서는
+  차이가 나지 않았다).
+
+### 이 결함이 정정하는 것
+
+`03_improve_AB/04_engine_parity_20260829.md`는 `own_major_filing_activity`의 parity 실패를
+"engine 차이가 아니라 두 기준 시점 사이 그 feature 정의 자체가 바뀐 것"으로 귀속했다.
+**적어도 불완전한 귀속이다.** 같은 코드·같은 마트로 돌린 2026-08-30 두 run에서도 같은 family에
+차이가 그대로 남는다. 정의 변경이 얼마를 설명하고 이 결함이 얼마를 설명하는지는 아직 분리하지 않았다.
+
+### 수정 (2026-08-30)
+
+`04_preregistration_overlay.md` §5가 구현 버그 수정에 요구하는 절차 — "수정 전후 canonical A 요약
+exact match 유지, 수치가 바뀌면 수정 전 값은 판정에 쓰지 않는다고 결과 문서에 명시" — 를 따랐다.
+
+1. `_per_date_market_rank_ic_native`에 그룹 내 고유값 검사를 넣어 예측자나 realized가 상수면
+   NaN으로 만든다. legacy `_spearman`의 `ps == 0 or rs == 0` 가드와 같은 규약이다.
+   docstring의 "Polars' Spearman ... matching `_spearman`" 주장도 실제 동작에 맞게 고쳤다.
+2. **영향 범위를 코드 수정 뒤·재실행 전에 측정했다.** Phase A 16개 feature의 상수 횡단면 **0개**,
+   Phase B는 `own_major_filing_60d` 288 · `own_amendment_ratio_1y` 1, 나머지 21개 0개.
+   이 측정이 "Phase A는 안 바뀐다"를 예측이 아니라 사실로 만들었다.
+3. 계보 전체를 수정된 코드로 재실행했다(A `20260830T085718-efd35e70` → B `20260830T100518-efd35e70`
+   → AB `20260830T122850-efd35e70` → C `20260830T122850-phasec`). Phase A도 다시 돌렸다 —
+   `--phase-a-reuse-run-dir`가 `analysis_kernel_hash` 일치를 요구하고(맞는 동작), 계보를 한 코드로
+   묶는 편이 낫다.
+4. **결과**: Phase A는 canonical과 여전히 max |Δ| = 1.388e-17(수정 전과 같은 값).
+   legacy/native `daily_ic` parity가 **행 집합까지 일치**(868,400행, max |Δ| 2.776e-16).
+   AB 177 가설·Phase C 17쌍의 `primary_discovery_ab`·`screen_pass`·`evidence_grade`는
+   **수정 전후 하나도 바뀌지 않았다.**
+
+### 왜 기존 테스트가 못 잡았나
+
+`test_native_rank_ic_matches_legacy_across_contract_edge_cases`에 이미 "constant group"이 있었다.
+**3행짜리였다.** 그 크기에서는 polars도 NaN을 내므로 통과했다. 결함이 드러나는 것은 실제 시장일
+크기(수백~천 종목)에서다.
+
+회귀 테스트 3개를 `tests/unit/test_research_metrics.py`에 추가했다 — 상수 예측자를
+n = 50·300·745·1000·1581에서, 상수 realized를 n = 745에서, 그리고 40일 × 2시장 randomized parity에
+상수·심한 동점·거의 상수·동점 없음 네 종류를 섞어 넣었다. 셋 다 수정 전 코드에서 실패한다.
+
+---
+
 ## 10. 작업 순서 제안
 
 재검정 비용이 순서를 지배한다. **YAML을 한 글자라도 바꾸면 `config_hash`가 바뀌고,

@@ -19,10 +19,13 @@ import polars as pl
 
 from research.analysis.horizon_scan_phase_b_robustness import compute_nonoverlap_robustness_pass
 from research.analysis.horizon_scan_phase_b_scan import (
+    _DISCOVERY_SAMPLE_KIND,
+    _DISCOVERY_UNIVERSE,
     _aggregate_cohort_rows,
     _pool_cohort_ranks,
     execute_event_cohort_frame,
 )
+from research.analysis.horizon_scan_runner import scan_cell
 from research.etl.metrics import choose_nw_lag, daily_market_weighted_ic, per_date_market_rank_ic
 
 # --- rank correlation (§5.5) ---
@@ -216,4 +219,123 @@ def run_sue_event_ordinal_nonoverlap(
             expected_sign_ratio_min=expected_sign_ratio_min,
         )
         rows.append({"hypothesis_id": cell["hypothesis_id"], **summary, **gate})
+    return rows
+
+
+# --- secondary-feature diagnostic scan (02_stage1a §4) ---
+
+
+def build_secondary_diagnostic_cells(
+    families: list[dict[str, Any]],
+    *,
+    available_families: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """One diagnostic cell per (family, secondary column, primary horizon).
+
+    The registry the real scan runs only ever carries a family's *primary*
+    feature (``horizon_scan_readiness._hypothesis_rows`` picks
+    ``official_feature_variant`` of the primary column), and the exploratory
+    horizon set is not scanned by the CLI at all. So the question
+    ``02_stage1a`` §4 asks of the macro families — how much of the beta's IC
+    survives once the market factor is taken out, i.e. ``macro_beta_*`` versus
+    ``macro_rawbeta_*`` — has no cell anywhere in the run to read. This builds
+    those cells.
+
+    Cumulative cells only, at the family's own preregistered primary horizons.
+    A bucket cell would double the count without answering a different
+    question, and the comparison is against the primary cumulative cell.
+    """
+    cells: list[dict[str, Any]] = []
+    for family in families:
+        name = family["family"]
+        if available_families is not None and name not in available_families:
+            continue
+        secondary = [f["column"] for f in family["features"] if f["role"] == "secondary"]
+        if not secondary:
+            continue
+        primary = next(f["column"] for f in family["features"] if f["role"] == "primary")
+        for column in secondary:
+            for horizon in family.get("primary_horizon_set", []):
+                cells.append(
+                    {
+                        "family": name,
+                        "fdr_family": family.get("fdr_family"),
+                        "primary_feature": primary,
+                        "feature": column,
+                        "feature_role": "secondary",
+                        "scan_type": "cum",
+                        "h_start": 0,
+                        "h_end": int(horizon),
+                        "expected_sign": family.get("expected_sign"),
+                    }
+                )
+    return cells
+
+
+def run_secondary_feature_diagnostics(
+    con: duckdb.DuckDBPyConnection,
+    cells: list[dict[str, Any]],
+    *,
+    panel_view: str,
+    sample_start: str,
+    min_names: int,
+    min_names_for_spread: int,
+    quantile_count: int,
+    min_dates_per_cell: int,
+    scan_engine: str = "legacy",
+    primary_ic_by_cell: dict[tuple[str, int], float | None] | None = None,
+) -> list[dict[str, Any]]:
+    """Scan each diagnostic cell at the discovery coordinate. Never a discovery.
+
+    Deliberately outside every BH population and every gate: these rows are
+    card material (§9's reporting inputs), and adding them to ``m`` would
+    inflate the correction with hypotheses nobody preregistered. They also
+    take no ``daily_sink`` — ``daily_ic.parquet`` holds the registered scan's
+    series, not diagnostics (01_stage0 §3.1).
+
+    ``primary_ic_by_cell`` maps ``(family, h_end)`` to the primary cell's own
+    IC so each row carries the difference the diagnostic exists to show. A cell
+    whose feature column is absent from the panel is reported as
+    ``column_absent`` rather than skipped — a missing secondary column is a
+    fact about the mart worth seeing on the card.
+    """
+    columns = {row[0] for row in con.execute(f"DESCRIBE {panel_view}").fetchall()}
+    rows: list[dict[str, Any]] = []
+    for cell in cells:
+        if cell["feature"] not in columns:
+            rows.append({**cell, "status": "not_evaluated", "status_reason": "column_absent"})
+            continue
+        stats = scan_cell(
+            con,
+            panel_view=panel_view,
+            feature_col=cell["feature"],
+            scan_type=cell["scan_type"],
+            h_start=cell["h_start"],
+            h_end=cell["h_end"],
+            universe=_DISCOVERY_UNIVERSE,
+            sample_kind=_DISCOVERY_SAMPLE_KIND,
+            sample_start=sample_start,
+            min_names=min_names,
+            min_names_for_spread=min_names_for_spread,
+            quantile_count=quantile_count,
+            min_dates_per_cell=min_dates_per_cell,
+            expected_sign=cell.get("expected_sign"),
+            scan_engine=scan_engine,
+        )
+        primary_ic = (primary_ic_by_cell or {}).get((cell["family"], cell["h_end"]))
+        secondary_ic = stats["ic_mean"] if stats["status"] == "valid" else None
+        rows.append(
+            {
+                **cell,
+                **stats,
+                "universe": _DISCOVERY_UNIVERSE,
+                "sample_kind": _DISCOVERY_SAMPLE_KIND,
+                "primary_ic_mean": primary_ic,
+                "ic_mean_minus_primary": (
+                    None
+                    if primary_ic is None or secondary_ic is None
+                    else secondary_ic - primary_ic
+                ),
+            }
+        )
     return rows

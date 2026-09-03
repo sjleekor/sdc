@@ -74,6 +74,14 @@ from research.analysis.horizon_scan_config import (
     load_config,
     validate_scan_engine,
 )
+from research.analysis.horizon_scan_daily_ic import (
+    DAILY_IC_DIR_NAME,
+    DAILY_SPREAD_DIR_NAME,
+    ParquetDailyIcSink,
+    assert_daily_ic_reconciled,
+    daily_ic_success_fields,
+    reconcile_daily_ic,
+)
 from research.analysis.horizon_scan_permutation import empirical_discovery_count_p
 from research.analysis.horizon_scan_phase_b import (
     PHASE_B_CONTENT_HASH_EXCLUDE_NAMES,
@@ -88,7 +96,9 @@ from research.analysis.horizon_scan_phase_b_cards import (
     render_family_cards_md,
 )
 from research.analysis.horizon_scan_phase_b_diagnostics import (
+    build_secondary_diagnostic_cells,
     compute_phase_b_rank_correlation,
+    run_secondary_feature_diagnostics,
     run_sue_event_ordinal_nonoverlap,
 )
 from research.analysis.horizon_scan_phase_b_joint_permutation import (
@@ -160,6 +170,11 @@ from research.etl.features.fin_scan import (
     FIN_SCAN_TABLE,
     materialize_fin_scan_daily,
 )
+from research.etl.features.macro_exposure import (
+    COMMON_FEATURE_FACT_VIEW,
+    MACRO_EXPOSURE_TABLE,
+    materialize_macro_exposure,
+)
 from research.etl.features.market_cap import (
     MARKET_CAP_FORMULA_VERSION,
     MARKET_CAP_TABLE,
@@ -171,7 +186,7 @@ from research.etl.features.periodic_extras import (
     materialize_periodic_extras,
 )
 from research.etl.features.sue_event import SUE_EVENT_TABLE, materialize_sue_event
-from research.etl.lake import connect, register_views
+from research.etl.lake import connect, register_persisted_derived_mart, register_views
 from research.etl.mart import mart_root, register_mart_view
 from research.etl.marts.financial_quarters import (
     FQMV_TABLE,
@@ -585,18 +600,20 @@ def register_phase_b_marts(
     directly or transitively; ``feat_event_scan_daily`` also needs
     ``dart_capital_change_raw`` directly. A ``duckdb.Error`` here means a
     referenced raw/mart view is genuinely absent from this lake (e.g.
-    ``dart_filing_receipt_raw``/``dart_capital_change_raw`` not collected yet)
-    — that mart, and anything depending on it, is simply left out of the
-    returned set rather than crashing the run. ``build_phase_b_readiness_rows``
-    is what turns "not in this set" into the correct ``blocked_exploratory``
-    role for the specific candidate cells that need it (never the whole run).
+    ``dart_filing_receipt_raw``/``dart_capital_change_raw`` not collected yet),
+    and a ``FileNotFoundError`` means a snapshot lacks a persisted derived mart
+    (``common_feature_daily_fact``) — that mart, and anything depending on it,
+    is simply left out of the returned set rather than crashing the run.
+    ``build_phase_b_readiness_rows`` is what turns "not in this set" into the
+    correct ``blocked_exploratory`` role for the specific candidate cells that
+    need it (never the whole run).
     """
     available: set[str] = set()
 
     def _try(name: str, build) -> None:
         try:
             build()
-        except duckdb.Error:
+        except (duckdb.Error, FileNotFoundError):
             return
         available.add(name)
 
@@ -611,6 +628,22 @@ def register_phase_b_marts(
         FILING_ACTIVITY_TABLE,
         lambda: materialize_filing_activity(con, lake, force=force),
     )
+
+    # feat_macro_exposure reads common_feature_daily_fact. It is bound from the
+    # snapshot's *persisted* derived mart rather than recomputed from raw, so
+    # the betas and the readiness gate below are looking at the same fact — the
+    # one `compute_all --from-step marts` wrote and whose coverage/readiness
+    # gates then passed. A snapshot that never built it leaves both names out of
+    # `available`, which is what blocks the six macro-exposure families (§3).
+    _try(
+        COMMON_FEATURE_FACT_VIEW,
+        lambda: register_persisted_derived_mart(con, lake, COMMON_FEATURE_FACT_VIEW),
+    )
+    if COMMON_FEATURE_FACT_VIEW in available:
+        _try(
+            MACRO_EXPOSURE_TABLE,
+            lambda: materialize_macro_exposure(con, lake, force=force),
+        )
 
     _try(
         "stock_metric_vintage_fact",
@@ -1174,11 +1207,19 @@ def run_phase_b_core(
         for namespace in [joint_namespace, *robustness_paths.values()]:
             timings.write(namespace / "timings.json")
 
+    # Stage 0: Phase B keeps daily_ic/daily_spread at the run root (Phase A
+    # puts them under core/), matching 04_specific_plan_B.md §7.1's names.
+    daily_sink = ParquetDailyIcSink(tmp_run_dir)
     timings.start("phase_b_scan")
     try:
         daily_marts = tuple(
             name
-            for name in (MARKET_CAP_TABLE, FILING_ACTIVITY_TABLE, PERIODIC_EXTRAS_TABLE)
+            for name in (
+                MARKET_CAP_TABLE,
+                FILING_ACTIVITY_TABLE,
+                PERIODIC_EXTRAS_TABLE,
+                MACRO_EXPOSURE_TABLE,
+            )
             if name in phase_b_marts
         )
         if ready_continuous and (
@@ -1195,7 +1236,7 @@ def run_phase_b_core(
                 additional_daily_views=daily_marts,
             )
             continuous_scanned_rows = run_phase_b_continuous_scan(
-                con, ready_continuous, **scan_kwargs
+                con, ready_continuous, **scan_kwargs, daily_sink=daily_sink
             )
 
         if ready_events and "fin_sue_event" in phase_b_marts:
@@ -1212,6 +1253,17 @@ def run_phase_b_core(
     finally:
         timings.stop("phase_b_scan")
         _write_checkpoint_timings()
+
+    daily_ic_summary = daily_sink.finalize()
+    # Only the continuous rows can be reconciled: the SUE cohort scan has its
+    # own grain and never reaches the sink.
+    daily_ic_reconcile = assert_daily_ic_reconciled(
+        reconcile_daily_ic(
+            continuous_scanned_rows,
+            daily_ic_dir=tmp_run_dir / DAILY_IC_DIR_NAME,
+            daily_spread_dir=tmp_run_dir / DAILY_SPREAD_DIR_NAME,
+        )
+    )
 
     scanned_rows = continuous_scanned_rows + event_scanned_rows
     assembled = assemble_phase_b_primary_table(readiness_rows, scanned_rows)
@@ -1250,8 +1302,12 @@ def run_phase_b_core(
     by_id = {r["hypothesis_id"]: r for r in ready_stats_rows}
     assembled = [by_id.get(row["hypothesis_id"], row) for row in assembled]
     write_phase_b_run_spec(tmp_run_dir, run_spec)
+    run_manifest = {
+        **manifest,
+        "artifacts": {**manifest.get("artifacts", {}), **daily_ic_summary.as_manifest_artifacts()},
+    }
     (tmp_run_dir / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8"
+        json.dumps(run_manifest, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8"
     )
     core_dir = tmp_run_dir / "core"
     core_dir.mkdir(parents=True, exist_ok=True)
@@ -1311,6 +1367,39 @@ def run_phase_b_core(
             pl.DataFrame(rank_corr_rows, infer_schema_length=None).write_parquet(
                 core_dir / "primary_feature_rank_correlation.parquet"
             )
+
+        # 02_stage1a §4: the secondary columns are never in the scanned
+        # registry, so `macro_beta_* vs macro_rawbeta_*` has no cell to read
+        # anywhere else in the run. Card material only — outside every BH
+        # population and every gate.
+        secondary_cells = build_secondary_diagnostic_cells(
+            config.families,
+            available_families={cell["family"] for cell in ready_continuous},
+        )
+        if secondary_cells:
+            primary_ic_by_cell = {
+                (row["family"], row["h_end"]): row.get("ic_mean")
+                for row in continuous_scanned_rows
+                if row.get("universe") == "broad"
+                and row.get("sample_kind") == "common_survivor"
+                and row.get("scan_type") == "cum"
+            }
+            timings.start("secondary_diagnostics")
+            try:
+                secondary_rows = run_secondary_feature_diagnostics(
+                    con,
+                    secondary_cells,
+                    panel_view=PHASE_B_PANEL_VIEW,
+                    primary_ic_by_cell=primary_ic_by_cell,
+                    **scan_kwargs,
+                )
+            finally:
+                timings.stop("secondary_diagnostics")
+                _write_checkpoint_timings()
+            if secondary_rows:
+                pl.DataFrame(secondary_rows, infer_schema_length=None).write_parquet(
+                    core_dir / "secondary_feature_diagnostics.parquet"
+                )
 
     # §6 B-8 "결합 단면 permutation" — joint A+B continuous + SUE null
     # discovery-count distribution. Only worth computing when Phase B
@@ -1450,6 +1539,7 @@ def run_phase_b_core(
         # complete to `_SUCCESS.json` while giving a human nothing to read.
         required_artifacts=("phase_b_run_spec.json", "manifest.json", PHASE_B_REPORT_NAME),
         content_hash_exclude_names=PHASE_B_CONTENT_HASH_EXCLUDE_NAMES,
+        success_extra=daily_ic_success_fields(daily_ic_reconcile),
     )
 
 

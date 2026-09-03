@@ -58,16 +58,49 @@ def _stub(monkeypatch: pytest.MonkeyPatch, name: str, calls: list[str], *, fail:
     monkeypatch.setattr(phase_b_run, f"materialize_{name}", _fn)
 
 
+def _stub_common_fact(
+    monkeypatch: pytest.MonkeyPatch, calls: list[str], *, present: bool = True
+):
+    """Stand in for binding the snapshot's persisted ``common_feature_daily_fact``.
+
+    Absent is the normal state for a snapshot whose marts step never ran, and
+    it must leave both that name and ``feat_macro_exposure`` out of the
+    available set without touching anything else in the build order."""
+
+    def _fn(_con, _lake, name):
+        calls.append("common_feature_daily_fact")
+        if not present:
+            raise FileNotFoundError("no persisted derived mart")
+        return name
+
+    monkeypatch.setattr(phase_b_run, "register_persisted_derived_mart", _fn)
+
+
+def _stub_all_marts(
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[str],
+    *,
+    fail: str | None = None,
+    common_fact_present: bool = True,
+) -> None:
+    _stub_common_fact(monkeypatch, calls, present=common_fact_present)
+    for name in (
+        "market_cap",
+        "filing_activity",
+        "macro_exposure",
+        "stock_metric_vintage_fact",
+        "periodic_extras",
+        "fin_quarterly_metric_vintage",
+        "fin_scan_daily",
+        "event_scan_daily",
+        "sue_event",
+    ):
+        _stub(monkeypatch, name, calls, fail=name == fail)
+
+
 def test_register_phase_b_marts_all_succeed(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
-    _stub(monkeypatch, "market_cap", calls)
-    _stub(monkeypatch, "filing_activity", calls)
-    _stub(monkeypatch, "stock_metric_vintage_fact", calls)
-    _stub(monkeypatch, "periodic_extras", calls)
-    _stub(monkeypatch, "fin_quarterly_metric_vintage", calls)
-    _stub(monkeypatch, "fin_scan_daily", calls)
-    _stub(monkeypatch, "event_scan_daily", calls)
-    _stub(monkeypatch, "sue_event", calls)
+    _stub_all_marts(monkeypatch, calls)
 
     result = register_phase_b_marts(_con_with_daily_ohlcv(), lake=object())
 
@@ -80,10 +113,14 @@ def test_register_phase_b_marts_all_succeed(monkeypatch: pytest.MonkeyPatch) -> 
         "feat_market_cap",
         "feat_filing_activity",
         "feat_periodic_extras",
+        "common_feature_daily_fact",
+        "feat_macro_exposure",
     }
     assert calls == [
         "market_cap",
         "filing_activity",
+        "common_feature_daily_fact",
+        "macro_exposure",
         "stock_metric_vintage_fact",
         "periodic_extras",
         "fin_quarterly_metric_vintage",
@@ -93,24 +130,46 @@ def test_register_phase_b_marts_all_succeed(monkeypatch: pytest.MonkeyPatch) -> 
     ]
 
 
+def test_register_phase_b_marts_skips_macro_exposure_without_the_common_fact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A snapshot whose ``compute_all --from-step marts`` never ran has no
+    persisted ``common_feature_daily_fact``. Both names stay out of the
+    available set — which is what blocks the six macro-exposure families — and
+    the mart is never even attempted against a fact that is not there."""
+    calls: list[str] = []
+    _stub_all_marts(monkeypatch, calls, common_fact_present=False)
+
+    result = register_phase_b_marts(_con_with_daily_ohlcv(), lake=object())
+
+    assert "common_feature_daily_fact" not in result
+    assert "feat_macro_exposure" not in result
+    assert "macro_exposure" not in calls
+    assert "feat_fin_scan_daily" in result  # everything else is unaffected
+
+
 def test_register_phase_b_marts_stops_at_root_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """``dart_filing_receipt_raw`` missing today (real local lake state) means
     ``stock_metric_vintage_fact`` itself fails — nothing downstream should
     even be attempted, and the run must not crash."""
     calls: list[str] = []
-    _stub(monkeypatch, "market_cap", calls)
-    _stub(monkeypatch, "filing_activity", calls)
-    _stub(monkeypatch, "stock_metric_vintage_fact", calls, fail=True)
-    _stub(monkeypatch, "periodic_extras", calls)
-    _stub(monkeypatch, "fin_quarterly_metric_vintage", calls)
-    _stub(monkeypatch, "fin_scan_daily", calls)
-    _stub(monkeypatch, "event_scan_daily", calls)
-    _stub(monkeypatch, "sue_event", calls)
+    _stub_all_marts(monkeypatch, calls, fail="stock_metric_vintage_fact")
 
     result = register_phase_b_marts(_con_with_daily_ohlcv(), lake=object())
 
-    assert result == {"feat_market_cap", "feat_filing_activity"}
-    assert calls == ["market_cap", "filing_activity", "stock_metric_vintage_fact"]
+    assert result == {
+        "feat_market_cap",
+        "feat_filing_activity",
+        "common_feature_daily_fact",
+        "feat_macro_exposure",
+    }
+    assert calls == [
+        "market_cap",
+        "filing_activity",
+        "common_feature_daily_fact",
+        "macro_exposure",
+        "stock_metric_vintage_fact",
+    ]
 
 
 def test_register_phase_b_marts_partial_availability_degrades_gracefully(
@@ -122,14 +181,7 @@ def test_register_phase_b_marts_partial_availability_degrades_gracefully(
     proving one missing raw source blocks only its dependent families, not
     the whole run."""
     calls: list[str] = []
-    _stub(monkeypatch, "market_cap", calls)
-    _stub(monkeypatch, "filing_activity", calls)
-    _stub(monkeypatch, "stock_metric_vintage_fact", calls)
-    _stub(monkeypatch, "periodic_extras", calls)
-    _stub(monkeypatch, "fin_quarterly_metric_vintage", calls)
-    _stub(monkeypatch, "fin_scan_daily", calls)
-    _stub(monkeypatch, "event_scan_daily", calls, fail=True)
-    _stub(monkeypatch, "sue_event", calls)
+    _stub_all_marts(monkeypatch, calls, fail="event_scan_daily")
 
     result = register_phase_b_marts(_con_with_daily_ohlcv(), lake=object())
 
@@ -141,6 +193,8 @@ def test_register_phase_b_marts_partial_availability_degrades_gracefully(
         "feat_market_cap",
         "feat_filing_activity",
         "feat_periodic_extras",
+        "common_feature_daily_fact",
+        "feat_macro_exposure",
     }
     assert set(calls) == {
         "stock_metric_vintage_fact",
@@ -151,6 +205,8 @@ def test_register_phase_b_marts_partial_availability_degrades_gracefully(
         "market_cap",
         "filing_activity",
         "periodic_extras",
+        "common_feature_daily_fact",
+        "macro_exposure",
     }
 
 
@@ -158,14 +214,7 @@ def test_register_phase_b_marts_stops_after_second_stage_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
-    _stub(monkeypatch, "market_cap", calls)
-    _stub(monkeypatch, "filing_activity", calls)
-    _stub(monkeypatch, "stock_metric_vintage_fact", calls)
-    _stub(monkeypatch, "periodic_extras", calls)
-    _stub(monkeypatch, "fin_quarterly_metric_vintage", calls, fail=True)
-    _stub(monkeypatch, "fin_scan_daily", calls)
-    _stub(monkeypatch, "event_scan_daily", calls)
-    _stub(monkeypatch, "sue_event", calls)
+    _stub_all_marts(monkeypatch, calls, fail="fin_quarterly_metric_vintage")
 
     result = register_phase_b_marts(_con_with_daily_ohlcv(), lake=object())
 
@@ -174,10 +223,14 @@ def test_register_phase_b_marts_stops_after_second_stage_failure(
         "feat_filing_activity",
         "stock_metric_vintage_fact",
         "feat_periodic_extras",
+        "common_feature_daily_fact",
+        "feat_macro_exposure",
     }
     assert calls == [
         "market_cap",
         "filing_activity",
+        "common_feature_daily_fact",
+        "macro_exposure",
         "stock_metric_vintage_fact",
         "periodic_extras",
         "fin_quarterly_metric_vintage",
@@ -1017,3 +1070,128 @@ def test_publish_refuses_a_phase_b_run_without_its_report(tmp_path: Path) -> Non
             required_artifacts=required,
             content_hash_exclude_names=PHASE_B_CONTENT_HASH_EXCLUDE_NAMES,
         )
+
+
+# --- Stage 0 end to end: scan -> sink -> reconcile -> publish ---
+
+
+def _seed_phase_b_continuous_panel(con: duckdb.DuckDBPyConnection) -> None:
+    import math
+    from datetime import timedelta
+
+    rows = []
+    for session in range(1, 71):
+        d = date(2024, 1, 1) + timedelta(days=session - 1)
+        for market in ("KOSPI", "KOSDAQ"):
+            for t in range(10):
+                wobble = 3.0 * math.sin(t + 0.7 * session)
+                label = float(t) * 2.0 + wobble
+                rows.append(
+                    (
+                        d,
+                        f"{market[:1]}{t}",
+                        market,
+                        session,
+                        float(t) + 0.01 * session,
+                        label,
+                        label,
+                        True,
+                        True,
+                        t < 8,
+                        True,
+                        t != 9,
+                        False,
+                    )
+                )
+    con.execute("""
+        CREATE TABLE analysis_panel_phase_b (
+            trade_date DATE, ticker VARCHAR, market VARCHAR, formation_session_idx BIGINT,
+            fin_log_mcap DOUBLE, y_rank_60d DOUBLE, raw_label_60d DOUBLE, label_ok_60d BOOLEAN,
+            in_broad BOOLEAN, in_tradable BOOLEAN, common_formation_120d BOOLEAN,
+            common_survivor_120d BOOLEAN, ca_mask BOOLEAN
+        )
+    """)
+    con.executemany("INSERT INTO analysis_panel_phase_b VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+
+
+def test_a_published_run_carries_its_daily_ic_and_a_true_reconciliation(tmp_path: Path) -> None:
+    """The whole Stage 0 composition ``run_phase_b_core`` performs, on a
+    synthetic panel: scan with a sink at the run root, reconcile the stored
+    series against the scan's own summary, record both in ``manifest.json``
+    and ``_SUCCESS.json``, then publish.
+    """
+    from research.analysis.horizon_scan_daily_ic import (
+        DAILY_IC_DIR_NAME,
+        DAILY_SPREAD_DIR_NAME,
+        ParquetDailyIcSink,
+        assert_daily_ic_reconciled,
+        daily_ic_success_fields,
+        reconcile_daily_ic,
+    )
+    from research.analysis.horizon_scan_phase_b_scan import run_phase_b_continuous_scan
+    from research.analysis.horizon_scan_run_spec import publish_run
+
+    con = duckdb.connect()
+    _seed_phase_b_continuous_panel(con)
+
+    tmp_run_dir = tmp_path / "run.tmp"
+    tmp_run_dir.mkdir()
+    sink = ParquetDailyIcSink(tmp_run_dir)
+    scanned = run_phase_b_continuous_scan(
+        con,
+        [
+            {
+                "hypothesis_id": "fin_log_mcap|fin_log_mcap|cum|0|60",
+                "family": "fin_log_mcap",
+                "feature": "fin_log_mcap",
+                "cell_type": "cumulative",
+                "h_start": 0,
+                "h_end": 60,
+                "expected_sign": "-",
+                "role": "ready_primary",
+            }
+        ],
+        sample_start="2024-01-01",
+        min_names=5,
+        min_names_for_spread=5,
+        quantile_count=5,
+        min_dates_per_cell=30,
+        daily_sink=sink,
+    )
+    daily_ic_summary = sink.finalize()
+    reconcile = assert_daily_ic_reconciled(
+        reconcile_daily_ic(
+            scanned,
+            daily_ic_dir=tmp_run_dir / DAILY_IC_DIR_NAME,
+            daily_spread_dir=tmp_run_dir / DAILY_SPREAD_DIR_NAME,
+        )
+    )
+
+    (tmp_run_dir / "phase_b_run_spec.json").write_text("{}")
+    (tmp_run_dir / "manifest.json").write_text(
+        json.dumps({"artifacts": daily_ic_summary.as_manifest_artifacts()})
+    )
+    (tmp_run_dir / phase_b_run.PHASE_B_REPORT_NAME).write_text("# report\n")
+
+    published = publish_run(
+        tmp_run_dir,
+        tmp_path / "run",
+        run_spec={"run_id": "r", "config_hash": "c"},
+        required_artifacts=(
+            "phase_b_run_spec.json",
+            "manifest.json",
+            phase_b_run.PHASE_B_REPORT_NAME,
+        ),
+        content_hash_exclude_names=PHASE_B_CONTENT_HASH_EXCLUDE_NAMES,
+        success_extra=daily_ic_success_fields(reconcile),
+    )
+
+    assert (published / DAILY_IC_DIR_NAME).is_dir()
+    assert (published / DAILY_SPREAD_DIR_NAME).is_dir()
+    success = json.loads((published / "_SUCCESS.json").read_text(encoding="utf-8"))
+    assert success["daily_ic_reconciled"] is True
+    assert success["daily_ic_reconcile_max_abs_diff"] < 1e-12
+    manifest = json.loads((published / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["artifacts"]["daily_ic"]["file_count"] == 1
+    assert manifest["artifacts"]["daily_ic"]["row_count"] == sum(r["n_dates"] for r in scanned)
+    assert manifest["artifacts"]["daily_spread"]["row_count"] > 0

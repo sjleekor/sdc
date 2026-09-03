@@ -14,7 +14,9 @@ from datetime import date, timedelta
 
 import duckdb
 from research.analysis.horizon_scan_phase_b_diagnostics import (
+    build_secondary_diagnostic_cells,
     compute_phase_b_rank_correlation,
+    run_secondary_feature_diagnostics,
     run_sue_event_ordinal_nonoverlap,
 )
 
@@ -252,3 +254,205 @@ def test_run_sue_event_ordinal_nonoverlap_sign_disagreement_fails_gate() -> None
     assert row["offset_status"] == "complete"
     assert row["offset_sign_agreement_ratio"] == 0.5
     assert row["nonoverlap_robustness_pass"] is False
+
+
+# --- secondary-feature diagnostic scan (02_stage1a §4) ---
+
+
+_MACRO_FAMILY = {
+    "family": "macro_beta_wti",
+    "fdr_family": "macro_exposure",
+    "expected_sign": None,
+    "primary_horizon_set": [20, 60],
+    "features": [
+        {"column": "macro_beta_wti", "role": "primary"},
+        {"column": "macro_rawbeta_wti", "role": "secondary"},
+    ],
+}
+_NO_SECONDARY_FAMILY = {
+    "family": "fin_log_mcap",
+    "fdr_family": "value",
+    "expected_sign": "-",
+    "primary_horizon_set": [60, 120],
+    "features": [{"column": "fin_log_mcap", "role": "primary"}],
+}
+
+
+def test_secondary_diagnostic_cells_are_one_per_column_and_primary_horizon() -> None:
+    cells = build_secondary_diagnostic_cells([_MACRO_FAMILY, _NO_SECONDARY_FAMILY])
+
+    assert [(c["family"], c["feature"], c["h_end"]) for c in cells] == [
+        ("macro_beta_wti", "macro_rawbeta_wti", 20),
+        ("macro_beta_wti", "macro_rawbeta_wti", 60),
+    ]
+    # Cumulative only: a bucket cell would double the count without answering
+    # a different question.
+    assert {c["scan_type"] for c in cells} == {"cum"}
+    assert {c["h_start"] for c in cells} == {0}
+
+
+def test_secondary_diagnostic_cells_skip_families_whose_mart_is_absent() -> None:
+    assert build_secondary_diagnostic_cells([_MACRO_FAMILY], available_families=set()) == []
+    assert (
+        len(
+            build_secondary_diagnostic_cells([_MACRO_FAMILY], available_families={"macro_beta_wti"})
+        )
+        == 2
+    )
+
+
+def _seed_secondary_panel(con: duckdb.DuckDBPyConnection, *, n_sessions: int = 40) -> None:
+    import math
+
+    rows = []
+    start = date(2024, 1, 1)
+    for session in range(1, n_sessions + 1):
+        d = start + timedelta(days=session - 1)
+        for market in ("KOSPI", "KOSDAQ"):
+            for t in range(10):
+                wobble = 3.0 * math.sin(t + 0.7 * session)
+                label = float(t) * 2.0 + wobble
+                rows.append(
+                    (
+                        d,
+                        f"{market[:1]}{t}",
+                        market,
+                        float(t),
+                        -float(t),  # the secondary column ranks the other way
+                        label,
+                        label,
+                        True,
+                        True,
+                        True,
+                        True,
+                        True,
+                        False,
+                    )
+                )
+    con.execute("""
+        CREATE TABLE panel (
+            trade_date DATE, ticker VARCHAR, market VARCHAR,
+            macro_beta_wti DOUBLE, macro_rawbeta_wti DOUBLE,
+            y_rank_20d DOUBLE, raw_label_20d DOUBLE, label_ok_20d BOOLEAN,
+            in_broad BOOLEAN, in_tradable BOOLEAN, common_formation_120d BOOLEAN,
+            common_survivor_120d BOOLEAN
+        )
+    """)
+    con.execute("ALTER TABLE panel ADD COLUMN ca_mask BOOLEAN")
+    con.execute("ALTER TABLE panel ADD COLUMN formation_session_idx BIGINT")
+    con.executemany(
+        "INSERT INTO panel (trade_date, ticker, market, macro_beta_wti, macro_rawbeta_wti, "
+        "y_rank_20d, raw_label_20d, label_ok_20d, in_broad, in_tradable, "
+        "common_formation_120d, common_survivor_120d, ca_mask) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    con.execute(
+        "UPDATE panel SET formation_session_idx = "
+        "date_diff('day', DATE '2023-12-31', trade_date)"
+    )
+
+
+def test_secondary_diagnostics_scan_at_the_discovery_coordinate() -> None:
+    con = duckdb.connect()
+    _seed_secondary_panel(con)
+    cells = [
+        {
+            "family": "macro_beta_wti",
+            "fdr_family": "macro_exposure",
+            "primary_feature": "macro_beta_wti",
+            "feature": "macro_rawbeta_wti",
+            "feature_role": "secondary",
+            "scan_type": "cum",
+            "h_start": 0,
+            "h_end": 20,
+            "expected_sign": None,
+        }
+    ]
+    rows = run_secondary_feature_diagnostics(
+        con,
+        cells,
+        panel_view="panel",
+        sample_start="2024-01-01",
+        min_names=5,
+        min_names_for_spread=5,
+        quantile_count=5,
+        min_dates_per_cell=5,
+        primary_ic_by_cell={("macro_beta_wti", 20): 0.9},
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["status"] == "valid"
+    assert row["universe"] == "broad"
+    assert row["sample_kind"] == "common_survivor"
+    # The secondary column is the primary's mirror image, so its IC is the
+    # negative of it — which is exactly the difference the card reports.
+    assert row["ic_mean"] < 0
+    assert row["primary_ic_mean"] == 0.9
+    assert row["ic_mean_minus_primary"] == row["ic_mean"] - 0.9
+
+
+def test_secondary_diagnostics_report_an_absent_column_rather_than_skipping_it() -> None:
+    con = duckdb.connect()
+    _seed_secondary_panel(con)
+    rows = run_secondary_feature_diagnostics(
+        con,
+        [
+            {
+                "family": "macro_beta_vix",
+                "feature": "macro_rawbeta_vix",
+                "scan_type": "cum",
+                "h_start": 0,
+                "h_end": 20,
+                "expected_sign": None,
+            }
+        ],
+        panel_view="panel",
+        sample_start="2024-01-01",
+        min_names=5,
+        min_names_for_spread=5,
+        quantile_count=5,
+        min_dates_per_cell=5,
+    )
+    assert rows == [
+        {
+            "family": "macro_beta_vix",
+            "feature": "macro_rawbeta_vix",
+            "scan_type": "cum",
+            "h_start": 0,
+            "h_end": 20,
+            "expected_sign": None,
+            "status": "not_evaluated",
+            "status_reason": "column_absent",
+        }
+    ]
+
+
+def test_secondary_diagnostics_never_pass_a_daily_ic_sink(monkeypatch) -> None:
+    """01_stage0 §3.1: ``daily_ic.parquet`` holds the registered scan's series.
+    A diagnostic cell is not a registered hypothesis and must not land there."""
+    import research.analysis.horizon_scan_phase_b_diagnostics as diagnostics
+
+    calls: list[dict] = []
+    real = diagnostics.scan_cell
+
+    def _recorder(con, **kwargs):
+        calls.append(kwargs)
+        return real(con, **kwargs)
+
+    monkeypatch.setattr(diagnostics, "scan_cell", _recorder)
+    con = duckdb.connect()
+    _seed_secondary_panel(con)
+    run_secondary_feature_diagnostics(
+        con,
+        build_secondary_diagnostic_cells([{**_MACRO_FAMILY, "primary_horizon_set": [20]}]),
+        panel_view="panel",
+        sample_start="2024-01-01",
+        min_names=5,
+        min_names_for_spread=5,
+        quantile_count=5,
+        min_dates_per_cell=5,
+    )
+    assert calls
+    assert all(kwargs.get("daily_sink") is None for kwargs in calls)

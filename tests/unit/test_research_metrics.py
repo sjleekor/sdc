@@ -104,6 +104,102 @@ def test_native_rank_ic_matches_legacy_across_contract_edge_cases() -> None:
             assert right == pytest.approx(left, abs=1e-12)
 
 
+def test_native_rank_ic_nans_a_constant_cross_section_at_realistic_sizes() -> None:
+    """I13: Polars' Spearman returns a spurious number for a constant column at
+    some group sizes and NaN at others (measured: NaN at n=50, a number at
+    n=745). A constant cross-section carries no rank information, so the
+    correlation is undefined and the date has to drop out.
+
+    The edge-case test above already had a constant group — with three rows,
+    which is a size where Polars happens to agree. That is why the defect
+    survived: the size that matters is the one a real market day has.
+    """
+    rng = np.random.default_rng(11)
+    for n in (50, 300, 745, 1000, 1581):
+        frame = pl.DataFrame(
+            {
+                "trade_date": [1] * n,
+                "market": ["KOSPI"] * n,
+                "pred": np.zeros(n),
+                "realized": rng.normal(size=n),
+            }
+        )
+        for engine in ("legacy", "polars_native_v1"):
+            out = per_date_market_rank_ic(
+                frame, pred_col="pred", realized_col="realized", min_names=20, engine=engine
+            )
+            assert out.height == 1, (engine, n)
+            assert math.isnan(out["rank_ic"][0]), f"{engine} n={n} gave {out['rank_ic'][0]}"
+
+
+def test_native_rank_ic_nans_a_constant_realized_cross_section() -> None:
+    """The same guard on the other side: an all-tied label is equally
+    undefined, and `_spearman` checks both."""
+    rng = np.random.default_rng(12)
+    n = 745
+    frame = pl.DataFrame(
+        {
+            "trade_date": [1] * n,
+            "market": ["KOSPI"] * n,
+            "pred": rng.normal(size=n),
+            "realized": np.zeros(n),
+        }
+    )
+    for engine in ("legacy", "polars_native_v1"):
+        out = per_date_market_rank_ic(
+            frame, pred_col="pred", realized_col="realized", min_names=20, engine=engine
+        )
+        assert math.isnan(out["rank_ic"][0]), engine
+
+
+def test_native_rank_ic_matches_legacy_on_randomized_market_days() -> None:
+    """Randomized parity at market-day scale, including whole cross-sections
+    that are constant — the shape a count feature has at the start of its
+    history, which is where I13 actually bit."""
+    rng = np.random.default_rng(2026)
+    rows: list[dict] = []
+    for date in range(1, 41):
+        for market, size in (
+            ("KOSPI", int(rng.integers(300, 900))),
+            ("KOSDAQ", int(rng.integers(300, 900))),
+        ):
+            kind = date % 4
+            if kind == 0:
+                pred = np.zeros(size)  # 전부 동점
+            elif kind == 1:
+                pred = rng.integers(0, 3, size).astype(float)  # 심한 동점
+            elif kind == 2:
+                pred = np.zeros(size)
+                pred[: max(1, size // 50)] = 1.0  # 거의 전부 동점
+            else:
+                pred = rng.normal(size=size)  # 동점 없음
+            rows.extend(
+                {"trade_date": date, "market": market, "pred": float(p), "realized": float(r)}
+                for p, r in zip(pred, rng.normal(size=size), strict=True)
+            )
+    frame = pl.DataFrame(rows).sample(fraction=1.0, shuffle=True, seed=5)
+
+    legacy = per_date_market_rank_ic(
+        frame, pred_col="pred", realized_col="realized", min_names=20, engine="legacy"
+    ).sort(["trade_date", "market"])
+    native = per_date_market_rank_ic(
+        frame, pred_col="pred", realized_col="realized", min_names=20, engine="polars_native_v1"
+    ).sort(["trade_date", "market"])
+
+    assert native.select(["trade_date", "market", "n"]).equals(
+        legacy.select(["trade_date", "market", "n"])
+    )
+    n_nan = 0
+    for left, right in zip(legacy["rank_ic"], native["rank_ic"]):
+        if math.isnan(left):
+            n_nan += 1
+            assert math.isnan(right)
+        else:
+            assert right == pytest.approx(left, abs=1e-12)
+    # The constant days must actually be in the sample, or this proves nothing.
+    assert n_nan >= 20
+
+
 def test_gap_aware_newey_west_native_matches_legacy_randomized() -> None:
     rng = np.random.default_rng(20260823)
     for n in (5, 11, 31):

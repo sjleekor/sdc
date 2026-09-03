@@ -336,6 +336,7 @@ def publish_run(
     run_spec: dict[str, Any],
     required_artifacts: tuple[str, ...] = REQUIRED_RUN_ARTIFACTS,
     content_hash_exclude_names: frozenset[str] = _CONTENT_HASH_EXCLUDE_NAMES,
+    success_extra: dict[str, Any] | None = None,
 ) -> Path:
     """Atomic tmp-dir-then-rename publish (§A-9: "임시 run directory에 쓴 뒤
     ... 최종 directory로 rename한다. `_SUCCESS.json`은 마지막에 기록한다").
@@ -349,6 +350,14 @@ def publish_run(
     a caller whose run-spec filename differs (e.g. Phase B's
     ``phase_b_run_spec.json``) must pass its own set or the timestamp fields
     inside that file would leak into the reproducibility hash.
+
+    ``success_extra`` adds run-level facts to ``_SUCCESS.json`` — Stage 0's
+    ``daily_ic_reconciled``/``daily_ic_reconcile_max_abs_diff``. It records a
+    check the caller has *already* enforced: a run whose stored daily IC does
+    not rebuild its own summary must raise before reaching this function, so
+    a published ``_SUCCESS.json`` never carries a false there.
+    ``REQUIRED_RUN_ARTIFACTS`` is deliberately not extended for daily_ic —
+    runs published before Stage 0 stay valid.
     """
     missing = [name for name in required_artifacts if not (tmp_run_dir / name).is_file()]
     if missing:
@@ -364,6 +373,7 @@ def publish_run(
         "config_hash": run_spec.get("config_hash"),
         "content_hash": content_hash,
         "published_at": kst_now_iso(),
+        **(success_extra or {}),
     }
     (final_run_dir / "_SUCCESS.json").write_text(
         json.dumps(success, ensure_ascii=False, indent=2, sort_keys=True) + "\n",

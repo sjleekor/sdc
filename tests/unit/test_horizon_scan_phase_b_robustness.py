@@ -5,6 +5,7 @@ from datetime import date, timedelta
 
 import duckdb
 import polars as pl
+import pytest
 from research.analysis.horizon_scan_phase_b_robustness import (
     _nonoverlap_min_dates_for_cell,
     compute_nonoverlap_robustness_pass,
@@ -385,3 +386,38 @@ def test_evaluate_sue_cluster_confirmation_requires_both_bootstraps_to_pass() ->
 
     one_fails = evaluate_sue_cluster_confirmation(passing, failing)
     assert one_fails["sue_cluster_confirm_pass"] is False
+
+
+def test_phase_b_nonoverlap_robustness_never_reaches_the_daily_ic_sink(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase B's robustness diagnostics route through ``run_nonoverlap_offsets``
+    and ``run_temporal_placebo``, neither of which accepts a Stage 0 sink —
+    ``daily_ic.parquet`` holds the B-7 core scan's series only."""
+    from research.analysis import horizon_scan_runner
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("Phase B robustness must not call scan_cell")
+
+    monkeypatch.setattr(horizon_scan_runner, "scan_cell", _fail)
+    con = duckdb.connect()
+    _seed_phase_b_panel(con, n_sessions=40)
+    rows = run_phase_b_continuous_nonoverlap(
+        con,
+        [
+            {
+                "hypothesis_id": "fin_log_mcap|fin_log_mcap|cum|0|5",
+                "family": "fin_log_mcap",
+                "feature": "fin_log_mcap",
+                "cell_type": "cumulative",
+                "h_start": 0,
+                "h_end": 5,
+                "expected_sign": "+",
+            }
+        ],
+        panel_view="analysis_panel_phase_b",
+        sample_start="2024-01-01",
+        min_names=5,
+        nonoverlap_min_dates_overrides={"default": 5},
+    )
+    assert len(rows) == 1

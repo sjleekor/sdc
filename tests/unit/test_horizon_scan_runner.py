@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import math
 from datetime import date
 
 import duckdb
 import pytest
+from research.analysis.horizon_scan_daily_ic import CELL_IDENTITY_COLUMNS
 from research.analysis.horizon_scan_runner import (
+    UNIVERSE_SAMPLE_COMBOS,
     assert_lag1_matches_prior_valid_session,
     build_analysis_panel_sql,
     build_broad_quantile_segment_sql,
@@ -13,6 +16,7 @@ from research.analysis.horizon_scan_runner import (
     register_analysis_panel,
     resolve_common_formation_end,
     resolve_horizon_eligible_end,
+    run_registry_scan,
 )
 
 
@@ -324,3 +328,156 @@ def test_lag1_shift_invariant_rejects_mismatched_data() -> None:
         assert_lag1_matches_prior_valid_session(
             con, panel_view="analysis_panel", native_col="native_col", lag1_col="lag1_col"
         )
+
+
+# --- Stage 0: run_registry_scan is the only scan_cell caller with a sink ---
+
+
+class _RecordingSink:
+    def __init__(self) -> None:
+        self.cells: list[dict[str, object]] = []
+        self.flushed: list[str] = []
+
+    def emit(self, cell, *, daily, market_ic, daily_spread=None, market_spread=None) -> None:
+        self.cells.append(cell)
+
+    def flush_feature(self, feature: str) -> None:
+        self.flushed.append(feature)
+
+
+def _seed_two_feature_panel(con: duckdb.DuckDBPyConnection) -> None:
+    rows = []
+    for session in range(1, 31):
+        d = f"2024-01-01' + {session - 1}"
+        for market in ("KOSPI", "KOSDAQ"):
+            for t in range(10):
+                wobble = 3.0 * math.sin(t + 0.7 * session)
+                label = float(t) * 2.0 + wobble
+                rows.append(
+                    f"(DATE '{d}, '{market[:1]}{t}', '{market}', {session}, "
+                    f"{float(t) + 0.01 * session}, {float(9 - t) + 0.01 * session}, "
+                    f"{label}, {label}, true, true, true, true, true, false)"
+                )
+    con.execute(
+        "CREATE TABLE analysis_panel AS SELECT "
+        "trade_date, ticker, market, formation_session_idx, "
+        "CAST(feat_a AS DOUBLE) AS feat_a, CAST(feat_b AS DOUBLE) AS feat_b, "
+        "CAST(y_rank_5d AS DOUBLE) AS y_rank_5d, "
+        "CAST(raw_label_5d AS DOUBLE) AS raw_label_5d, "
+        "label_ok_5d, in_broad, in_tradable, common_formation_120d, "
+        "common_survivor_120d, ca_mask FROM (VALUES "
+        + ",".join(rows)
+        + ") t(trade_date, ticker, market, formation_session_idx, feat_a, feat_b, "
+        "y_rank_5d, raw_label_5d, label_ok_5d, in_broad, in_tradable, "
+        "common_formation_120d, common_survivor_120d, ca_mask)"
+    )
+
+
+_TWO_FEATURE_REGISTRY = [
+    {
+        "hypothesis_id": "fam_a|feat_a|cum|0|5",
+        "family": "fam_a",
+        "feature": "feat_a",
+        "scan_type": "cum",
+        "h_start": 0,
+        "h_end": 5,
+        "expected_sign": "+",
+        "hypothesis_role": "primary",
+    },
+    {
+        "hypothesis_id": "fam_b|feat_b|cum|0|5",
+        "family": "fam_b",
+        "feature": "feat_b",
+        "scan_type": "cum",
+        "h_start": 0,
+        "h_end": 5,
+        "expected_sign": "-",
+        "hypothesis_role": "primary",
+    },
+]
+
+_TWO_FEATURE_SCAN_KWARGS = {
+    "sample_start": "2024-01-01",
+    "min_names": 5,
+    "min_names_for_spread": 5,
+    "quantile_count": 5,
+    "min_dates_per_cell": 5,
+}
+
+
+@pytest.mark.parametrize("reuse_formation_frames", [True, False])
+def test_run_registry_scan_rows_are_unchanged_by_a_sink(reuse_formation_frames: bool) -> None:
+    con = duckdb.connect()
+    _seed_two_feature_panel(con)
+    without = run_registry_scan(
+        con,
+        _TWO_FEATURE_REGISTRY,
+        **_TWO_FEATURE_SCAN_KWARGS,
+        reuse_formation_frames=reuse_formation_frames,
+    )
+    with_sink = run_registry_scan(
+        con,
+        _TWO_FEATURE_REGISTRY,
+        **_TWO_FEATURE_SCAN_KWARGS,
+        reuse_formation_frames=reuse_formation_frames,
+        daily_sink=_RecordingSink(),
+    )
+    assert with_sink == without
+
+
+@pytest.mark.parametrize("reuse_formation_frames", [True, False])
+def test_run_registry_scan_flushes_every_feature_exactly_once(
+    reuse_formation_frames: bool,
+) -> None:
+    con = duckdb.connect()
+    _seed_two_feature_panel(con)
+    sink = _RecordingSink()
+    run_registry_scan(
+        con,
+        _TWO_FEATURE_REGISTRY,
+        **_TWO_FEATURE_SCAN_KWARGS,
+        reuse_formation_frames=reuse_formation_frames,
+        daily_sink=sink,
+    )
+    assert sorted(sink.flushed) == ["feat_a", "feat_b"]
+    assert len(sink.cells) == 8  # 2 hypotheses x 4 universe/sample combos
+
+
+def test_run_registry_scan_normalizes_the_identity_of_every_emitted_cell() -> None:
+    con = duckdb.connect()
+    _seed_two_feature_panel(con)
+    sink = _RecordingSink()
+    run_registry_scan(con, _TWO_FEATURE_REGISTRY, **_TWO_FEATURE_SCAN_KWARGS, daily_sink=sink)
+    assert all(tuple(cell) == CELL_IDENTITY_COLUMNS for cell in sink.cells)
+    assert {(c["hypothesis_id"], c["universe"], c["sample_kind"]) for c in sink.cells} == {
+        (hid, universe, sample_kind)
+        for hid in ("fam_a|feat_a|cum|0|5", "fam_b|feat_b|cum|0|5")
+        for universe, sample_kind in UNIVERSE_SAMPLE_COMBOS
+    }
+
+
+def test_run_registry_scan_normalizes_a_phase_b_shaped_registry() -> None:
+    """Phase B hands ``run_registry_scan`` rows carrying ``role``/``cell_type``
+    rather than ``hypothesis_role``; the stored identity is the same schema."""
+    con = duckdb.connect()
+    _seed_two_feature_panel(con)
+    sink = _RecordingSink()
+    run_registry_scan(
+        con,
+        [
+            {
+                "hypothesis_id": "fin_fam|feat_a|cum|0|5",
+                "family": "fin_fam",
+                "feature": "feat_a",
+                "cell_type": "cumulative",
+                "scan_type": "cum",
+                "h_start": 0,
+                "h_end": 5,
+                "role": "ready_primary",
+            }
+        ],
+        **_TWO_FEATURE_SCAN_KWARGS,
+        daily_sink=sink,
+    )
+    assert {cell["hypothesis_role"] for cell in sink.cells} == {"ready_primary"}
+    assert {cell["scan_type"] for cell in sink.cells} == {"cum"}

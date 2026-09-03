@@ -26,7 +26,8 @@ list의 vintage 중복 문제가 드러나 plan §4.4.1이 계약 보강으로 �
 표로 있다. 코드 관점의 큰 변화는 셋이다.
 
 1. **B-10이 Stage 3만 남았다.** Stage 2(진단 7종)·4(family 카드)·5(run 리포트 2종)를 넣고
-   전부 run 디렉터리에 연결했다. §4.3 참고.
+   전부 run 디렉터리에 연결했다. §4.3 참고. → **Stage 3의 `daily_ic.parquet`은 2026-08-29에
+   단계 0으로 완료됐다. `cohort_ic.parquet`은 SUE 표본이 없어 미작성.**
 2. **B-2 결함 3건을 고쳤다.** Stage 2 진단을 실제 lake에 돌리자마자 나왔다. §4.3.2.
 3. **B-9의 마지막 미결 항목이 닫혔다.** source 비치명 경고가 grade A 상한으로 연결됐다.
    §4.2.
@@ -917,9 +918,19 @@ B-10 Stage 2 진단 7종도 전부 `core/`에 산출됐다(`capital_change_quali
   **정기보고서 정정이 연 1,150~1,400건**이다. 2022~2025 4개 연도 합이 5,041건으로, B-1이
   capacity 참고값으로 적어둔 "약 5천 건"과 사실상 일치한다. 이제 추정이 아니라 측정값이다.
   2021년은 수집 중이라(법인 1,203/약 2,650) 값이 더 올라간다.
-- **Stage 3** — `daily_ic.parquet`/`cohort_ic.parquet`: `scan_cell`/`scan_event_cohort_cell`이
-  지금 요약 통계만 반환하고 날짜별/코호트별 원시 IC 시퀀스는 버리므로, Phase A와 공유하는
-  코드(`per_date_market_rank_ic` 등)의 내부를 건드려야 함 — 더 침습적, 별도 계획 필요.
+- **Stage 3 — `daily_ic.parquet` 완료(2026-08-29), `cohort_ic.parquet` 미작성.**
+  별도 계획(단계 0)으로 처리했다 — `docs/dev/20260829_macro_features/01_design/01_stage0_daily_ic_persistence.md`.
+  `per_date_market_rank_ic` 내부는 건드리지 않았다. `scan_cell`이 이미 만들어 둔
+  `market_ic`·`daily`·`daily_spread`를 side-channel(`DailyIcSink`)로 넘기는 방식이라,
+  sink를 주지 않으면 반환값과 계산 경로가 이전과 완전히 같다. 복제 루프·기간 분할·lag1 직접
+  호출은 sink를 받지 않으므로 자동으로 빠진다.
+
+  Phase B 산출물은 run 루트의 `daily_ic.parquet`·`daily_spread.parquet`(§7.1 이름 그대로)이고,
+  저장값에서 요약 통계를 다시 만들어 `horizon_ic.parquet`과 대조하는 검사가 run마다 돈다
+  (`_SUCCESS.json`의 `daily_ic_reconciled`).
+
+  **`cohort_ic.parquet`은 만들지 않았다.** `fin_sue`에 표본이 없어(6 cell 전부 `insufficient`)
+  코호트 IC 시계열을 저장해도 볼 것이 없다. SUE에 표본이 생기면 그때 같은 방식으로 붙인다.
 - **Stage 4 — 완료(2026-08-12).** `research/analysis/horizon_scan_phase_b_cards.py`가
   family 8개마다 한 행(`family_summary.parquet`)과 한 카드(`family_cards.md`)를 낸다.
   §6 B-10이 정한 카드 항목을 identity / readiness / coverage / result / next_step 다섯 묶음으로

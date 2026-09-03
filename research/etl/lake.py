@@ -176,6 +176,35 @@ def _persist_derived_mart(
     )
 
 
+def register_persisted_derived_mart(
+    con: duckdb.DuckDBPyConnection,
+    config: LakeConfig,
+    name: str,
+) -> str:
+    """Bind a snapshot's already-persisted derived mart as a view. No recompute.
+
+    ``register_derived_marts`` rebuilds the fact from the raw lake; this reads
+    the parquet ``compute_all --from-step marts`` wrote and the coverage/
+    readiness gates then passed. For a consumer that must agree with those
+    gates — ``feat_macro_exposure`` and the readiness check that decides
+    whether its families are ready — reading the same bytes is the only way to
+    guarantee it, and it needs no raw views registered at all.
+
+    Raises ``FileNotFoundError`` when the snapshot has no such mart, which is
+    what leaves a dependent family ``blocked`` rather than silently computing a
+    different fact.
+    """
+    glob_path = str(config.derived_mart_root / name / "**" / "*.parquet")
+    if not _glob_has_files(con, glob_path):
+        raise FileNotFoundError(f"no persisted derived mart for {name!r} at {glob_path}")
+    glob = _sql_str_literal(glob_path)
+    con.execute(
+        f"CREATE OR REPLACE VIEW {name} AS "
+        f"SELECT * FROM read_parquet({glob}, hive_partitioning=false)"
+    )
+    return name
+
+
 def _common_feature_calendars(
     con: duckdb.DuckDBPyConnection,
     *,
