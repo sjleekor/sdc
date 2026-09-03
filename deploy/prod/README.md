@@ -211,7 +211,7 @@ source lock은 `/tmp/sdc-locks/<domain>.lock`에 `flock`을 걸고, lock 획득 
 Cronicle API key는 repo 밖의 secret 파일에서 읽고, 값 자체를 출력하거나 문서에 붙이지 않는다.
 
 ```bash
-APIKEY=$(awk -F': *' '/^APIKEY:/ {print $2}' /Users/whishaw/wss_p/stock_data_collector_secrets/cronicle_info)
+APIKEY=$(awk '$1=="APIKEY:" {print $2}' /Users/whishaw/wss_p/stock_data_collector_secrets/cronicle_info)
 
 # 현재 schedule
 curl -fsS -H "X-API-Key: $APIKEY" \

@@ -20,7 +20,7 @@ All sj2-server / Cronicle credentials live in the secrets directory **outside** 
 That file contains the Cronicle UI USERNAME / PASSWORD and an `APIKEY:` line. Read it on demand; never copy these values into committed files, this skill, logs, or transcript text. When invoking the API, pass the key through an env var or inline header, e.g.:
 
 ```bash
-APIKEY=$(awk -F': *' '/^APIKEY:/ {print $2}' /Users/whishaw/wss_p/stock_data_collector_secrets/cronicle_info)
+APIKEY=$(awk '$1=="APIKEY:" {print $2}' /Users/whishaw/wss_p/stock_data_collector_secrets/cronicle_info)
 curl -fsS -H "X-API-Key: $APIKEY" 'http://sj2-server:3012/api/app/get_schedule/v1'
 ```
 
