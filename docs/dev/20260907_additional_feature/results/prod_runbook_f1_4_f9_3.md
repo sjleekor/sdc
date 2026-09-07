@@ -1,7 +1,7 @@
 # prod 실행 준비 — F-1.4(업종 첫 스냅샷) · F-9.3(S-1 잔여 백필)
 
 - 작성: 2026-09-07
-- 상태: **명령만 준비됐다. 아직 아무것도 실행하지 않았다.** 사용자 확인 뒤에 돈다.
+- 상태: **F-1(§1)은 2026-09-08 실행 완료** → [`f1_4_first_snapshot_20260908.md`](f1_4_first_snapshot_20260908.md). **F-9.3(§2)은 여전히 미실행, 승인 대기.**
 - 실측은 모두 prod `krx_data`(sj2) 읽기 전용 조회다.
 
 ---
@@ -51,17 +51,17 @@ B를 권한다. 이유 셋.
    수집이 겹쳐 append가 no-op가 되고(같은 달 `DO NOTHING`), 첫 구간이 10월까지 밀린다.
 3. D-F1 판정 시점이 계획(2026-12)대로 유지된다. A는 한 달 밀린다.
 
-비용은 3,959 호출 한 번(약 13분)이다.
+비용은 3,959 호출 한 번이다 — **실측 19분 27초**(3.27 req/s). 13분 추정은 응답 지연을 뺀 값이라 틀렸다.
 
 ### 1.3 명령 — 안 B
 
 ```bash
-# (1) 시드: 2026-08로. API 호출 없음, 수 초.
+# (1) 시드: 2026-08로. API 호출 없음, 수 초.  [실행됨 2026-09-08 → 3,959행]
 ssh whi@sj2-server 'cd /home/whi/apps/sdc && \
   DART_PROFILE_HISTORY_MONTH=2026-08-01 ./bin/dart-seed-corp-profile-history.sh'
 # 기대: "Rows inserted: 3959", is_seed=true, observed_at=2026-08-15
 
-# (2) 첫 수집 스냅샷: 2026-09. --force로 skip-if-present를 끈다.
+# (2) 첫 수집 스냅샷: 2026-09. --force로 skip-if-present를 끈다.  [실행됨 2026-09-08 → 3,959, 19분 27초]
 #     opendart lock을 잡으므로 04:00 체인과 겹치지 않는 시간에.
 ssh whi@sj2-server 'cd /home/whi/apps/sdc && \
   DART_PROFILE_UNIVERSE_SCOPE=historical DART_PROFILE_FORCE=1 \

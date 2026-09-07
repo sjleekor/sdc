@@ -10,7 +10,7 @@
 
 | 패키지 | 내용 | 새 수집 | 상태 | 다음 행동 |
 |---|---|---|---|---|
-| F-1 | 업종 `induty_code` 버저닝 | OpenDART 월 3,959 | F-1.1~F-1.3 완료(2026-09-07) | **F-1.4 prod 첫 실행 승인 대기** |
+| F-1 | 업종 `induty_code` 버저닝 | OpenDART 월 3,959 | F-1.1~F-1.4 완료(2026-09-08) | **F-1.6 월 Cronicle 이벤트**(없으면 10월 스냅샷이 안 돈다) |
 | F-2 | 통계적 peer 관계 피쳐 | 없음 | **완료**(2026-09-07, snapshot 2026-08-23) | F-HS-1 대기 |
 | F-3 | 업종 관계 피쳐 | 없음(F-1 선행) | 대기(D-F1) | 3개월 변경률 측정 뒤 |
 | F-4 | 재무위험·생애주기·전이 | 없음 | **완료**(2026-09-07, snapshot 2026-08-23) | F-HS-1 대기. 5 family는 2020~ 표본 |
@@ -49,7 +49,12 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
       — 함께 고친 것: `CompanyProfileResult`가 다른 OpenDART 결과와 달리 `all_rate_limited`를 들고 있어 `is_opendart_daily_limit_exhausted`가 이 경로에서 **한 번도 걸리지 않았다.** 키 소진 시 법인당 3회 재시도하며 3,959건을 끝까지 돌았고 exit 75가 안 났다. `exhaustion_reason`으로 통일
 - [x] **F-1.3** 시드: `dart_corp_master` 현재 행 → `observed_month`, `is_seed=true`. CLI `dart seed-corp-profile-history --observed-month`
       — local `mydb`에서 실행 확인: 1회차 700행, 2회차 0행(idempotent), `observed_at`은 corp master의 `profile_fetched_at`(2026-08-15~18) 유지
-- [ ] **F-1.4** 첫 실행(prod): 3,959 법인, 오류 0, 행 수 = 법인 수 — **명령 준비 완료, 사용자 확인 대기** → [`results/prod_runbook_f1_4_f9_3.md`](results/prod_runbook_f1_4_f9_3.md) §1. prod에 테이블이 없으므로 릴리즈 + `db init`이 선행. 시드 월을 2026-08(관측 실제 시각)로 할지 2026-09(문서)로 할지 결정 필요
+- [x] **F-1.4** 첫 실행(prod) **완료 2026-09-08** → [`results/f1_4_first_snapshot_20260908.md`](results/f1_4_first_snapshot_20260908.md)
+      — v0.12.0 릴리즈·배포 → `db init`(4분 33초) → 시드 2026-08-01 **3,959행** → 첫 수집 스냅샷 2026-09 **3,959/3,959/3,959, 오류 0, 19분 27초, `status=success`**
+      — 시드 재실행 0행으로 prod `ON CONFLICT DO NOTHING` 확인
+      — 월 호출 실측 **20분**(3.27 req/s). §3의 13분 추정은 호출당 0.2s만 계산한 값이라 틀렸다
+      — 첫 변경률(판정 아님): 코드 0.0505%, **그룹 0.0253%**(문턱 0.3%). 코드 2건 중 1건은 업종 변경이 아니라 정밀도 변경(262→26293)이다
+      — 부수 확인: `corp_cls`→`E` 6건 중 5건이 `stock_master` 상폐와 일치하고 `last_seen_date`가 두 스냅샷 사이에 들어간다. 6번째는 `stock_master`에 행이 없는 KONEX 종목이다. `corp_cls`가 `is_active`보다 신선하다
 - [ ] **F-1.5** 마트 `dim_industry_pit_daily`(`ind_ksic_code`, `ind_group`, `ind_is_backcast`, `ind_changed_recent_252`) + 테스트(backcast 경계, as-of, fold-up 규칙 동일)
 - [ ] **F-1.6** Cronicle 월 이벤트 + freshness 월 예산
 - [ ] **F-1.7** 변경률 리포트 스크립트 + 첫 회(2026-10)
@@ -140,7 +145,7 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
 
 | 항목 | 값 | 근거 |
 |---|---|---|
-| F-1 월 호출 | 3,959 × 0.2s ≈ 13분 | N2-7b 1,301초/3,959 |
+| F-1 월 호출 | **약 20분** (3.27 req/s 실측, 2026-09-08) | N2-7b 1,301초와 같은 급. 0.2s × 3,959 = 13분은 응답 지연을 뺀 값이라 틀렸다 |
 | F-2 peer 계산 | 월 2,800² 상관 × 130개월, 수 분 | numpy |
 | F-2 마트 | 7M행 × peer 20 조인 → 월별 파티션 | DuckDB |
 | F-4 마트 | `feat_fin_scan_daily`(7.2M행)와 같은 규모 | 같은 vintage 입력 |
