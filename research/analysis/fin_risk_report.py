@@ -662,6 +662,13 @@ def render(con: duckdb.DuckDBPyConnection, config: LakeConfig, available: set[st
             "",
             summary_section(con),
             "",
+            "",
+            "**holdout(2025-08-01~)은 열지 않았다.** 이 리포트의 모든 수치는 피쳐 "
+            "쪽만 본다 — 커버리지·분포·자기상관·피쳐 간 순위상관·이벤트 빈도. "
+            "forward 수익률이나 라벨을 쓰는 계산은 하나도 없으므로 표본을 전 "
+            "구간으로 잡아도 홀드아웃이 소진되지 않는다. 판정은 F-HS에서 사전등록된 "
+            "경계로만 한다.",
+            "",
             "---",
             "",
             "## 1. 커버리지·노출 지연",

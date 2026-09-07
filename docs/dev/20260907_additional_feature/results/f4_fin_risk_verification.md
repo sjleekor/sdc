@@ -1,6 +1,6 @@
 # F-4 — `feat_fin_risk` 마트 검증 리포트
 
-- 생성: 2026-09-07 23:36 KST
+- 생성: 2026-09-07 23:44 KST
 - snapshot `2026-08-23` / source `sj2_remote`
 - `FORMULA_VERSION = fin_risk_v1`
 - `feat_fin_risk` 7,211,785행, 2007-06-05 ~ 2026-08-21
@@ -18,6 +18,9 @@
 5. **전이 두 개는 continuous로 확정.** `fin_lifecycle_transition` 연평균 0.69, `fin_profit_turn` 0.27 — 둘 다 5% 문턱을 크게 넘는다(§6). `fin_dividend_initiation`(0.040)·`fin_negative_equity_exit`(0.004)은 event cohort 그대로다.
 6. **생애주기 단계 분포는 Dickinson과 부합한다.** Mature 0.35가 가장 크고 Introduction 0.15 / Growth 0.23 / Shake-out 0.16 / Decline 0.11이다. 세 현금흐름 중 하나라도 있는 행 기준 단계 NULL 비율 0.3419 — 대부분 세 개가 다 차지 않은 행이다.
 7. **Decline·부실 판정은 보류.** 상폐 종목 재무 커버리지가 9.2%이고 실제 상폐 모집단은 그보다 크다(§4). F-9.3·F-9.4 뒤에 다시 본다.
+
+
+**holdout(2025-08-01~)은 열지 않았다.** 이 리포트의 모든 수치는 피쳐 쪽만 본다 — 커버리지·분포·자기상관·피쳐 간 순위상관·이벤트 빈도. forward 수익률이나 라벨을 쓰는 계산은 하나도 없으므로 표본을 전 구간으로 잡아도 홀드아웃이 소진되지 않는다. 판정은 F-HS에서 사전등록된 경계로만 한다.
 
 ---
 
