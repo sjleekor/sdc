@@ -146,6 +146,52 @@ class Storage(Protocol):
         """
         ...
 
+    def append_company_profile_history(
+        self,
+        profiles: list[CompanyProfile],
+        observed_month: date,
+        run_id: str | None = None,
+    ) -> UpsertResult:
+        """Append one monthly observation per profile (F-1).
+
+        ``dart_corp_master`` is an upsert and loses the previous industry code,
+        so this is the table that makes ``induty_code`` point-in-time going
+        forwards.  ``(corp_code, observed_month)`` is the skip-if-present key
+        and the insert is ``DO NOTHING``: a second run in the same month adds
+        nothing, which is what makes the monthly job safe to retry.
+
+        Args:
+            profiles: Profiles just fetched.
+            observed_month: First day of the observation month.
+            run_id: The ``ingestion_runs`` row this observation came from.
+
+        Returns:
+            Counters; ``updated`` counts the rows actually inserted, so a
+            re-run in the same month reports 0.
+        """
+        ...
+
+    def seed_company_profile_history(
+        self, observed_month: date, run_id: str | None = None
+    ) -> UpsertResult:
+        """Copy ``dart_corp_master``'s current profiles in as the first month.
+
+        The history has to start somewhere, and what exists is one current
+        value per corporation.  Those rows are marked ``is_seed = true`` and
+        carry the master's own ``profile_fetched_at`` as ``observed_at``, so a
+        consumer can tell "observed in this month" from "was already true when
+        we started looking".  Rows without a profile are skipped — there is
+        nothing to record for them.
+
+        Args:
+            observed_month: First day of the month to seed as.
+            run_id: The ``ingestion_runs`` row this seed came from.
+
+        Returns:
+            Counters for the rows inserted.
+        """
+        ...
+
     def get_last_successful_run(self, run_type: RunType) -> IngestionRun | None:
         """Return the most recent SUCCESS-status run for the given run_type, or None."""
         ...

@@ -104,6 +104,7 @@ PIPELINE_FULL_REFRESH_TABLE_NAMES: tuple[str, ...] = (
     "krx_security_flow_raw",
     # account / financial / XBRL pipeline
     "dart_corp_master",
+    "dart_corp_profile_history",
     "dart_financial_statement_raw",
     "dart_share_count_raw",
     "dart_shareholder_return_raw",
@@ -388,6 +389,61 @@ SYNC_TABLE_SPECS: tuple[TableSyncSpec, ...] = (
             "LIMIT 1"
         ),
         cursor_indexes=(9, 0),
+    ),
+    TableSyncSpec(
+        # F-1. Append-only, so the mirror never has to update a row: the
+        # conflict target is the natural key and update_columns is empty except
+        # for the audit fields, which a re-seed can legitimately move.
+        name="dart_corp_profile_history",
+        select_list=(
+            "corp_code, observed_month, observed_at, ticker, corp_cls, induty_code, "
+            "est_dt, acc_mt, corp_name, stock_name, is_seed, profile_raw, run_id, "
+            "source, fetched_at"
+        ),
+        from_clause="dart_corp_profile_history",
+        order_columns=("fetched_at", "corp_code", "observed_month"),
+        insert_columns=(
+            "corp_code",
+            "observed_month",
+            "observed_at",
+            "ticker",
+            "corp_cls",
+            "induty_code",
+            "est_dt",
+            "acc_mt",
+            "corp_name",
+            "stock_name",
+            "is_seed",
+            "profile_raw",
+            "run_id",
+            "source",
+            "fetched_at",
+        ),
+        conflict_columns=("corp_code", "observed_month"),
+        update_columns=(
+            "observed_at",
+            "ticker",
+            "corp_cls",
+            "induty_code",
+            "est_dt",
+            "acc_mt",
+            "corp_name",
+            "stock_name",
+            "is_seed",
+            "profile_raw",
+            "run_id",
+            "source",
+            "fetched_at",
+        ),
+        local_cursor_sql=(
+            "SELECT fetched_at, corp_code, observed_month "
+            "FROM dart_corp_profile_history "
+            "ORDER BY fetched_at DESC, corp_code DESC, observed_month DESC "
+            "LIMIT 1"
+        ),
+        cursor_indexes=(14, 0, 1),
+        json_columns=("profile_raw",),
+        copy_merge_enabled=True,
     ),
     TableSyncSpec(
         name="dart_financial_statement_raw",

@@ -125,8 +125,9 @@ def test_managed_mirror_tables_exclude_local_audit_tables() -> None:
 
     # The mirror only carries raw + the shared common_feature_series config now;
     # the derived/catalog tables are recomputed by the DuckDB marts (refactor §5.2).
-    # +daily_market_cap (N1), +dart_employee_raw / dart_governance_raw (N6)
-    assert len(pipeline_names) == 18
+    # +daily_market_cap (N1), +dart_employee_raw / dart_governance_raw (N6),
+    # +dart_corp_profile_history (F-1)
+    assert len(pipeline_names) == 19
     assert set(pipeline_names).issubset(spec_names)  # every mirrored table has a spec
     assert "ingestion_runs" not in pipeline_names
     assert "sync_checkpoints" not in pipeline_names
@@ -281,6 +282,7 @@ def test_copy_merge_specs_are_limited_to_update_aware_tables() -> None:
         "dart_governance_raw",
         "dart_xbrl_document",
         "dart_xbrl_fact_raw",
+        "dart_corp_profile_history",
         "stock_metric_fact",
         "common_feature_observation_raw",
         "common_feature_daily_fact",

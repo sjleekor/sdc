@@ -316,6 +316,7 @@ non_resumable_tables=(
   dart_filing_receipt_raw
   dart_xbrl_document
   dart_corp_master
+  dart_corp_profile_history
   stock_master
   stock_master_snapshot
   stock_master_snapshot_items

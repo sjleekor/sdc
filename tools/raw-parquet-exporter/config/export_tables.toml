@@ -129,6 +129,17 @@ order_by = ["ticker", "corp_code", "modify_date"]
 # N2: without this the column exports as a string instead of JSON.
 jsonb_columns = ["profile_raw"]
 
+# F-1. One row per corporation per month (~3,959/month), so it stays small for
+# years — a single unpartitioned read is cheap and re-runnable. No raw_id, so
+# raw_id_range does not apply.
+[[tables]]
+name = "dart_corp_profile_history"
+priority = "P1"
+extract_strategy = "full_table"
+output_partitions = []
+order_by = ["observed_month", "corp_code"]
+jsonb_columns = ["profile_raw"]
+
 [[tables]]
 name = "stock_master"
 priority = "P1"

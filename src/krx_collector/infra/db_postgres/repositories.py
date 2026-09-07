@@ -727,6 +727,113 @@ class PostgresStorage:
                 )
                 return {row[0] for row in cur.fetchall()}
 
+    def append_company_profile_history(
+        self,
+        profiles: list[CompanyProfile],
+        observed_month: date,
+        run_id: str | None = None,
+    ) -> UpsertResult:
+        """Append one monthly observation per profile (F-1).
+
+        ``DO NOTHING`` on ``(corp_code, observed_month)``: the history is
+        append-only and a second run in the same month must not rewrite an
+        observation that was already made.  ``updated`` therefore counts real
+        insertions, and a repeat run reports 0 — the idempotency check.
+        """
+        import json
+
+        if not profiles:
+            return UpsertResult()
+
+        result = UpsertResult()
+        month = observed_month.replace(day=1)
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                args = [
+                    (
+                        p.corp_code,
+                        month,
+                        p.fetched_at,
+                        p.ticker,
+                        p.corp_cls,
+                        p.induty_code,
+                        p.est_dt,
+                        p.acc_mt,
+                        p.corp_name,
+                        p.stock_name,
+                        json.dumps(p.raw_payload, ensure_ascii=False),
+                        run_id,
+                        p.fetched_at,
+                    )
+                    for p in profiles
+                ]
+
+                result.updated = _execute_values_counted(
+                    cur,
+                    """
+                    INSERT INTO dart_corp_profile_history (
+                        corp_code, observed_month, observed_at, ticker, corp_cls,
+                        induty_code, est_dt, acc_mt, corp_name, stock_name,
+                        is_seed, profile_raw, run_id, source, fetched_at
+                    )
+                    SELECT
+                        v.corp_code, v.observed_month, v.observed_at, v.ticker, v.corp_cls,
+                        v.induty_code, v.est_dt, v.acc_mt, v.corp_name, v.stock_name,
+                        FALSE, v.profile_raw, v.run_id, 'OPENDART', v.fetched_at
+                    FROM (VALUES %s) AS v (
+                        corp_code, observed_month, observed_at, ticker, corp_cls,
+                        induty_code, est_dt, acc_mt, corp_name, stock_name,
+                        profile_raw, run_id, fetched_at
+                    )
+                    ON CONFLICT (corp_code, observed_month) DO NOTHING
+                    """,
+                    args,
+                    template=(
+                        "(%s, %s::date, %s::timestamptz, %s, %s, %s, %s::date, %s, %s, %s, "
+                        "%s::jsonb, %s::uuid, %s::timestamptz)"
+                    ),
+                )
+
+        return result
+
+    def seed_company_profile_history(
+        self, observed_month: date, run_id: str | None = None
+    ) -> UpsertResult:
+        """Copy the corp master's current profiles in as the first month (F-1).
+
+        ``observed_at`` is the master's own ``profile_fetched_at``, not now():
+        the value was observed whenever it was fetched, and pretending it was
+        observed at seed time would make the first change interval look shorter
+        than it is.  ``is_seed`` marks these rows so a consumer that needs a
+        real observation window can exclude them.
+        """
+        result = UpsertResult()
+        month = observed_month.replace(day=1)
+
+        with get_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO dart_corp_profile_history (
+                        corp_code, observed_month, observed_at, ticker, corp_cls,
+                        induty_code, est_dt, acc_mt, corp_name, stock_name,
+                        is_seed, profile_raw, run_id, source, fetched_at
+                    )
+                    SELECT
+                        m.corp_code, %s::date, m.profile_fetched_at, m.ticker, m.corp_cls,
+                        m.induty_code, m.est_dt, m.acc_mt, m.corp_name, m.stock_name,
+                        TRUE, m.profile_raw, %s::uuid, 'OPENDART', m.profile_fetched_at
+                    FROM dart_corp_master m
+                    WHERE m.profile_fetched_at IS NOT NULL
+                    ON CONFLICT (corp_code, observed_month) DO NOTHING
+                    """,
+                    (month, run_id),
+                )
+                result.updated = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
+        return result
+
     def get_existing_dart_financial_statement_keys(
         self,
         bsns_years: list[int],

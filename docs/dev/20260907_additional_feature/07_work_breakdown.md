@@ -10,7 +10,7 @@
 
 | 패키지 | 내용 | 새 수집 | 상태 | 다음 행동 |
 |---|---|---|---|---|
-| F-1 | 업종 `induty_code` 버저닝 | OpenDART 월 3,959 | 미착수 | 스키마·append 경로·시드 |
+| F-1 | 업종 `induty_code` 버저닝 | OpenDART 월 3,959 | F-1.1~F-1.3 완료(2026-09-07) | **F-1.4 prod 첫 실행 승인 대기** |
 | F-2 | 통계적 peer 관계 피쳐 | 없음 | **완료**(2026-09-07, snapshot 2026-08-23) | F-HS-1 대기 |
 | F-3 | 업종 관계 피쳐 | 없음(F-1 선행) | 대기(D-F1) | 3개월 변경률 측정 뒤 |
 | F-4 | 재무위험·생애주기·전이 | 없음 | 미착수 | `feat_fin_risk` |
@@ -43,10 +43,13 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
 
 ### F-1 업종 PIT (`01`)
 
-- [ ] **F-1.1** DDL `dart_corp_profile_history` + 7곳 등록 + `docs/database.md`
-- [ ] **F-1.2** 서비스: `sync-corp-profile --refresh` 결과를 history에 append(`(corp_code, observed_month)` skip). `RunType` 추가
-- [ ] **F-1.3** 시드: `dart_corp_master` 현재 행 → `observed_month=2026-09-01`, `is_seed=true`
-- [ ] **F-1.4** 첫 실행(prod): 3,959 법인, 오류 0, 행 수 = 법인 수
+- [x] **F-1.1** DDL `dart_corp_profile_history` + 7곳 등록 + `docs/database.md`. `db init` → 테이블 + 인덱스 3개 생성 확인(local `mydb`)
+- [x] **F-1.2** 서비스: `sync-corp-profile` 결과를 history에 append(`(corp_code, observed_month)` skip). `RunType` 추가(`dart_corp_profile_history_seed`), 결과 카운터 `history_rows_appended`
+      — 옵션 이름은 `--refresh`가 아니라 기존 `--force`다(이 저장소에 `--refresh`는 없다)
+      — 함께 고친 것: `CompanyProfileResult`가 다른 OpenDART 결과와 달리 `all_rate_limited`를 들고 있어 `is_opendart_daily_limit_exhausted`가 이 경로에서 **한 번도 걸리지 않았다.** 키 소진 시 법인당 3회 재시도하며 3,959건을 끝까지 돌았고 exit 75가 안 났다. `exhaustion_reason`으로 통일
+- [x] **F-1.3** 시드: `dart_corp_master` 현재 행 → `observed_month`, `is_seed=true`. CLI `dart seed-corp-profile-history --observed-month`
+      — local `mydb`에서 실행 확인: 1회차 700행, 2회차 0행(idempotent), `observed_at`은 corp master의 `profile_fetched_at`(2026-08-15~18) 유지
+- [ ] **F-1.4** 첫 실행(prod): 3,959 법인, 오류 0, 행 수 = 법인 수 — **명령 준비 완료, 사용자 확인 대기**
 - [ ] **F-1.5** 마트 `dim_industry_pit_daily`(`ind_ksic_code`, `ind_group`, `ind_is_backcast`, `ind_changed_recent_252`) + 테스트(backcast 경계, as-of, fold-up 규칙 동일)
 - [ ] **F-1.6** Cronicle 월 이벤트 + freshness 월 예산
 - [ ] **F-1.7** 변경률 리포트 스크립트 + 첫 회(2026-10)

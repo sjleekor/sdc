@@ -737,6 +737,37 @@ def _handle_dart_sync_corp_profile(args: argparse.Namespace) -> None:
     print(f"   - Requests skipped:   {result.requests_skipped}")
     print(f"   - Rows upserted:      {result.rows_upserted}")
     print(f"   - No data:            {result.no_data}")
+    print(f"   - History appended:   {result.history_rows_appended}")
+
+
+def _handle_dart_seed_corp_profile_history(args: argparse.Namespace) -> None:
+    """Handle ``krx-collector dart seed-corp-profile-history``."""
+    settings = get_settings()
+    observed_month = (
+        date.fromisoformat(args.observed_month).replace(day=1) if args.observed_month else None
+    )
+
+    print(f"→ dart seed-corp-profile-history: observed_month={observed_month or 'current month'}")
+
+    from krx_collector.infra.db_postgres.repositories import PostgresStorage
+    from krx_collector.service.sync_dart_corp_profile import seed_dart_corp_profile_history
+
+    result = seed_dart_corp_profile_history(
+        storage=PostgresStorage(settings.db_dsn),
+        observed_month=observed_month,
+    )
+
+    if result.errors:
+        print("❌ Corp profile history seed failed.", file=sys.stderr)
+        for label, message in result.errors.items():
+            print(f"   - {label}: {message}", file=sys.stderr)
+        sys.exit(1)
+
+    print("✅ Corp profile history seed completed.")
+    print(f"   - Observed month:     {result.observed_month}")
+    print(f"   - Rows inserted:      {result.rows_inserted}")
+    if result.rows_inserted == 0:
+        print("   (0 rows = that month was already seeded; the command is idempotent)")
 
 
 def _handle_dart_sync_financials(args: argparse.Namespace) -> None:
@@ -2906,6 +2937,23 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     dart_sync_corp_profile.set_defaults(handler=_handle_dart_sync_corp_profile)
+
+    dart_seed_corp_profile_history = dart_sub.add_parser(
+        "seed-corp-profile-history",
+        help=(
+            "Seed dart_corp_profile_history from dart_corp_master's current profiles "
+            "(no API calls; run once before the first monthly snapshot)."
+        ),
+    )
+    dart_seed_corp_profile_history.add_argument(
+        "--observed-month",
+        default=None,
+        help=(
+            "Month to stamp the seed rows with, YYYY-MM-DD (day is forced to the 1st). "
+            "Default: the current month."
+        ),
+    )
+    dart_seed_corp_profile_history.set_defaults(handler=_handle_dart_seed_corp_profile_history)
 
     dart_sync_financials = dart_sub.add_parser(
         "sync-financials",

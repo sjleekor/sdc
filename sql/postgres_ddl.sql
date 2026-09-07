@@ -261,6 +261,60 @@ ALTER TABLE dart_corp_master
 CREATE INDEX IF NOT EXISTS ix_dart_corp_master_induty
     ON dart_corp_master (induty_code);
 
+-- 7c) dart_corp_profile_history ─ monthly company.json snapshots (F-1, L1)
+--
+-- dart_corp_master above is an UPSERT: a re-fetch overwrites induty_code and
+-- the previous value is gone.  So the industry code is a *current* value with
+-- no history, which is why every industry-neutral variant in the marts is a
+-- diagnostic rather than a feature — today's KSIC applied to 2015 is a
+-- look-ahead.  KRX index membership (N4) turned out not to be published and the
+-- KRX-to-KSIC crosswalk resolved only 36% of tickers 1:1, so versioning this
+-- endpoint from now on is the only remaining way to get a point-in-time
+-- industry.  See docs/dev/20260907_additional_feature/01_industry_pit.md §2.
+--
+-- One row per corporation per calendar month, and observed_month is the
+-- skip-if-present key: a second run in the same month is a no-op, so the
+-- monthly Cronicle event is safe to retry and a manual run costs nothing.
+-- The history only ever grows forwards; nothing here reconstructs the past.
+--
+-- is_seed marks the 2026-09 rows copied from dart_corp_master's current state
+-- rather than fetched as a monthly snapshot.  They carry the corp master's own
+-- profile_fetched_at as observed_at, which for most corporations is the 2026-08
+-- N2 sweep — so a change first *observed* between the seed and the next
+-- snapshot may have happened at any point before it.  Consumers that need a
+-- real observation window must exclude the seed row.
+--
+-- run_id is advisory and deliberately NOT a foreign key: ingestion_runs is a
+-- local audit table and is not mirrored by db sync-remote, so an FK would make
+-- every mirrored row unloadable.
+CREATE TABLE IF NOT EXISTS dart_corp_profile_history (
+    corp_code       TEXT        NOT NULL,
+    observed_month  DATE        NOT NULL,   -- first day of the observation month
+    observed_at     TIMESTAMPTZ NOT NULL,   -- when the response was actually read
+    ticker          TEXT,
+    corp_cls        TEXT,                   -- Y/K/N/E; E is how a delisting shows up
+    induty_code     TEXT,                   -- KSIC, length varies (2-5 digits)
+    est_dt          DATE,
+    acc_mt          TEXT,
+    corp_name       TEXT,
+    stock_name      TEXT,
+    is_seed         BOOLEAN     NOT NULL DEFAULT FALSE,
+    profile_raw     JSONB,
+    run_id          UUID,
+    source          TEXT        NOT NULL DEFAULT 'OPENDART',
+    fetched_at      TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (corp_code, observed_month)
+);
+
+CREATE INDEX IF NOT EXISTS ix_dart_corp_profile_history_month
+    ON dart_corp_profile_history (observed_month, induty_code);
+
+CREATE INDEX IF NOT EXISTS ix_dart_corp_profile_history_ticker
+    ON dart_corp_profile_history (ticker, observed_month);
+
+CREATE INDEX IF NOT EXISTS ix_dart_corp_profile_history_sync_cursor
+    ON dart_corp_profile_history (fetched_at, corp_code, observed_month);
+
 -- 8) dart_financial_statement_raw ─ raw rows from fnlttSinglAcntAll / XBRL facts
 CREATE TABLE IF NOT EXISTS dart_financial_statement_raw (
     raw_id               BIGSERIAL   PRIMARY KEY,

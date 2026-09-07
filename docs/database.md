@@ -203,6 +203,53 @@ OpenDART `corp_code`와 KRX ticker를 연결하는 기준 테이블입니다.
 **기본키(Primary key):** `corp_code`
 **인덱스(Index):** `ticker`
 
+### 7c. `dart_corp_profile_history`
+
+기업개황을 **월 1회 다시 받아 쌓는 이력 테이블**입니다. 업종 코드를 PIT로 만들기 위한
+유일한 경로입니다(F-1, `docs/dev/20260907_additional_feature/01_industry_pit.md` §2).
+
+**왜 별도 테이블인가.** `dart_corp_master`는 upsert라서 다시 받으면 이전 `induty_code`가
+사라집니다. 그래서 업종은 *현재 값*만 있고, 마트의 업종 중립 variant가 전부 진단용인
+이유가 이것입니다 — 2015년 데이터에 오늘의 KSIC를 붙이면 미래 정보가 새기 때문입니다.
+KRX 지수 구성종목은 Open API에 없고 KRX 업종 ↔ KSIC crosswalk는 종목 36%만 1:1이라,
+남은 길은 이 endpoint를 지금부터 버저닝하는 것뿐입니다. **과거는 살릴 수 없습니다.**
+
+| 컬럼명           | 타입                | 비고                                          |
+|------------------|---------------------|-----------------------------------------------|
+| `corp_code`      | TEXT PK             | OpenDART 기업 고유번호                        |
+| `observed_month` | DATE PK             | 관측 월의 1일. **skip-if-present 키**         |
+| `observed_at`    | TIMESTAMPTZ NOT NULL| 응답을 실제로 읽은 시각                       |
+| `ticker`         | TEXT                | 응답의 `stock_code` (corp master 값이 아님)   |
+| `corp_cls`       | TEXT                | Y \| K \| N \| E. 상폐는 `E`로 나타납니다     |
+| `induty_code`    | TEXT                | KSIC. 자릿수 2~5 혼재 (7번 항목 참고)         |
+| `est_dt`         | DATE                | 설립일                                        |
+| `acc_mt`         | TEXT                | 결산월 `MM`                                   |
+| `corp_name`      | TEXT                | 응답 기준 회사명                              |
+| `stock_name`     | TEXT                | 응답 기준 종목명                              |
+| `is_seed`        | BOOLEAN NOT NULL    | 첫 달을 corp master에서 복사한 행이면 `true`  |
+| `profile_raw`    | JSONB               | 응답 원문                                     |
+| `run_id`         | UUID                | `ingestion_runs` 참조. **FK는 걸지 않습니다** |
+| `source`         | TEXT NOT NULL       | 기본값 `OPENDART`                             |
+| `fetched_at`     | TIMESTAMPTZ NOT NULL| 수집 시각 (sync 커서)                         |
+
+**한 법인·한 달에 한 행입니다.** 같은 달에 두 번 돌리면 `ON CONFLICT DO NOTHING`으로
+아무 것도 안 들어갑니다. 월 Cronicle 이벤트를 재시도해도 안전하고, 사람이 중간에
+수동으로 돌려도 비용이 0입니다. 대신 `dart sync-corp-profile`의 출력에서
+`History appended: 0`은 "이번 달은 이미 관측됐다"는 뜻입니다.
+
+**`is_seed=true` 행은 관측이 아닙니다.** 이력의 시작점을 만들기 위해
+`dart seed-corp-profile-history`가 corp master의 현재 값을 복사한 행이고,
+`observed_at`은 corp master의 `profile_fetched_at`(대부분 2026-08 N2 전량 수집)입니다.
+그래서 시드와 다음 스냅샷 사이에 처음 *보인* 변경은 그 사이 언제 일어났는지 알 수 없습니다.
+변경률을 재는 소비자는 시드 월을 기준 구간으로 쓰면 안 됩니다.
+
+**`run_id`에 FK를 걸지 않은 이유:** `ingestion_runs`는 로컬 감사 테이블이라
+`db sync-remote`가 미러링하지 않습니다. FK가 있으면 미러링한 모든 행이 적재 불가가 됩니다.
+
+**기본키(Primary key):** `(corp_code, observed_month)`
+**인덱스(Index):** `(observed_month, induty_code)`, `(ticker, observed_month)`,
+`(fetched_at, corp_code, observed_month)`(sync 커서)
+
 ### 8. `dart_financial_statement_raw`
 
 OpenDART `fnlttSinglAcntAll` 및 후속 XBRL 파서가 적재할 재무 raw 테이블입니다.

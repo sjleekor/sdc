@@ -166,6 +166,13 @@ class OpenDartCorpCodeProvider:
                 acc_mt=(payload.get("acc_mt") or "").strip() or None,
                 raw_payload=payload,
                 fetched_at=now_kst(),
+                # F-1: the monthly history keeps the response's own identity
+                # fields, not the corp master's. A delisting shows up here as
+                # corp_cls 'E' and an emptied stock_code before the master's
+                # own is_active flips.
+                ticker=(payload.get("stock_code") or "").strip() or None,
+                corp_name=(payload.get("corp_name") or "").strip() or None,
+                stock_name=(payload.get("stock_name") or "").strip() or None,
             )
             return apply_call_result_meta(CompanyProfileResult(profile=profile), call_result)
         except Exception as exc:

@@ -423,6 +423,26 @@ DART_CORP_MASTER = TableProfileSpec(
     domain_checks=("corp_master_listing",),
 )
 
+# F-1. The monthly industry snapshot. The profile that matters here is the
+# induty_code null ratio (N2 coverage, carried forward) and the is_seed share —
+# once real monthly snapshots outnumber the seed rows, the history has an
+# observation window worth measuring change over.
+DART_CORP_PROFILE_HISTORY = TableProfileSpec(
+    table="dart_corp_profile_history",
+    weight=ProfileWeight.LIGHT,
+    role=ProfileTableRole.RAW,
+    entity_key="corp_code",
+    time_col="observed_month",
+    natural_key=("corp_code", "observed_month"),
+    category_cols=("corp_cls", "is_seed", "source"),
+    top_n_cols=("induty_code",),
+    null_cols=("ticker", "induty_code", "corp_cls", "est_dt", "acc_mt", "run_id"),
+    ingest_col="fetched_at",
+    cost_class=CostClass.CHEAP,
+    sampling=SamplingPolicy(sample_pct=None),
+    domain_checks=(),
+)
+
 STOCK_MASTER = TableProfileSpec(
     table="stock_master",
     weight=ProfileWeight.LIGHT,
@@ -529,6 +549,7 @@ _CATALOG: tuple[TableProfileSpec, ...] = (
     # Wave 3: masters / config (light weight)
     COMMON_FEATURE_SERIES,
     DART_CORP_MASTER,
+    DART_CORP_PROFILE_HISTORY,
     STOCK_MASTER,
     STOCK_MASTER_SNAPSHOT,
     STOCK_MASTER_SNAPSHOT_ITEMS,

@@ -721,6 +721,12 @@ class CompanyProfile:
             breaks the mart's hardcoded period-end calendar.
         raw_payload: Full response, kept so unused fields stay recoverable.
         fetched_at: KST timestamp when the profile was retrieved.
+        ticker: ``stock_code`` as returned by *this* response (F-1).  Not the
+            same thing as ``dart_corp_master.ticker``, which comes from
+            ``corpCode.xml``: the two disagreeing is itself a signal, so the
+            monthly history keeps the response's own value.
+        corp_name: Corporation name from this response.
+        stock_name: Listed-issue name from this response.
     """
 
     corp_code: str
@@ -730,18 +736,34 @@ class CompanyProfile:
     acc_mt: str | None
     raw_payload: dict
     fetched_at: datetime
+    # Appended with defaults (F-1): every existing caller builds a profile
+    # positionally up to fetched_at.
+    ticker: str | None = None
+    corp_name: str | None = None
+    stock_name: str | None = None
 
 
 @dataclass(slots=True)
 class CompanyProfileResult:
-    """Result of a single ``company.json`` fetch."""
+    """Result of a single ``company.json`` fetch.
+
+    ``exhaustion_reason`` is the field name every other OpenDART result uses,
+    and the one ``apply_call_result_meta`` copies and
+    ``is_opendart_daily_limit_exhausted`` reads.  This result used to declare
+    ``all_rate_limited`` instead, which no part of the pipeline looks at — so a
+    key-exhausted profile run retried three times per corporation and then
+    walked its whole target list against an API already refusing it, instead of
+    exiting 75 and resuming the next day.  Renamed with F-1, whose monthly
+    3,959-call job shares the ``opendart`` lock with the 04:00 chain and is
+    therefore the first caller likely to meet a spent quota.
+    """
 
     profile: CompanyProfile | None = None
     error: str | None = None
     status_code: str | None = None
     retryable: bool = False
     no_data: bool = False
-    all_rate_limited: bool = False
+    exhaustion_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -752,7 +774,11 @@ class CompanyProfileSyncResult:
         requests_attempted: Corporations fetched.
         requests_skipped: Corporations skipped as already profiled.
         no_data: Corporations OpenDART had no profile for.
-        rows_upserted: Profile rows written.
+        rows_upserted: Profile rows written to ``dart_corp_master``.
+        history_rows_appended: Monthly observations added to
+            ``dart_corp_profile_history`` (F-1).  0 on a second run in the same
+            month, which is the idempotency signal — the master's counter does
+            not show it, because the master is an upsert.
         errors: Per-corporation error messages.
         opendart_exhaustion_reason: Set to ``"all_rate_limited"`` when every
             OpenDART key hit its daily limit, so the CLI can exit 75 and the
@@ -763,8 +789,25 @@ class CompanyProfileSyncResult:
     requests_skipped: int = 0
     no_data: int = 0
     rows_upserted: int = 0
+    history_rows_appended: int = 0
     errors: dict[str, str] = field(default_factory=dict)
     opendart_exhaustion_reason: str | None = None
+
+
+@dataclass(slots=True)
+class CompanyProfileHistorySeedResult:
+    """Outcome of ``dart seed-corp-profile-history`` (F-1.3).
+
+    Attributes:
+        observed_month: Month the seed rows were stamped with.
+        rows_inserted: Rows added.  0 means the month was already seeded — the
+            command is safe to re-run.
+        errors: Pipeline-level error messages.
+    """
+
+    observed_month: date | None = None
+    rows_inserted: int = 0
+    errors: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
