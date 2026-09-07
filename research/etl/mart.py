@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+from collections.abc import Iterable
 from pathlib import Path
 
 import duckdb
@@ -154,6 +155,70 @@ def materialize(
     return table_dir
 
 
+def materialize_in_parts(
+    con: duckdb.DuckDBPyConnection,
+    config: LakeConfig,
+    name: str,
+    contract_sql: str,
+    parts: Iterable[tuple[str, str]],
+    *,
+    force: bool = False,
+) -> Path:
+    """Write one mart table as several parquet parts, one query per part.
+
+    Same cache contract as :func:`materialize` — ``contract_sql`` is the single
+    unpartitioned statement the table *means*, and it is what ``schema_hash`` /
+    ``sql_hash`` are taken from, so a formula change still invalidates the
+    cache. ``parts`` supplies ``(part_name, part_sql)`` pairs whose union is
+    that statement; each is written separately.
+
+    This exists for marts whose one-shot query would materialize an
+    intermediate far larger than the output — ``feat_relation_stat`` joins 40
+    peer rows onto every ticker-session, 280M rows over the full history but
+    only ~2M within one month. Splitting by month keeps the join working set
+    bounded instead of relying on DuckDB spilling.
+
+    ``contract_sql`` is only *described* (``DESCRIBE SELECT``), never run, so
+    the unpartitioned form may be too heavy to execute.
+    """
+    table_dir = mart_table_dir(config, name)
+    expected = _expected_metadata(con, config, contract_sql)
+    if is_materialized(config, name) and not force:
+        metadata_path = _metadata_path(config, name)
+        if not metadata_path.is_file():
+            raise RuntimeError(
+                f"mart cache metadata is missing for {name!r}; rerun with force=True"
+            )
+        try:
+            actual = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"invalid mart cache metadata for {name!r}; use force=True") from exc
+        if not _cache_contract_matches(actual, expected):
+            raise RuntimeError(
+                f"mart cache contract mismatch for {name!r}; use force=True to rebuild"
+            )
+        return table_dir
+
+    if table_dir.exists():
+        shutil.rmtree(table_dir)
+    table_dir.mkdir(parents=True, exist_ok=True)
+
+    written = 0
+    for part_name, part_sql in parts:
+        target = _sql_str_literal(str(table_dir / f"{part_name}.parquet"))
+        con.execute(f"COPY ({part_sql}) TO {target} (FORMAT PARQUET, COMPRESSION ZSTD)")
+        written += 1
+    if written == 0:
+        # No metadata is written, so the directory stays "not materialized" and
+        # the next call retries rather than registering an empty view.
+        raise RuntimeError(f"no parts produced for mart {name!r}")
+
+    _metadata_path(config, name).write_text(
+        json.dumps(expected, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return table_dir
+
+
 def register_mart_view(
     con: duckdb.DuckDBPyConnection,
     config: LakeConfig,
@@ -172,17 +237,13 @@ def register_mart_view(
         )
     metadata_path = _metadata_path(config, name)
     if not metadata_path.is_file():
-        raise RuntimeError(
-            f"mart cache metadata is missing for {name!r}; rebuild with force=True"
-        )
+        raise RuntimeError(f"mart cache metadata is missing for {name!r}; rebuild with force=True")
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"invalid mart cache metadata for {name!r}") from exc
     if metadata.get("analysis_config_hash") != config.analysis_config_hash:
-        raise RuntimeError(
-            f"mart cache config hash mismatch for {name!r}; rebuild with force=True"
-        )
+        raise RuntimeError(f"mart cache config hash mismatch for {name!r}; rebuild with force=True")
     view = view_name or name
     glob = _sql_str_literal(mart_glob(config, name))
     con.execute(
