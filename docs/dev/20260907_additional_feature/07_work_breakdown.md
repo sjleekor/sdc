@@ -13,8 +13,8 @@
 | F-1 | 업종 `induty_code` 버저닝 | OpenDART 월 3,959 | F-1.1~F-1.3 완료(2026-09-07) | **F-1.4 prod 첫 실행 승인 대기** |
 | F-2 | 통계적 peer 관계 피쳐 | 없음 | **완료**(2026-09-07, snapshot 2026-08-23) | F-HS-1 대기 |
 | F-3 | 업종 관계 피쳐 | 없음(F-1 선행) | 대기(D-F1) | 3개월 변경률 측정 뒤 |
-| F-4 | 재무위험·생애주기·전이 | 없음 | 미착수 | `feat_fin_risk` |
-| F-5 | `metric_rules` 확장 | 없음(매핑) | 미착수 | 태그 커버리지 PoC |
+| F-4 | 재무위험·생애주기·전이 | 없음 | **완료**(2026-09-07, snapshot 2026-08-23) | F-HS-1 대기. 5 family는 2020~ 표본 |
+| F-5 | `metric_rules` 확장 | 없음(매핑) | 미착수 | **CF 4종 XBRL fallback 먼저**(F-4.6) → 그 다음 태그 커버리지 PoC |
 | F-6 | `fin_sue` XBRL 백필 | OpenDART(측정 뒤) | 미착수 | 대상 역산 |
 | F-7 | DS005 이벤트·elestock | 있음 | 미착수 (D-F2 확정: `elestock` 시작 / D-F3: PoC 뒤 6종) | DS005 PoC + `elestock` 스키마 |
 | F-8 | 매크로 2단계 시리즈 | 시리즈 정의 | 미착수 (D-F5 확정: 2단계 먼저) | ECOS item_code 확정 |
@@ -72,15 +72,18 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
 
 ### F-4 재무위험·생애주기·전이 (`03`)
 
-- [ ] **F-4.1** `fin_scan.py`의 vintage 선택·`base_ok`·`available_from`을 공유 함수로(SQL 불변 확인)
-- [ ] **F-4.2** `feat_fin_risk` 9 family(`fin_risk_v1`), TTM·직전 vintage·`dps` 노출 규칙
-- [ ] **F-4.3** 생애주기 8조합 매핑 테스트, 전이 이벤트 빈도 리포트 → 스캔 경로(continuous/event) 고정
-- [ ] **F-4.4** 상관 진단(`fin_log_mcap`, `ev_net_share_issuance_yoy`), 상폐 커버리지 전/후
-- [ ] **F-4.5** 사전등록 9 family 확정 → F-HS-1. Decline·부실 판정은 S-1 잔여 뒤로 표기
+- [x] **F-4.1** `fin_scan.py`의 vintage 선택·`base_ok`·`available_from`을 `features/fin_vintage.py`로 공유. `feat_fin_scan_daily` SQL 해시 2개 불변 확인(`9656de5e…`/`2615e77d…` — 2026-08-23 snapshot의 `_cache_metadata.json`과 일치)
+- [x] **F-4.2** `feat_fin_risk` 9 family(`fin_risk_v1`), TTM·직전 vintage·`dps` 노출 규칙. 7,211,785행
+      — 조인 형태를 바꿔야 했다: metric 10 × basis 2 = 20개의 equality+range 조인은 7.2M 세션 × 1.17M 인터벌에서 **완료되지 않았다**(20분 무출력). ASOF 20개도 마찬가지. interval을 먼저 wide로 피벗해 **ASOF 1개**로 읽으면 100초에 끝난다. `feat_fin_scan_daily`는 range 조인을 그대로 둔다(SQL 텍스트가 A0 캐시 키). 두 형태가 같은 행을 고른다는 것을 엇갈린 접수일 fixture로 테스트
+- [x] **F-4.3** 생애주기 8조합 매핑 테스트(8개 전수 parametrize), 전이 이벤트 빈도 리포트 → **`fin_lifecycle_transition`·`fin_profit_turn` = continuous**(연평균 0.69/0.27, 문턱 0.05), 나머지 둘은 event cohort 유지
+- [x] **F-4.4** 상관 진단 → **경고 2건**: `fin_interest_coverage` × `fin_operating_profitability` ρ=0.88(분자 공유), `fin_net_debt_to_mcap` × `fin_book_to_market` ρ=0.51(분모 공유). 상폐 커버리지 9.2%(`stock_master` 기준) → Decline 판정 보류
+- [x] **F-4.5** 사전등록 9 family 확정 → [`results/f4_fin_risk_verification.md`](results/f4_fin_risk_verification.md) §8
+- [ ] **F-4.6**(새로 생긴 항목) **5개 family가 2020년부터만 존재한다.** `interest_paid`·`investing_cash_flow`·`financing_cash_flow`·`cash_and_cash_equivalents` 넷에 XBRL fallback 규칙이 없어 2018년 이전 행이 100건 안팎이다. F-5.1의 **최우선 대상**이고, 붙이면 `fin_risk_v2` 범프 + 재검정이 따라온다. 그때까지 사전등록 표본은 2020~2025로 읽는다
 
 ### F-5 `metric_rules` 확장 (`03` §3)
 
 - [ ] **F-5.1** 태그 커버리지 PoC(`current_assets`, `current_liabilities`, `borrowings`, `rnd_expense`) → `poc/metric_rules_ext.md`
+- [ ] **F-5.0**(선행, F-4.6에서 나왔다) 기존 4 metric에 XBRL fallback 추가: `interest_paid`, `investing_cash_flow`, `financing_cash_flow`, `cash_and_cash_equivalents`. 새 metric이 아니라 **기존 metric의 원천 확장**이라 golden 영향 범위가 다르다 — `operating_cash_flow`만 기존 family(`fin_accruals_to_assets`)가 쓰므로 그 넷은 현재 소비자가 `feat_fin_risk`뿐이다
 - [ ] **F-5.2** catalog·매핑 규칙 추가, 기존 29 metric golden 불변
 - [ ] **F-5.3** vintage 재빌드, 역산 비율 기록
 - [ ] **F-5.4** 파생 family(`fin_current_ratio`, `fin_borrowings_to_mcap`, `fin_altman_z`, `fin_rnd_to_sales`, `fin_bm_intangible_adj`) → F-HS-2 또는 3

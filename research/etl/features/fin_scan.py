@@ -24,6 +24,12 @@ from __future__ import annotations
 import duckdb
 
 from research.etl.config import LakeConfig
+from research.etl.features.fin_vintage import (
+    BASE_OK_SQL,
+    FS_BASES,
+    build_metric_intervals_cte,
+    build_metric_joins,
+)
 from research.etl.mart import materialize, register_mart_view
 
 FIN_SCAN_TABLE = "feat_fin_scan_daily"
@@ -76,69 +82,11 @@ _METRICS = (
     "net_income",
     "total_assets",
 )
-_BASES = ("CFS", "OFS")
-
-
-def _metric_intervals_cte(vintage_view: str) -> str:
-    """One row per (ticker, metric_code, fs_basis, quarter) with the value
-    B-4 actually wants — TTM for flow metrics, the instant itself otherwise —
-    plus the [available_from, next_available_from) interval bound.
-    """
-    metrics_in = "(" + ", ".join(f"'{m}'" for m in _METRICS) + ")"
-    return f"""
-    metric_points AS (
-        SELECT
-            ticker, metric_code, fs_basis, seq_key, rcept_no,
-            CASE WHEN metric_kind IN ('direct_interim', 'cumulative_reported')
-                 THEN ttm_value ELSE standalone_value END AS daily_value,
-            CASE WHEN metric_kind IN ('direct_interim', 'cumulative_reported')
-                 THEN ttm_available_from ELSE available_from END AS daily_available_from,
-            value_lag_4q
-        FROM {vintage_view}
-        WHERE metric_code IN {metrics_in}
-    ),
-    -- fin_v3: a filer catching up files several periods at once, so more than
-    -- one value can become available on the same day — 6,024 such groups, e.g.
-    -- 038530 on 2020-08-10 carrying net income for 2016 Q4 through 2020 Q1.
-    -- ``daily_available_from`` alone is then not a total order and the interval
-    -- boundaries (and so the value read on every later date) depended on scan
-    -- order. Same-day candidates are resolved to the *latest fiscal period* —
-    -- the figure describing the company's most recent state, which is what the
-    -- daily feature means — and the losers dropped before LEAD runs, so the
-    -- interval chain is built from one row per availability date.
-    -- See 10_known_issues.md I12.
-    metric_points_ranked AS (
-        SELECT
-            *,
-            ROW_NUMBER() OVER (
-                PARTITION BY ticker, metric_code, fs_basis, daily_available_from
-                ORDER BY seq_key DESC, rcept_no DESC
-            ) AS same_day_rank
-        FROM metric_points
-        WHERE daily_available_from IS NOT NULL AND daily_value IS NOT NULL
-    ),
-    metric_intervals AS (
-        SELECT
-            ticker, metric_code, fs_basis, daily_value, value_lag_4q,
-            daily_available_from,
-            LEAD(daily_available_from) OVER (
-                PARTITION BY ticker, metric_code, fs_basis ORDER BY daily_available_from
-            ) AS next_available_from
-        FROM metric_points_ranked
-        WHERE same_day_rank = 1
-    )
-    """
-
-
-def _metric_join(metric_code: str, basis: str) -> str:
-    alias = f"m_{metric_code}_{basis.lower()}"
-    return f"""
-        LEFT JOIN metric_intervals {alias}
-          ON {alias}.ticker = panel.ticker
-         AND {alias}.metric_code = '{metric_code}' AND {alias}.fs_basis = '{basis}'
-         AND {alias}.daily_available_from <= panel.trade_date
-         AND ({alias}.next_available_from IS NULL
-              OR panel.trade_date < {alias}.next_available_from)"""
+#: F-4.1 moved the interval/join/base_ok builders to ``fin_vintage`` so
+#: ``feat_fin_risk`` reads the vintage under the same rules. Extraction only —
+#: the emitted text is byte-identical, which
+#: ``test_fin_risk.py::test_the_fin_scan_sql_is_byte_identical`` pins.
+_BASES = FS_BASES
 
 
 def build_fin_scan_daily_sql(
@@ -163,7 +111,7 @@ def build_fin_scan_daily_sql(
             of it. Left ``None`` the emitted SQL is unchanged, which is what
             keeps the frozen parity tests meaningful.
     """
-    joins = "\n".join(_metric_join(m, b) for m in _METRICS for b in _BASES)
+    joins = build_metric_joins(_METRICS, _BASES)
     # One string, used by every winsorize percentile and every z-score, so the
     # variant cannot end up neutralising some components and not others.
     cross_section = "trade_date, market" if industry_view is None else CROSS_SECTION_WITH_INDUSTRY
@@ -174,7 +122,7 @@ def build_fin_scan_daily_sql(
     industry_passthrough = "" if industry_view is None else ", industry_group"
 
     return f"""
-    WITH {_metric_intervals_cte(vintage_view)},
+    WITH {build_metric_intervals_cte(vintage_view, _METRICS)},
     panel AS (
         SELECT
             pit.trade_date, pit.ticker, pit.market,
@@ -242,10 +190,7 @@ def build_fin_scan_daily_sql(
     scored AS (
         SELECT
             *,
-            (market_cap_pit IS NOT NULL AND market_cap_pit > 0
-             AND shares_is_available AND NOT shares_invalid_flag
-             AND NOT COALESCE(is_halted, TRUE) AND valid_session_idx IS NOT NULL
-            ) AS base_ok,
+            {BASE_OK_SQL} AS base_ok,
             (total_equity_selected IS NOT NULL AND total_equity_selected <= 0) AS negative_equity,
             CASE WHEN total_assets_selected > 0 AND total_assets_lag4q_selected > 0
                  THEN (total_assets_selected + total_assets_lag4q_selected) / 2 END AS avg_assets,
