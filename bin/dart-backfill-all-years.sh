@@ -35,6 +35,17 @@ if (( start_year > end_year )); then
 fi
 
 reprt_codes="${SDC_DART_BACKFILL_REPRT_CODES:-11011,11012,11013,11014}"
+# Which universe the three per-business-year stages target. The CLI default is
+# `current`, and this script never overrode it — which is the whole reason the
+# S-1 gap exists: every DART raw table covers ~2% of the 1,330 delisted names,
+# and a 2016 cross-section is missing 13.9% of its rows
+# (poc/survivorship_gap.md). `historical` targets every corp that ever carried
+# a ticker (3,959 vs 2,657); corpCode.xml keeps stock_code after delisting, so
+# the mapping was always there and only the filter was in the way.
+#
+# Left at the CLI default so no scheduled job changes behaviour by upgrading;
+# the S-1 remainder backfill (F-9.3) sets it to `historical` explicitly.
+universe_scope="${SDC_DART_BACKFILL_UNIVERSE_SCOPE:-current}"
 fs_divs="${SDC_DART_BACKFILL_FS_DIVS:-CFS,OFS}"
 collector_service="${SDC_DART_BACKFILL_COLLECTOR_SERVICE:-collector}"
 pull_image="${SDC_DART_BACKFILL_PULL_IMAGE:-1}"
@@ -57,6 +68,7 @@ read -r -a compose <<< "$compose_cmd"
 
 log "OpenDART backfill starting in $app_dir"
 log "Range: ${end_year} down to ${start_year}; reprt_codes=${reprt_codes}; fs_divs=${fs_divs}"
+log "Universe scope: ${universe_scope}"
 log "Filing receipts: enabled=${collect_filings} range=${filings_end_year} down to ${start_year}"
 log "This script collects OpenDART raw only; derived metric marts are recomputed by bin/parquet-compute-all.sh"
 
@@ -73,17 +85,20 @@ for year in $(seq "$end_year" -1 "$start_year"); do
   "${compose[@]}" run --rm "$collector_service" dart sync-financials \
     --bsns-years "$year" \
     --reprt-codes "$reprt_codes" \
-    --fs-divs "$fs_divs"
+    --fs-divs "$fs_divs" \
+    --universe-scope "$universe_scope"
 
   log "Backfilling OpenDART share info for ${year}"
   "${compose[@]}" run --rm "$collector_service" dart sync-share-info \
     --bsns-years "$year" \
-    --reprt-codes "$reprt_codes"
+    --reprt-codes "$reprt_codes" \
+    --universe-scope "$universe_scope"
 
   log "Backfilling OpenDART XBRL for ${year}"
   "${compose[@]}" run --rm "$collector_service" dart sync-xbrl \
     --bsns-years "$year" \
-    --reprt-codes "$reprt_codes"
+    --reprt-codes "$reprt_codes" \
+    --universe-scope "$universe_scope"
 
 done
 

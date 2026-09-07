@@ -18,7 +18,7 @@
 | F-6 | `fin_sue` XBRL 백필 | OpenDART(측정 뒤) | 미착수 | 대상 역산 |
 | F-7 | DS005 이벤트·elestock | 있음 | 미착수 (D-F2 확정: `elestock` 시작 / D-F3: PoC 뒤 6종) | DS005 PoC + `elestock` 스키마 |
 | F-8 | 매크로 2단계 시리즈 | 시리즈 정의 | 미착수 (D-F5 확정: 2단계 먼저) | ECOS item_code 확정 |
-| F-9 | `fin_pit` strict·휴장일·상폐·유니버스·Cronicle | 일부 | 미착수 (D-F4 확정: S-1 잔여 실행) | S-1 잔여 실행 |
+| F-9 | `fin_pit` strict·휴장일·상폐·유니버스·Cronicle | 일부 | F-9.3 명령 준비 완료 | **F-9.3 실행 승인 대기** |
 | F-HS | 새 config 사전등록·A→B→AB→C | — | 대기 | F-2·F-4 마트 완료 뒤 |
 
 ---
@@ -49,7 +49,7 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
       — 함께 고친 것: `CompanyProfileResult`가 다른 OpenDART 결과와 달리 `all_rate_limited`를 들고 있어 `is_opendart_daily_limit_exhausted`가 이 경로에서 **한 번도 걸리지 않았다.** 키 소진 시 법인당 3회 재시도하며 3,959건을 끝까지 돌았고 exit 75가 안 났다. `exhaustion_reason`으로 통일
 - [x] **F-1.3** 시드: `dart_corp_master` 현재 행 → `observed_month`, `is_seed=true`. CLI `dart seed-corp-profile-history --observed-month`
       — local `mydb`에서 실행 확인: 1회차 700행, 2회차 0행(idempotent), `observed_at`은 corp master의 `profile_fetched_at`(2026-08-15~18) 유지
-- [ ] **F-1.4** 첫 실행(prod): 3,959 법인, 오류 0, 행 수 = 법인 수 — **명령 준비 완료, 사용자 확인 대기**
+- [ ] **F-1.4** 첫 실행(prod): 3,959 법인, 오류 0, 행 수 = 법인 수 — **명령 준비 완료, 사용자 확인 대기** → [`results/prod_runbook_f1_4_f9_3.md`](results/prod_runbook_f1_4_f9_3.md) §1. prod에 테이블이 없으므로 릴리즈 + `db init`이 선행. 시드 월을 2026-08(관측 실제 시각)로 할지 2026-09(문서)로 할지 결정 필요
 - [ ] **F-1.5** 마트 `dim_industry_pit_daily`(`ind_ksic_code`, `ind_group`, `ind_is_backcast`, `ind_changed_recent_252`) + 테스트(backcast 경계, as-of, fold-up 규칙 동일)
 - [ ] **F-1.6** Cronicle 월 이벤트 + freshness 월 예산
 - [ ] **F-1.7** 변경률 리포트 스크립트 + 첫 회(2026-10)
@@ -116,7 +116,10 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
 
 - [ ] **F-9.1** `feat_fin_ratios_pit`(`_pit` 접미) + `fin_pit` 대비 차이 리포트 → 모델 스트림 통보(E3-b)
 - [ ] **F-9.2** `holidays_krx.csv` 2014~2023 보강(`daily_market_cap` 무행 평일) → golden 재생성·diff 기록 → fact 재빌드(F-HS-1 snapshot에 묶음)
-- [ ] **F-9.3** S-1 잔여: `sync-financials/share-info/xbrl --include-delisted` 2015~2025(약 4.3만 호출) — **먼저 시작**
+- [ ] **F-9.3** S-1 잔여: `sync-financials/share-info/xbrl` **`--universe-scope historical`**(`--include-delisted`는 없는 플래그다) 2015~2025 — **명령 준비 완료, 사용자 확인 대기** → [`results/prod_runbook_f1_4_f9_3.md`](results/prod_runbook_f1_4_f9_3.md) §2
+      — 실측: 재무 866 / 주식수 529 / XBRL 866 법인 누락. 그중 764는 `stock_master`에 행이 **아예 없는** 조기 상폐 법인이다
+      — 호출 상한 약 **13.7만**(4.3만 추정은 보고서·fs_div 축을 빼먹었다)
+      — `bin/dart-backfill-all-years.sh`가 `--universe-scope`를 안 넘기고 있었다(기본 `current`) = S-1 갭의 직접 원인. `SDC_DART_BACKFILL_UNIVERSE_SCOPE` 추가, 기본값은 `current` 유지
 - [ ] **F-9.4** S-2: `universe backfill-master` → 상폐 종목 `prices backfill`
 - [ ] **F-9.5** S-3: `delisted_date` 확정, 상폐 종목 라벨 정책 문서화
 - [ ] **F-9.6** `dim_universe_daily_krx`(`daily_market_cap` 기준) + 집합 차이 리포트
