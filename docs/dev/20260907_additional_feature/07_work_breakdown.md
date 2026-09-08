@@ -157,7 +157,8 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
 
 ### F-HS Horizon Scan 사전등록·실행
 
-- [ ] **F-HS-1** overlay config(`horizon_scan_expansion_2026MM.yaml`): F-2 4 + F-4 9 family, fdr_family `relation`·`financial_risk`·`lifecycle`·`transition`. `registered_at` 실제 날짜, hash 기록(`05_preregistration_record` 형식)
+- [x] **F-HS-1** overlay config `horizon_scan_expansion_202609.yaml`, hash `3ca949e6`, `registered_at: 2026-09-09`, 커밋 `e704e08`. F-2 4 + F-4 9 family = 66 cell, Phase B 102 → 168. 전 family `fdr_include: false`이라 Phase A 75개는 그대로고 앞선 세 층 hash(`ab0de634`/`889c3e83`/`236d0d35`)도 그대로다(테스트가 박아 둔다). 기록 → `results/f_hs1_preregistration_record.md`
+      — 이 층이 드러낸 것 둘. (a) `feat_relation_stat`에 `_lag1`이 없어 **없는 컬럼에 계약을 얼릴 상황**이었다 → `relation_stat_v2`. 산식 불변(peer 11,292,902행·마트 7,053,322행·리포트 수치 전부 동일)이고, 연 단위 part가 매년 첫 세션 lag1을 NULL로 만드는 문제와 1년 넘는 거래 공백 121행을 `LAG1_MAX_GAP_DAYS=365`로 정리했다. (b) event cohort 2건은 `run_phase_b_event_scan`이 `fin_sue_event` grain에 묶여 있어 `fin_risk_event`를 의존성에 적어 `blocked_exploratory`로 얼린다
 - [ ] **F-HS-1 실행** 새 snapshot(S-1 잔여·F-6·F-9.2 반영) → A0 → A → B → AB. 기존 discovery 변화 0 확인, 단계 0 exact match
 - [ ] **F-HS-1 결과 문서** → `screen_pass` 컬럼 목록 = **FS3** → 모델 스트림 `05` E5에 기록
 - [ ] **F-HS-C2** Phase C 2라운드(F-8.6)
