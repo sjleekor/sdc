@@ -118,7 +118,8 @@ def read_csv() -> dict[dt.date, str]:
 
 def write_csv(entries: dict[dt.date, str]) -> None:
     with CSV_PATH.open("w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f)
+        # csv.writer defaults to \r\n; this repository's file is LF.
+        w = csv.writer(f, lineterminator="\n")
         w.writerow(["date", "name"])
         for day in sorted(entries):
             w.writerow([day.isoformat(), entries[day]])
