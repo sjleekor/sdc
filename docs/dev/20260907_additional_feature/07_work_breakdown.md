@@ -10,7 +10,7 @@
 
 | 패키지 | 내용 | 새 수집 | 상태 | 다음 행동 |
 |---|---|---|---|---|
-| F-1 | 업종 `induty_code` 버저닝 | OpenDART 월 3,959 | F-1.1~F-1.4 완료(2026-09-08) | **F-1.6 월 Cronicle 이벤트**(없으면 10월 스냅샷이 안 돈다) |
+| F-1 | 업종 `induty_code` 버저닝 | OpenDART 월 3,959 | F-1.1~F-1.4·F-1.6 완료(2026-09-08) | F-1.5 마트 / F-1.7 변경률 스크립트 |
 | F-2 | 통계적 peer 관계 피쳐 | 없음 | **완료**(2026-09-07, snapshot 2026-08-23) | F-HS-1 대기 |
 | F-3 | 업종 관계 피쳐 | 없음(F-1 선행) | 대기(D-F1) | 3개월 변경률 측정 뒤 |
 | F-4 | 재무위험·생애주기·전이 | 없음 | **완료**(2026-09-07, snapshot 2026-08-23) | F-HS-1 대기. 5 family는 2020~ 표본 |
@@ -18,7 +18,7 @@
 | F-6 | `fin_sue` XBRL 백필 | OpenDART(측정 뒤) | 미착수 | 대상 역산 |
 | F-7 | DS005 이벤트·elestock | 있음 | 미착수 (D-F2 확정: `elestock` 시작 / D-F3: PoC 뒤 6종) | DS005 PoC + `elestock` 스키마 |
 | F-8 | 매크로 2단계 시리즈 | 시리즈 정의 | 미착수 (D-F5 확정: 2단계 먼저) | ECOS item_code 확정 |
-| F-9 | `fin_pit` strict·휴장일·상폐·유니버스·Cronicle | 일부 | F-9.3 명령 준비 완료 | **F-9.3 실행 승인 대기** |
+| F-9 | `fin_pit` strict·휴장일·상폐·유니버스·Cronicle | 일부 | **F-9.3 종결**(2026-09-08, 더 받을 것 없음) | F-9.1 / F-9.2 |
 | F-HS | 새 config 사전등록·A→B→AB→C | — | 대기 | F-2·F-4 마트 완료 뒤 |
 
 ---
@@ -26,7 +26,7 @@
 ## 1. 순서
 
 ```
-주차 1~2   F-2 (peer 계산·마트)  ‖  F-4 (fin_risk 마트)  ‖  F-1 스키마·시드·첫 스냅샷  ‖  F-9.3 S-1 잔여 실행 시작(prod, 며칠)
+주차 1~2   F-2 (peer 계산·마트)  ‖  F-4 (fin_risk 마트)  ‖  F-1 스키마·시드·첫 스냅샷  ‖  F-9.3 S-1 잔여 → 2026-09-08 종결(수확 0)
 주차 2~3   F-5 PoC  ‖  F-6 대상 측정  ‖  F-7 DS005 PoC  ‖  F-8 item_code 확정·시리즈 추가·백필  ‖  F-9.1 fin_ratios_pit
 주차 3~4   F-HS-1: F-2·F-4 사전등록 config → (S-1 잔여·F-6 백필·holidays 보강이 끝났으면 같은 snapshot) A0→A→B→AB
 주차 4~    F-8 국면 사전 계산 → Phase C 2라운드(F-4 필요)  ‖  F-7 수집  ‖  F-1 월별 스냅샷 누적
@@ -34,7 +34,7 @@
 FS3 인계   F-HS-1 screen_pass → 모델 E5
 ```
 
-- `‖`는 병행 가능. 병목은 **prod OpenDART 호출**(S-1 잔여 4.3만 + F-6 + F-7)이라 키 예산을 순서대로 배정한다: S-1 잔여 → F-6 → F-7.
+- `‖`는 병행 가능. 병목은 **prod OpenDART 호출**이다. ~~S-1 잔여~~는 2026-09-08에 종결됐으므로(더 받을 것이 없다) 키 예산은 **F-6 → F-7** 순이다.
 - 장비: F-2 peer 계산·마트 빌드와 Horizon Scan·모델 run이 겹치지 않게.
 
 ---
@@ -56,7 +56,11 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
       — 첫 변경률(판정 아님): 코드 0.0505%, **그룹 0.0253%**(문턱 0.3%). 코드 2건 중 1건은 업종 변경이 아니라 정밀도 변경(262→26293)이다
       — 부수 확인: `corp_cls`→`E` 6건 중 5건이 `stock_master` 상폐와 일치하고 `last_seen_date`가 두 스냅샷 사이에 들어간다. 6번째는 `stock_master`에 행이 없는 KONEX 종목이다. `corp_cls`가 `is_active`보다 신선하다
 - [ ] **F-1.5** 마트 `dim_industry_pit_daily`(`ind_ksic_code`, `ind_group`, `ind_is_backcast`, `ind_changed_recent_252`) + 테스트(backcast 경계, as-of, fold-up 규칙 동일)
-- [ ] **F-1.6** Cronicle 월 이벤트 + freshness 월 예산
+- [x] **F-1.6** Cronicle 월 이벤트 등록 완료 2026-09-08: `sdc_monthly_corp_profile_history`, 매월 1일 **05:30 KST**, `max_children=1`, `timeout=5400`, **`catch_up=1`**(1일에 호스트가 내려가 있어도 같은 달로 채운다)
+      — `DART_PROFILE_FORCE=1`이 **필수**다. 없으면 skip-if-present가 전 법인을 건너뛰고 history에 아무것도 안 들어간다 — 옛 일회성 이벤트를 월 스냅샷으로 못 쓴 이유가 이것이다
+      — 05:30을 고른 근거: 04:00 `sdc_daily_opendart_corp`이 실측 **2~4초**에 끝난다. 다음 opendart 잡은 23:30이라 20분 런과 겹치지 않는다
+      — 중단된 달을 다시 돌리면 **빈 곳만 채운다**(이미 행이 있는 법인은 DO NOTHING)
+      — freshness 월 예산 항목은 아직 안 넣었다 → F-9.8
 - [ ] **F-1.7** 변경률 리포트 스크립트 + 첫 회(2026-10)
 - [ ] **F-1.8** KIS 종목 기본정보 업종 필드 PoC(`poc/kis_stock_info_industry.md`) → L2 채택 여부
 - [ ] **F-1.9** D-F1 판정(2026-12, 3개월) — 문턱 0.3% 고정
@@ -81,7 +85,8 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
 - [x] **F-4.2** `feat_fin_risk` 9 family(`fin_risk_v1`), TTM·직전 vintage·`dps` 노출 규칙. 7,211,785행
       — 조인 형태를 바꿔야 했다: metric 10 × basis 2 = 20개의 equality+range 조인은 7.2M 세션 × 1.17M 인터벌에서 **완료되지 않았다**(20분 무출력). ASOF 20개도 마찬가지. interval을 먼저 wide로 피벗해 **ASOF 1개**로 읽으면 100초에 끝난다. `feat_fin_scan_daily`는 range 조인을 그대로 둔다(SQL 텍스트가 A0 캐시 키). 두 형태가 같은 행을 고른다는 것을 엇갈린 접수일 fixture로 테스트
 - [x] **F-4.3** 생애주기 8조합 매핑 테스트(8개 전수 parametrize), 전이 이벤트 빈도 리포트 → **`fin_lifecycle_transition`·`fin_profit_turn` = continuous**(연평균 0.69/0.27, 문턱 0.05), 나머지 둘은 event cohort 유지
-- [x] **F-4.4** 상관 진단 → **경고 2건**: `fin_interest_coverage` × `fin_operating_profitability` ρ=0.88(분자 공유), `fin_net_debt_to_mcap` × `fin_book_to_market` ρ=0.51(분모 공유). 상폐 커버리지 9.2%(`stock_master` 기준) → Decline 판정 보류
+- [x] **F-4.4** 상관 진단 → **경고 2건**: `fin_interest_coverage` × `fin_operating_profitability` ρ=0.88(분자 공유), `fin_net_debt_to_mcap` × `fin_book_to_market` ρ=0.51(분모 공유). 상폐 커버리지 9.2%(`stock_master` 기준)
+      — **2026-09-08 갱신:** F-9.3이 종결돼 Decline 판정 보류는 "백필 대기"가 아니라 **영구 한계**다. 상폐 법인 재무 37%가 상한이다(F-9.3 결과 §5.1). 카드 문구를 그렇게 적는다
 - [x] **F-4.5** 사전등록 9 family 확정 → [`results/f4_fin_risk_verification.md`](results/f4_fin_risk_verification.md) §8
 - [ ] **F-4.6**(새로 생긴 항목) **5개 family가 2020년부터만 존재한다.** `interest_paid`·`investing_cash_flow`·`financing_cash_flow`·`cash_and_cash_equivalents` 넷에 XBRL fallback 규칙이 없어 2018년 이전 행이 100건 안팎이다. F-5.1의 **최우선 대상**이고, 붙이면 `fin_risk_v2` 범프 + 재검정이 따라온다. 그때까지 사전등록 표본은 2020~2025로 읽는다
 
@@ -121,14 +126,23 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
 
 - [ ] **F-9.1** `feat_fin_ratios_pit`(`_pit` 접미) + `fin_pit` 대비 차이 리포트 → 모델 스트림 통보(E3-b)
 - [ ] **F-9.2** `holidays_krx.csv` 2014~2023 보강(`daily_market_cap` 무행 평일) → golden 재생성·diff 기록 → fact 재빌드(F-HS-1 snapshot에 묶음)
-- [ ] **F-9.3** S-1 잔여: `sync-financials/share-info/xbrl` **`--universe-scope historical`**(`--include-delisted`는 없는 플래그다) 2015~2025 — **명령 준비 완료, 사용자 확인 대기** → [`results/prod_runbook_f1_4_f9_3.md`](results/prod_runbook_f1_4_f9_3.md) §2
-      — 실측: 재무 866 / 주식수 529 / XBRL 866 법인 누락. 그중 764는 `stock_master`에 행이 **아예 없는** 조기 상폐 법인이다
-      — 호출 상한 약 **13.7만**(4.3만 추정은 보고서·fs_div 축을 빼먹었다)
-      — `bin/dart-backfill-all-years.sh`가 `--universe-scope`를 안 넘기고 있었다(기본 `current`) = S-1 갭의 직접 원인. `SDC_DART_BACKFILL_UNIVERSE_SCOPE` 추가, 기본값은 `current` 유지
+- [x] **F-9.3** S-1 잔여 **종결 2026-09-08 — 더 받을 것이 없다** → [`results/f9_3_s1_remainder_20260908.md`](results/f9_3_s1_remainder_20260908.md)
+      — 176 유닛 전수 완주(5시간 45분), 실패 0, 요청 **131,292건**, 저장 **0행**. 커버리지 변화 없음(재무 3,093 / 주식수 3,430 / XBRL 3,093)
+      — 원인: 상장 법인은 이미 99.7% 완결이고 공백은 전부 상폐(E 1,230중 455=37%)·코넥스(N 105중 19)에 있다. 남은 866중 356은 정기보고서를 냈는데도 OpenDART가 `013 조회된 데이타가 없습니다`로 답한다
+      — PoC(양성 대조 포함): `fnlttSinglAcnt`(주요계정)도 같은 013. 삼성전자는 000/229행 → 키·요청 형태는 정상. **재무제표 API가 현재 규제 대상 법인만 서빙하는 것**으로 보인다
+      — **생존편향은 수집으로 닫히지 않는다.** F-4의 "S-1 잔여 뒤 판정"은 **영구 한계**로 문구를 바꿔야 한다(§5.1)
+      — Cronicle 이벤트는 삭제했다. 드라이버 스크립트는 남긴다. 이유: skip-if-present가 *저장된* 행만 건너뛰므로 회수 불가 861개는 매 실행 13.1만 요청을 반복한다(스크립트에 "no-op가 된다"고 적은 것은 틀렸다)
+      — `06` §3 정정: 누락은 1,300이 아니라 866, 호출은 4.3만이 아니라 13.1만, `--include-delisted`는 없는 플래그
 - [ ] **F-9.4** S-2: `universe backfill-master` → 상폐 종목 `prices backfill`
 - [ ] **F-9.5** S-3: `delisted_date` 확정, 상폐 종목 라벨 정책 문서화
 - [ ] **F-9.6** `dim_universe_daily_krx`(`daily_market_cap` 기준) + 집합 차이 리포트
-- [ ] **F-9.7** Cronicle 이벤트 등록(월 corp-profile·insider, 일 major-events), N3 백필 이벤트 삭제
+- [~] **F-9.7** Cronicle 정리 — 부분 완료 2026-09-08
+      — [x] 월 corp-profile 이벤트 등록(F-1.6과 같은 항목)
+      — [x] `emsugdoe907`("SDC Backfill DART Corp Profile (one-time)") **삭제**. 2026-08-15에 1회 1,300.6초 실행 code=0으로 목적 달성, `--force`가 없어 월 스냅샷으로는 못 쓴다
+      — [x] `sdc_backfill_s1_remainder` **삭제**(F-9.3 종결, 이유는 그쪽 §4)
+      — [ ] `emsugmrjp0a`("SDC Backfill N3 Universe Snapshots (one-time)") 삭제 — `timing=manual`이라 자동으로 안 돌고 급하지 않다. `06` §4가 삭제 대상으로 지목
+      — [ ] `emr0r4xgb0h`("SDC Common Backfill 2015 (one-time)") — 검증 후 삭제 대상(별건)
+      — 월 insider(F-7.5)·일 major-events(F-7)는 수집기가 아직 없어 해당 없음
 - [ ] **F-9.8** freshness 월 예산 항목
 
 ### F-HS Horizon Scan 사전등록·실행
