@@ -58,9 +58,7 @@ def _stub(monkeypatch: pytest.MonkeyPatch, name: str, calls: list[str], *, fail:
     monkeypatch.setattr(phase_b_run, f"materialize_{name}", _fn)
 
 
-def _stub_common_fact(
-    monkeypatch: pytest.MonkeyPatch, calls: list[str], *, present: bool = True
-):
+def _stub_common_fact(monkeypatch: pytest.MonkeyPatch, calls: list[str], *, present: bool = True):
     """Stand in for binding the snapshot's persisted ``common_feature_daily_fact``.
 
     Absent is the normal state for a snapshot whose marts step never ran, and
@@ -87,6 +85,8 @@ def _stub_all_marts(
     for name in (
         "market_cap",
         "filing_activity",
+        "peer_monthly",
+        "relation_stat",
         "macro_exposure",
         "stock_metric_vintage_fact",
         "periodic_extras",
@@ -94,6 +94,7 @@ def _stub_all_marts(
         "fin_scan_daily",
         "event_scan_daily",
         "sue_event",
+        "fin_risk",
     ):
         _stub(monkeypatch, name, calls, fail=name == fail)
 
@@ -110,15 +111,20 @@ def test_register_phase_b_marts_all_succeed(monkeypatch: pytest.MonkeyPatch) -> 
         "feat_fin_scan_daily",
         "feat_event_scan_daily",
         "fin_sue_event",
+        "feat_fin_risk",
         "feat_market_cap",
         "feat_filing_activity",
         "feat_periodic_extras",
+        "dim_peer_monthly",
+        "feat_relation_stat",
         "common_feature_daily_fact",
         "feat_macro_exposure",
     }
     assert calls == [
         "market_cap",
         "filing_activity",
+        "peer_monthly",
+        "relation_stat",
         "common_feature_daily_fact",
         "macro_exposure",
         "stock_metric_vintage_fact",
@@ -127,6 +133,7 @@ def test_register_phase_b_marts_all_succeed(monkeypatch: pytest.MonkeyPatch) -> 
         "fin_scan_daily",
         "event_scan_daily",
         "sue_event",
+        "fin_risk",
     ]
 
 
@@ -160,12 +167,16 @@ def test_register_phase_b_marts_stops_at_root_failure(monkeypatch: pytest.Monkey
     assert result == {
         "feat_market_cap",
         "feat_filing_activity",
+        "dim_peer_monthly",
+        "feat_relation_stat",
         "common_feature_daily_fact",
         "feat_macro_exposure",
     }
     assert calls == [
         "market_cap",
         "filing_activity",
+        "peer_monthly",
+        "relation_stat",
         "common_feature_daily_fact",
         "macro_exposure",
         "stock_metric_vintage_fact",
@@ -190,9 +201,12 @@ def test_register_phase_b_marts_partial_availability_degrades_gracefully(
         "fin_quarterly_metric_vintage",
         "feat_fin_scan_daily",
         "fin_sue_event",
+        "feat_fin_risk",
         "feat_market_cap",
         "feat_filing_activity",
         "feat_periodic_extras",
+        "dim_peer_monthly",
+        "feat_relation_stat",
         "common_feature_daily_fact",
         "feat_macro_exposure",
     }
@@ -202,9 +216,12 @@ def test_register_phase_b_marts_partial_availability_degrades_gracefully(
         "fin_scan_daily",
         "event_scan_daily",
         "sue_event",
+        "fin_risk",
         "market_cap",
         "filing_activity",
         "periodic_extras",
+        "peer_monthly",
+        "relation_stat",
         "common_feature_daily_fact",
         "macro_exposure",
     }
@@ -223,12 +240,16 @@ def test_register_phase_b_marts_stops_after_second_stage_failure(
         "feat_filing_activity",
         "stock_metric_vintage_fact",
         "feat_periodic_extras",
+        "dim_peer_monthly",
+        "feat_relation_stat",
         "common_feature_daily_fact",
         "feat_macro_exposure",
     }
     assert calls == [
         "market_cap",
         "filing_activity",
+        "peer_monthly",
+        "relation_stat",
         "common_feature_daily_fact",
         "macro_exposure",
         "stock_metric_vintage_fact",

@@ -1,8 +1,8 @@
 # F-2.4 — `feat_relation_stat` 마트 검증 리포트
 
-- 생성: 2026-09-08 23:31 KST
+- 생성: 2026-09-09 03:12 KST
 - snapshot `2026-09-08` / source `sj2_remote`
-- `FORMULA_VERSION = relation_stat_v1`
+- `FORMULA_VERSION = relation_stat_v2`
 - `feat_relation_stat` 7,053,322행, 2007-06-05 ~ 2026-09-07
 
 생성 명령: `uv run python -m research.analysis.relation_stat_report --snapshot-date 2026-09-08 --source sj2_remote`

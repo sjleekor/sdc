@@ -314,6 +314,10 @@ def test_the_daily_mart_emits_the_documented_columns() -> None:
     assert columns[:3] == ["trade_date", "ticker", "market"]
     for name in relation_stat.FEATURE_COLUMNS + relation_stat.COUNT_COLUMNS:
         assert name in columns
+    # The scan config requires a variant_columns.lag1 mapping per family, so
+    # every preregistered primary needs a real lag1 column to point at.
+    for name in relation_stat.PRIMARY_COLUMNS:
+        assert f"{name}_lag1" in columns
 
 
 def test_a_session_reads_the_peer_set_of_an_earlier_month_end() -> None:
@@ -404,9 +408,12 @@ def test_the_yearly_parts_and_the_one_shot_query_agree() -> None:
     )
 
     def _part(year: int) -> str:
+        # Exactly the shape materialize_relation_stat builds: read one year
+        # wider than emitted so the lag1 window crosses the part boundary.
         return relation_stat.build_relation_stat_sql(
             return_panel_view="_relation_return_panel",
-            session_filter=f"year(r.trade_date) = {year}",
+            session_filter=f"year(r.trade_date) IN ({year - 1}, {year})",
+            emit_filter=f"year(trade_date) = {year}",
         )
 
     one_shot = relation_stat.build_relation_stat_sql()
@@ -414,7 +421,11 @@ def test_the_yearly_parts_and_the_one_shot_query_agree() -> None:
     # Compared with a tolerance, not by EXCEPT: DuckDB's parallel AVG over
     # doubles is not bit-reproducible, so an exact set difference would fail on
     # last-bit noise and say nothing about the partitioning.
-    columns = relation_stat.FEATURE_COLUMNS + relation_stat.COUNT_COLUMNS
+    columns = (
+        relation_stat.FEATURE_COLUMNS
+        + relation_stat.COUNT_COLUMNS
+        + tuple(f"{c}_lag1" for c in relation_stat.PRIMARY_COLUMNS)
+    )
     worst = ", ".join(
         f"max(abs(coalesce(a.{c}, 0) - coalesce(b.{c}, 0))) AS d_{c}, "
         f"count(*) FILTER (WHERE (a.{c} IS NULL) <> (b.{c} IS NULL)) AS n_{c}"
@@ -429,6 +440,75 @@ def test_the_yearly_parts_and_the_one_shot_query_agree() -> None:
     assert row[0] == matched > 0
     for value in row[1:]:
         assert value == pytest.approx(0, abs=1e-9)
+
+
+def test_lag1_is_the_tickers_own_previous_session() -> None:
+    con = _relation_rows(_peer_panel())
+
+    mismatched = con.execute(f"""
+        SELECT count(*) FROM (
+            SELECT rel_peer_mom_20d_lag1,
+                   CASE WHEN date_diff('day', LAG(trade_date) OVER w, trade_date)
+                             <= {relation_stat.LAG1_MAX_GAP_DAYS}
+                        THEN LAG(rel_peer_mom_20d) OVER w END AS expected
+            FROM feat_relation_stat
+            WINDOW w AS (PARTITION BY ticker, market ORDER BY trade_date)
+        )
+        WHERE rel_peer_mom_20d_lag1 IS DISTINCT FROM expected
+        """).fetchone()[0]
+
+    assert mismatched == 0
+
+
+def test_the_lag1_gap_bound_is_in_the_sql_and_covers_a_part_lookback() -> None:
+    # Why the bound is what makes the yearly parts reproduce the unpartitioned
+    # contract: a part reads its own year plus the previous one, so the oldest
+    # predecessor the guard admits for the year's first session — 365 days
+    # back — is still inside the part. Drop the guard and a stock returning
+    # from a multi-year suspension gets a lag1 that depends on nothing but
+    # where the partition boundary fell.
+    assert relation_stat.LAG1_MAX_GAP_DAYS == 365
+    assert (
+        f"date_diff('day', LAG(trade_date) OVER w, trade_date)"
+        f" <= {relation_stat.LAG1_MAX_GAP_DAYS}" in relation_stat.build_relation_stat_sql()
+    )
+    earliest_admitted = dt.date(2021, 1, 1) - dt.timedelta(days=relation_stat.LAG1_MAX_GAP_DAYS)
+    assert earliest_admitted >= dt.date(2020, 1, 1)
+
+
+def test_a_part_boundary_does_not_null_out_the_first_sessions_lag1() -> None:
+    # The failure this guards is silent: WHERE runs before the window, so a
+    # part filtered to its own year alone would hand January's first session a
+    # NULL lag1 at every boundary and still look like a complete mart.
+    # A longer panel than _peer_panel's: the peer sets need 252 + 252 sessions
+    # before the first value, so the default fixture has no year boundary with
+    # anything on both sides of it.
+    con = duckdb.connect()
+    _synthetic_ohlcv(con, sessions=900, tickers=16, start=dt.date(2019, 1, 1))
+    relation_stat.compute_peer_monthly(con, table_name="dim_peer_monthly")
+    con.execute(
+        f"CREATE TEMP TABLE _relation_return_panel AS {relation_stat.build_return_panel_sql()}"
+    )
+
+    def _first_session_lag1_nulls(session_filter: str) -> tuple[int, int]:
+        sql = relation_stat.build_relation_stat_sql(
+            return_panel_view="_relation_return_panel",
+            session_filter=session_filter,
+            emit_filter="year(trade_date) = 2021",
+        )
+        return con.execute(f"""
+            WITH p AS ({sql}), f AS (SELECT min(trade_date) AS d FROM p)
+            SELECT count(*), count(*) FILTER (WHERE p.rel_peer_mom_20d_lag1 IS NULL)
+            FROM p JOIN f ON p.trade_date = f.d
+            """).fetchone()
+
+    widened_rows, widened_nulls = _first_session_lag1_nulls("year(r.trade_date) IN (2020, 2021)")
+    narrow_rows, narrow_nulls = _first_session_lag1_nulls("year(r.trade_date) = 2021")
+
+    assert widened_rows > 0
+    assert widened_nulls == 0
+    # The same part read only within its own year loses every lag1 on that day.
+    assert narrow_nulls == narrow_rows == widened_rows
 
 
 def test_the_returns_panel_the_parts_read_is_the_contracts_own_text() -> None:

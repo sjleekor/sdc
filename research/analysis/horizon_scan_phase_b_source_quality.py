@@ -88,6 +88,33 @@ FAMILY_METRIC_DEPENDENCIES: dict[str, frozenset[str]] = {
     "hc_productivity": frozenset(),
     "own_major_stake_level": frozenset(),
     "own_major_stake_change": frozenset(),
+    # F-2. Built from prices, the PIT market cap and dart_corp_master's
+    # industry code — nothing that goes through the metric layer this module
+    # measures, so empty rather than absent (same reason as fin_log_mcap).
+    "rel_peer_mom": frozenset(),
+    "rel_own_minus_peer": frozenset(),
+    "rel_peer_bigcap_lag": frozenset(),
+    "rel_peer_dispersion": frozenset(),
+    # F-4. Taken from fin_risk.py's own formulas, not guessed. net_income is in
+    # every set for the same reason as the fin_scan families: fin_risk picks the
+    # CFS/OFS basis off it, so a problem there moves each of these features.
+    "fin_debt_to_assets": frozenset({"total_liabilities", "total_assets", "net_income"}),
+    "fin_net_debt_to_mcap": frozenset(
+        {"total_liabilities", "cash_and_cash_equivalents", "net_income"}
+    ),
+    "fin_interest_coverage": frozenset({"operating_income", "interest_paid", "net_income"}),
+    "fin_ext_finance": frozenset({"financing_cash_flow", "total_assets", "net_income"}),
+    "fin_lifecycle_stage": frozenset(
+        {"operating_cash_flow", "investing_cash_flow", "financing_cash_flow", "net_income"}
+    ),
+    "fin_lifecycle_transition": frozenset(
+        {"operating_cash_flow", "investing_cash_flow", "financing_cash_flow", "net_income"}
+    ),
+    "fin_profit_turn": frozenset({"net_income"}),
+    "fin_negative_equity_exit": frozenset({"total_equity", "net_income"}),
+    # dps comes straight from dart_shareholder_return_raw, never through the
+    # metric layer — the ev_net_share_issuance_yoy case.
+    "fin_dividend_initiation": frozenset(),
 }
 
 

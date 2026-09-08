@@ -165,6 +165,8 @@ from research.etl.features.filing_activity import (
     FILING_ACTIVITY_TABLE,
     materialize_filing_activity,
 )
+from research.etl.features.fin_risk import FIN_RISK_TABLE, materialize_fin_risk
+from research.etl.features.fin_risk import FORMULA_VERSION as FIN_RISK_FORMULA_VERSION
 from research.etl.features.fin_scan import (
     FIN_FEATURE_FORMULA_VERSION,
     FIN_SCAN_TABLE,
@@ -184,6 +186,13 @@ from research.etl.features.periodic_extras import (
     PERIODIC_EXTRAS_FORMULA_VERSION,
     PERIODIC_EXTRAS_TABLE,
     materialize_periodic_extras,
+)
+from research.etl.features.relation_stat import FORMULA_VERSION as RELATION_STAT_FORMULA_VERSION
+from research.etl.features.relation_stat import (
+    PEER_MONTHLY_TABLE,
+    RELATION_STAT_TABLE,
+    materialize_peer_monthly,
+    materialize_relation_stat,
 )
 from research.etl.features.sue_event import SUE_EVENT_TABLE, materialize_sue_event
 from research.etl.lake import connect, register_persisted_derived_mart, register_views
@@ -393,6 +402,8 @@ _FORMULA_VERSION_BY_DEPENDENCY = {
     MARKET_CAP_TABLE: MARKET_CAP_FORMULA_VERSION,
     FILING_ACTIVITY_TABLE: FILING_ACTIVITY_FORMULA_VERSION,
     PERIODIC_EXTRAS_TABLE: PERIODIC_EXTRAS_FORMULA_VERSION,
+    RELATION_STAT_TABLE: RELATION_STAT_FORMULA_VERSION,
+    FIN_RISK_TABLE: FIN_RISK_FORMULA_VERSION,
 }
 _FORMULA_VERSION_BY_FAMILY = {
     "ev_payout_yield": PAYOUT_FEATURE_FORMULA_VERSION,
@@ -629,6 +640,20 @@ def register_phase_b_marts(
         lambda: materialize_filing_activity(con, lake, force=force),
     )
 
+    # F-2. dim_peer_monthly is the monthly peer-set root, not a daily mart, so
+    # it never joins the panel — it is here only so feat_relation_stat can be
+    # built from it and so the relation families' readiness_dependencies can
+    # name the thing their features actually rest on.
+    _try(
+        PEER_MONTHLY_TABLE,
+        lambda: materialize_peer_monthly(con, lake, force=force),
+    )
+    if PEER_MONTHLY_TABLE in available:
+        _try(
+            RELATION_STAT_TABLE,
+            lambda: materialize_relation_stat(con, lake, force=force),
+        )
+
     # feat_macro_exposure reads common_feature_daily_fact. It is bound from the
     # snapshot's *persisted* derived mart rather than recomputed from raw, so
     # the betas and the readiness gate below are looking at the same fact — the
@@ -672,6 +697,12 @@ def register_phase_b_marts(
         _try(
             "fin_sue_event",
             lambda: materialize_sue_event(con, lake, force=force),
+        )
+        # F-4. Shares fin_scan's vintage rules via fin_vintage, so it hangs off
+        # the same quarterly-vintage root.
+        _try(
+            FIN_RISK_TABLE,
+            lambda: materialize_fin_risk(con, lake, trading_days=trading_days, force=force),
         )
     return available
 
@@ -783,16 +814,12 @@ def compute_phase_b_gate_updates(
                 con, panel_view=period_view, cell=cell, period_ids=period_ids, **scan_kwargs
             )
             broad_ic = (
-                combos_by_hid.get(hid, {})
-                .get(("broad", "common_survivor"), {})
-                .get("ic_mean")
+                combos_by_hid.get(hid, {}).get(("broad", "common_survivor"), {}).get("ic_mean")
             )
             gate_sign = cell.get("expected_sign")
             if gate_sign is None and broad_ic is not None:
                 gate_sign = "+" if broad_ic > 0 else "-"
-            period_sign_pass = compute_phase_b_period_sign_pass(
-                period_ics, expected_sign=gate_sign
-            )
+            period_sign_pass = compute_phase_b_period_sign_pass(period_ics, expected_sign=gate_sign)
             gate_updates[hid].update(period_sign_pass)
 
         long_cells = select_phase_b_long_horizon_cells(
@@ -1219,12 +1246,12 @@ def run_phase_b_core(
                 FILING_ACTIVITY_TABLE,
                 PERIODIC_EXTRAS_TABLE,
                 MACRO_EXPOSURE_TABLE,
+                RELATION_STAT_TABLE,
+                FIN_RISK_TABLE,
             )
             if name in phase_b_marts
         )
-        if ready_continuous and (
-            {FIN_SCAN_TABLE, EVENT_SCAN_TABLE} & phase_b_marts or daily_marts
-        ):
+        if ready_continuous and ({FIN_SCAN_TABLE, EVENT_SCAN_TABLE} & phase_b_marts or daily_marts):
             register_phase_b_panel(
                 con,
                 fin_scan_view=(

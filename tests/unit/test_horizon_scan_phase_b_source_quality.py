@@ -66,6 +66,19 @@ def test_every_phase_b_family_has_a_declared_dependency_set() -> None:
         "hc_productivity",
         "own_major_stake_level",
         "own_major_stake_change",
+        "rel_peer_mom",
+        "rel_own_minus_peer",
+        "rel_peer_bigcap_lag",
+        "rel_peer_dispersion",
+        "fin_debt_to_assets",
+        "fin_net_debt_to_mcap",
+        "fin_interest_coverage",
+        "fin_ext_finance",
+        "fin_lifecycle_stage",
+        "fin_lifecycle_transition",
+        "fin_profit_turn",
+        "fin_dividend_initiation",
+        "fin_negative_equity_exit",
     }
 
 

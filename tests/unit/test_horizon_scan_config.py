@@ -338,3 +338,153 @@ def test_layers_without_registered_pairs_skip_the_phase_c_checks() -> None:
     expansion = load_config(CONFIG_PATH.with_name("horizon_scan_expansion_20260827.yaml"))
     assert "pairs" not in base.raw.get("phase_c", {})
     assert "pairs" not in expansion.raw["phase_c"]
+
+
+# --------------------------------------------------------------------------
+# F-HS-1 — the fourth layer: F-2 relation + F-4 financial risk/lifecycle
+# --------------------------------------------------------------------------
+
+F_HS1_PATH = CONFIG_PATH.with_name("horizon_scan_expansion_202609.yaml")
+
+_F_HS1_FAMILIES = {
+    "rel_peer_mom",
+    "rel_own_minus_peer",
+    "rel_peer_bigcap_lag",
+    "rel_peer_dispersion",
+    "fin_debt_to_assets",
+    "fin_net_debt_to_mcap",
+    "fin_interest_coverage",
+    "fin_ext_finance",
+    "fin_lifecycle_stage",
+    "fin_lifecycle_transition",
+    "fin_profit_turn",
+    "fin_dividend_initiation",
+    "fin_negative_equity_exit",
+}
+
+
+def test_f_hs1_overlay_moves_none_of_the_three_earlier_layer_hashes() -> None:
+    """Every published Phase A/B/AB/C run is keyed on one of those three."""
+    base = load_config()
+    expansion = load_config(CONFIG_PATH.with_name("horizon_scan_expansion_20260827.yaml"))
+    macro = load_config(MACRO_PATH)
+    layer = load_config(F_HS1_PATH)
+
+    assert base.config_hash == "ab0de63411c40ca3b59c1c7e6f8653a8e16d980108bee42f5f8cea8e7fcb6588"
+    assert (
+        expansion.config_hash == "889c3e8377c2f400907611f7402651eee6a23c2765c051e4eb2a4a59ca36cbea"
+    )
+    assert macro.config_hash == "236d0d3515043e44e280f0c2c2707ca2cc486aa44b638eb893a7095ddac1110f"
+    assert layer.config_hash not in {base.config_hash, expansion.config_hash, macro.config_hash}
+    assert layer.raw["preregistration"]["base_config_hash_prefix"] == macro.config_hash[:8]
+
+
+def test_f_hs1_appends_thirteen_families_and_sixtysix_cells() -> None:
+    macro = load_config(MACRO_PATH)
+    layer = load_config(F_HS1_PATH)
+
+    assert {f["family"] for f in layer.families} - {f["family"] for f in macro.families} == (
+        _F_HS1_FAMILIES
+    )
+    assert len(layer.families) == 54
+    assert sum(f["phase"] == "A" for f in layer.families) == 17
+    assert sum(f["phase"] == "B" for f in layer.families) == 37
+    # 102 (macro) + 4 relation x 6 + 42 fin_risk = 168.
+    assert layer.raw["phase_b"]["primary_candidate_count_max"] == 168
+    # Phase A's own BH population is untouched: the append is Phase-B-only.
+    assert layer.primary_hypothesis_count == 75
+
+
+def test_f_hs1_families_are_blocked_and_outside_fdr() -> None:
+    layer = load_config(F_HS1_PATH)
+    for family in layer.families:
+        if family["family"] not in _F_HS1_FAMILIES:
+            continue
+        assert family["phase"] == "B"
+        assert family["role"] == "phase_b_blocked"
+        assert family["fdr_include"] is False
+        assert family["official_feature_variant"] == "native_t"
+        assert family["fdr_family"] in {"relation", "financial_risk", "lifecycle", "transition"}
+
+
+def test_f_hs1_families_point_at_columns_their_marts_carry() -> None:
+    """The lag1 mapping is the one the validator cannot check: it only requires
+    the key to exist. feat_relation_stat had no lag1 columns until
+    relation_stat_v2, so naming them here would have frozen a contract on
+    columns that do not exist."""
+    from research.etl.features import fin_risk, relation_stat
+
+    available = {
+        *relation_stat.FEATURE_COLUMNS,
+        *(f"{c}_lag1" for c in relation_stat.PRIMARY_COLUMNS),
+        *fin_risk.PRIMARY_COLUMNS,
+        *(f"{c}_lag1" for c in fin_risk.PRIMARY_COLUMNS),
+    }
+    for family in load_config(F_HS1_PATH).families:
+        if family["family"] not in _F_HS1_FAMILIES:
+            continue
+        for feature in family["features"]:
+            assert feature["column"] in available, family["family"]
+        for variant in ("native_t", "lag1"):
+            assert family["variant_columns"][variant] in available, family["family"]
+
+
+def test_f_hs1_event_cohort_families_use_the_frozen_event_grid() -> None:
+    """The 5%-of-names rule put these two on the event path, so their cells are
+    the frozen event grid rather than a horizon set — and they name an event
+    mart that does not exist, which is what keeps them out of the SUE-shaped
+    cohort scan instead of being handed to it."""
+    layer = load_config(F_HS1_PATH)
+    event_families = {"fin_dividend_initiation", "fin_negative_equity_exit"}
+    for family in layer.families:
+        if family["family"] not in event_families:
+            continue
+        assert family["primary_horizon_set"] == []
+        assert family["exploratory_horizon_set"] == []
+        assert family["include_bucket_primary"] is False
+        assert family["event_buckets"] == [[0, 3], [3, 5], [5, 10], [10, 20], [20, 40], [40, 60]]
+        assert "fin_risk_event" in family["readiness_dependencies"]
+
+
+def test_f_hs1_bidirectional_families_are_exactly_the_reports_seven() -> None:
+    """A sign silently filled in after the fact is the failure preregistration
+    exists to prevent, so the count is pinned to the two reports' own tables."""
+    layer = load_config(F_HS1_PATH)
+    bidirectional = {
+        f["family"]
+        for f in layer.families
+        if f["family"] in _F_HS1_FAMILIES and f["expected_sign"] is None
+    }
+    assert bidirectional == {
+        "rel_peer_mom",
+        "rel_peer_dispersion",
+        "fin_debt_to_assets",
+        "fin_net_debt_to_mcap",
+        "fin_lifecycle_stage",
+        "fin_lifecycle_transition",
+    }
+    signed = {
+        f["family"]: f["expected_sign"]
+        for f in layer.families
+        if f["family"] in _F_HS1_FAMILIES and f["expected_sign"] is not None
+    }
+    assert signed == {
+        "rel_own_minus_peer": "-",
+        "rel_peer_bigcap_lag": "+",
+        "fin_interest_coverage": "+",
+        "fin_ext_finance": "-",
+        "fin_profit_turn": "+",
+        "fin_dividend_initiation": "+",
+        "fin_negative_equity_exit": "+",
+    }
+
+
+def test_f_hs1_families_all_have_a_source_quality_verdict() -> None:
+    """A family missing from FAMILY_METRIC_DEPENDENCIES gets no verdict at all,
+    and ``source_quality_allows_grade_a(None)`` caps it at B — a grade cap by
+    omission rather than by measurement."""
+    from research.analysis.horizon_scan_phase_b_source_quality import (
+        FAMILY_METRIC_DEPENDENCIES,
+    )
+
+    assert _F_HS1_FAMILIES <= set(FAMILY_METRIC_DEPENDENCIES)

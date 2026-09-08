@@ -84,7 +84,15 @@ RELATION_STAT_TABLE = "feat_relation_stat"
 #: ``feat_fin_scan_daily``. It is part of both marts' cache contract text.
 #:
 #:   relation_stat_v1 — the 2026-09 rules as first built (02 §1).
-FORMULA_VERSION = "relation_stat_v1"
+#:   relation_stat_v2 — adds the ``_lag1`` execution variant of every
+#:     ``PRIMARY_COLUMNS`` entry. No peer rule and no column formula changed;
+#:     ``dim_peer_monthly`` rebuilds bit-identically. The scan config requires a
+#:     ``variant_columns.lag1`` mapping per family and every other registered
+#:     mart (``feat_market_cap``, ``feat_filing_activity``,
+#:     ``feat_periodic_extras``, ``feat_macro_exposure``, ``feat_fin_risk``)
+#:     carries real lag1 columns for its registered primaries; this one did not,
+#:     so F-HS-1 would have had to name columns that do not exist.
+FORMULA_VERSION = "relation_stat_v2"
 
 # --- peer-set construction (frozen before any result was seen; §1.1) --------
 
@@ -112,6 +120,16 @@ MIN_PEER_VALID = 15
 MIN_PEER_VALID_K10 = 8
 MIN_PEER_VALID_K40 = 30
 MIN_BIGCAP_VALID = 3
+
+#: How far back a ``_lag1`` predecessor may sit. A session whose previous
+#: valid session is more than a year away was suspended, and calling that a
+#: one-session execution delay would be false — NULL is the honest answer.
+#: Stating the bound also makes the column partition-independent: a part reads
+#: its own year plus the previous one, so every predecessor this admits is
+#: inside the part, and the parts reproduce the unpartitioned contract exactly.
+#: ``feat_market_cap``/``feat_fin_risk`` lag unguarded only because they are
+#: built in one shot and never had to answer this.
+LAG1_MAX_GAP_DAYS = 365
 
 #: Return windows. 20/60 end at session t; the big-cap window ends at t-1.
 MOM_WINDOW_SHORT = 20
@@ -616,6 +634,7 @@ def build_relation_stat_sql(
     peer_view: str = PEER_MONTHLY_TABLE,
     return_panel_view: str | None = None,
     session_filter: str | None = None,
+    emit_filter: str | None = None,
 ) -> str:
     """SQL producing ``feat_relation_stat``.
 
@@ -628,9 +647,15 @@ def build_relation_stat_sql(
             from — and both run the same text either way, since
             ``build_return_panel_sql`` is what gets embedded and what the temp
             table is built from.
-        session_filter: An extra predicate on the self rows, used to write the
-            mart one year at a time. It restricts which rows are *emitted*,
-            never which history the rolling windows see.
+        session_filter: An extra predicate on the self rows, used to bound the
+            peer join when the mart is written a year at a time. It restricts
+            which rows are *computed*, never which history the rolling windows
+            see.
+        emit_filter: An extra predicate applied *after* the ``_lag1`` window,
+            so a part can compute a session's predecessor and still emit only
+            its own year. A part therefore reads one year wider than it writes:
+            filtering on ``session_filter`` alone would hand every year's first
+            session a NULL lag1, since SQL applies WHERE before the window.
     """
     panel_cte = (
         f"SELECT * FROM {return_panel_view}"
@@ -638,6 +663,13 @@ def build_relation_stat_sql(
         else build_return_panel_sql(price_view)
     )
     where_self = f"WHERE {session_filter}" if session_filter else ""
+    where_emit = f"WHERE {emit_filter}" if emit_filter else ""
+    lag1 = ",\n                ".join(
+        f"CASE WHEN date_diff('day', LAG(trade_date) OVER w, trade_date)"
+        f" <= {LAG1_MAX_GAP_DAYS}\n                     THEN LAG({column}) OVER w END"
+        f" AS {column}_lag1"
+        for column in PRIMARY_COLUMNS
+    )
     return f"""
         -- {FORMULA_VERSION}
         WITH rets AS (
@@ -694,7 +726,8 @@ def build_relation_stat_sql(
                 avg(peer_ret_20d) FILTER (WHERE peer_rank <= {PEER_K_STORED}) AS mean_20d_k40
             FROM peer_joined
             GROUP BY trade_date, ticker, market
-        )
+        ),
+        vals AS (
         SELECT
             s.trade_date, s.ticker, s.market,
             CASE WHEN a.n_20d >= {MIN_PEER_VALID} THEN a.mean_20d END AS rel_peer_mom_20d,
@@ -718,6 +751,20 @@ def build_relation_stat_sql(
             s.ret_20d AS rel_own_ret_20d
         FROM self_rows s
         LEFT JOIN peer_agg a USING (trade_date, ticker, market)
+        ),
+        -- The execution-delay variant the scan config requires a mapping for.
+        -- Lagged over the ticker's own emitted sessions, so a halted session
+        -- that never reaches the mart is not counted as a day of delay, and
+        -- bounded by LAG1_MAX_GAP_DAYS so a suspension is not read as one.
+        lagged AS (
+            SELECT
+                *,
+                {lag1}
+            FROM vals
+            WINDOW w AS (PARTITION BY ticker, market ORDER BY trade_date)
+        )
+        SELECT * FROM lagged
+        {where_emit}
     """
 
 
@@ -764,6 +811,9 @@ def materialize_relation_stat(
             f"SELECT DISTINCT year(trade_date) FROM {panel_table} ORDER BY 1"
         ).fetchall()
     ]
+    # Each part computes its own year plus the one before it and emits only its
+    # own, so the first session of a year gets a real ``_lag1`` from the last
+    # session of the previous year instead of a NULL at 20 part boundaries.
     parts = [
         (
             f"part-{year}",
@@ -771,7 +821,8 @@ def materialize_relation_stat(
                 price_view=price_view,
                 peer_view=peer_view,
                 return_panel_view=panel_table,
-                session_filter=f"year(r.trade_date) = {year}",
+                session_filter=f"year(r.trade_date) IN ({year - 1}, {year})",
+                emit_filter=f"year(trade_date) = {year}",
             ),
         )
         for year in years
