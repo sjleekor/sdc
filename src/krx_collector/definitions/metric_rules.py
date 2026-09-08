@@ -431,6 +431,49 @@ def default_metric_mapping_rules() -> list[MetricMappingRule]:
                 "ifrs_CashFlowsFromUsedInOperatingActivities",
             ],
         ),
+        # F-5.0. These four had statement rules only, so they existed only
+        # where dart_financial_statement_raw reaches -- about 100 rows before
+        # 2019 against ~100,000 after, which is what confined five of
+        # feat_fin_risk's nine families to 2020+ (F-4.6).
+        #
+        # The `ifrs_` spelling is the one that matters here, and it is easy to
+        # get wrong: DART switched taxonomy prefix around 2019, so measured on
+        # the 2026-08-23 lake `ifrs-full_Liabilities` has 364 facts up to 2018
+        # against `ifrs_Liabilities`'s 112,827. Mapping only `ifrs-full_` would
+        # add nothing to the early years -- exactly the gap being closed. Both
+        # spellings are listed for the same reason total_liabilities lists
+        # both. See docs/dev/20260907_additional_feature/poc/metric_rules_ext.md.
+        #
+        # ifrs-full_InterestPaid / ifrs_InterestPaid carry no facts at all, so
+        # only the ClassifiedAsOperatingActivities form is mapped.
+        (
+            "investing_cash_flow",
+            [
+                "ifrs-full_CashFlowsFromUsedInInvestingActivities",
+                "ifrs_CashFlowsFromUsedInInvestingActivities",
+            ],
+        ),
+        (
+            "financing_cash_flow",
+            [
+                "ifrs-full_CashFlowsFromUsedInFinancingActivities",
+                "ifrs_CashFlowsFromUsedInFinancingActivities",
+            ],
+        ),
+        (
+            "interest_paid",
+            [
+                "ifrs-full_InterestPaidClassifiedAsOperatingActivities",
+                "ifrs_InterestPaidClassifiedAsOperatingActivities",
+            ],
+        ),
+        (
+            "cash_and_cash_equivalents",
+            [
+                "ifrs-full_CashAndCashEquivalents",
+                "ifrs_CashAndCashEquivalents",
+            ],
+        ),
     ]
     for metric_code, concept_ids in xbrl_fallback_specs:
         for priority_offset, concept_id in enumerate(concept_ids):

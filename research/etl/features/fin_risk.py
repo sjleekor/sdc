@@ -78,7 +78,18 @@ _CAL_TABLE = "_fin_risk_calendar"
 #: them changes, and do not reuse an artifact of the same snapshot across a bump.
 #:
 #:   fin_risk_v1 — the 2026-09 rules as first built (03 §1).
-FORMULA_VERSION = "fin_risk_v1"
+#:   fin_risk_v2 — F-5.0. No formula changed here; the *inputs* did.
+#:            interest_paid, investing_cash_flow, financing_cash_flow and
+#:            cash_and_cash_equivalents gained XBRL fallback mapping rules, and
+#:            the `ifrs_` spelling those rules add is what covers 2015-2018
+#:            (DART switched taxonomy prefix around 2019: 364 facts up to 2018
+#:            under ifrs-full_Liabilities against 112,827 under
+#:            ifrs_Liabilities). Five of the nine families were confined to
+#:            2020+ purely by that gap. The values move for every one of them,
+#:            so the fingerprint has to move too — a re-run under fin_risk_v1
+#:            would otherwise reuse an artifact of an identical run spec while
+#:            producing different numbers.
+FORMULA_VERSION = "fin_risk_v2"
 
 #: Interest coverage above this is capped. A coverage of 400x and one of 4,000x
 #: say the same thing ("no debt service pressure") and the difference is mostly

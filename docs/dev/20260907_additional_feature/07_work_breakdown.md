@@ -13,8 +13,8 @@
 | F-1 | 업종 `induty_code` 버저닝 | OpenDART 월 3,959 | F-1.1~F-1.4·F-1.6 완료(2026-09-08) | F-1.5 마트 / F-1.7 변경률 스크립트 |
 | F-2 | 통계적 peer 관계 피쳐 | 없음 | **완료**(2026-09-07, snapshot 2026-08-23) | F-HS-1 대기 |
 | F-3 | 업종 관계 피쳐 | 없음(F-1 선행) | 대기(D-F1) | 3개월 변경률 측정 뒤 |
-| F-4 | 재무위험·생애주기·전이 | 없음 | **완료**(2026-09-07, snapshot 2026-08-23) | F-HS-1 대기. 5 family는 2020~ 표본 |
-| F-5 | `metric_rules` 확장 | 없음(매핑) | 미착수 | **CF 4종 XBRL fallback 먼저**(F-4.6) → 그 다음 태그 커버리지 PoC |
+| F-4 | 재무위험·생애주기·전이 | 없음 | **완료**(`fin_risk_v2`, 2026-09-08) | F-HS-1 대기. 표본 시작은 family별 2016~2019 |
+| F-5 | `metric_rules` 확장 | 없음(매핑) | **F-5.0 완료**(2026-09-08) | F-5.1 태그 커버리지 PoC(신규 4 metric) |
 | F-6 | `fin_sue` XBRL 백필 | OpenDART(측정 뒤) | 미착수 | 대상 역산 |
 | F-7 | DS005 이벤트·elestock | 있음 | 미착수 (D-F2 확정: `elestock` 시작 / D-F3: PoC 뒤 6종) | DS005 PoC + `elestock` 스키마 |
 | F-8 | 매크로 2단계 시리즈 | 시리즈 정의 | 미착수 (D-F5 확정: 2단계 먼저) | ECOS item_code 확정 |
@@ -88,12 +88,18 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
 - [x] **F-4.4** 상관 진단 → **경고 2건**: `fin_interest_coverage` × `fin_operating_profitability` ρ=0.88(분자 공유), `fin_net_debt_to_mcap` × `fin_book_to_market` ρ=0.51(분모 공유). 상폐 커버리지 9.2%(`stock_master` 기준)
       — **2026-09-08 갱신:** F-9.3이 종결돼 Decline 판정 보류는 "백필 대기"가 아니라 **영구 한계**다. 상폐 법인 재무 37%가 상한이다(F-9.3 결과 §5.1). 카드 문구를 그렇게 적는다
 - [x] **F-4.5** 사전등록 9 family 확정 → [`results/f4_fin_risk_verification.md`](results/f4_fin_risk_verification.md) §8
-- [ ] **F-4.6**(새로 생긴 항목) **5개 family가 2020년부터만 존재한다.** `interest_paid`·`investing_cash_flow`·`financing_cash_flow`·`cash_and_cash_equivalents` 넷에 XBRL fallback 규칙이 없어 2018년 이전 행이 100건 안팎이다. F-5.1의 **최우선 대상**이고, 붙이면 `fin_risk_v2` 범프 + 재검정이 따라온다. 그때까지 사전등록 표본은 2020~2025로 읽는다
+- [x] **F-4.6 해소 2026-09-08** → [`poc/metric_rules_ext.md`](poc/metric_rules_ext.md). XBRL fallback 16규칙 추가 → `fin_risk_v2`
+      — 다섯 family가 **2~4년 앞당겨졌다**: `fin_net_debt_to_mcap` 2020→**2016**, `fin_ext_finance`·`fin_lifecycle_stage`·`fin_lifecycle_transition` 2021→**2018**, `fin_interest_coverage` 2021→**2019**
+      — 핵심은 철자였다. DART가 2019년경 taxonomy 접두를 바꿔서 2018년 이전을 덮는 건 `ifrs_` 쪽이다(`ifrs-full_Liabilities` ≤2018 364행 vs `ifrs_Liabilities` 112,827행). `ifrs-full_`만 붙였다면 아무것도 안 늘었다
+      — 덧붙이기만 했다: `feat_fin_scan_daily` 입력 9 metric은 행 수 +0이고 **값이 다른 행 0개**. 유닛 1,609개 통과
 
 ### F-5 `metric_rules` 확장 (`03` §3)
 
 - [ ] **F-5.1** 태그 커버리지 PoC(`current_assets`, `current_liabilities`, `borrowings`, `rnd_expense`) → `poc/metric_rules_ext.md`
-- [ ] **F-5.0**(선행, F-4.6에서 나왔다) 기존 4 metric에 XBRL fallback 추가: `interest_paid`, `investing_cash_flow`, `financing_cash_flow`, `cash_and_cash_equivalents`. 새 metric이 아니라 **기존 metric의 원천 확장**이라 golden 영향 범위가 다르다 — `operating_cash_flow`만 기존 family(`fin_accruals_to_assets`)가 쓰므로 그 넷은 현재 소비자가 `feat_fin_risk`뿐이다
+- [x] **F-5.0 완료 2026-09-08** 기존 4 metric에 XBRL fallback 16규칙 추가 → [`poc/metric_rules_ext.md`](poc/metric_rules_ext.md)
+      — 판정 규칙 두 개를 **측정 전에 커밋**했다(`05a1b3e`). 처음 제안한 "행 수 50%"는 틀린 양이라 폐기 — TTM은 연속 4분기를 요구하므로 분기의 50%를 무작위로 가지면 사용 가능 확률이 6%다
+      — vintage 행 증가: `interest_paid` +38,957 / `investing_cash_flow` +51,668 / `financing_cash_flow` +49,446 / `cash_and_cash_equivalents` +50,335
+      — **canonical 마트는 안 건드렸다.** 별도 lake(`data_lake_f50/`, raw·A0 마트는 심볼릭 링크)에서 측정했다. F-HS-1은 `07` §7대로 새 snapshot에서 돈다
 - [ ] **F-5.2** catalog·매핑 규칙 추가, 기존 29 metric golden 불변
 - [ ] **F-5.3** vintage 재빌드, 역산 비율 기록
 - [ ] **F-5.4** 파생 family(`fin_current_ratio`, `fin_borrowings_to_mcap`, `fin_altman_z`, `fin_rnd_to_sales`, `fin_bm_intangible_adj`) → F-HS-2 또는 3
