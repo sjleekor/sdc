@@ -11,15 +11,15 @@
 | 패키지 | 내용 | 새 수집 | 상태 | 다음 행동 |
 |---|---|---|---|---|
 | F-1 | 업종 `induty_code` 버저닝 | OpenDART 월 3,959 | F-1.1~F-1.4·F-1.6 완료(2026-09-08) | F-1.5 마트 / F-1.7 변경률 스크립트 |
-| F-2 | 통계적 peer 관계 피쳐 | 없음 | **완료**(2026-09-07, snapshot 2026-08-23) | F-HS-1 대기 |
+| F-2 | 통계적 peer 관계 피쳐 | 없음 | **완료**(`relation_stat_v2`, 2026-09-09) | **F-HS-1에서 19 cell 등급 A `screen_pass`.** 양방향 2건 부호 `−`로 확정 |
 | F-3 | 업종 관계 피쳐 | 없음(F-1 선행) | 대기(D-F1) | 3개월 변경률 측정 뒤 |
-| F-4 | 재무위험·생애주기·전이 | 없음 | **완료**(`fin_risk_v2`, 2026-09-08) | F-HS-1 대기. 표본 시작은 family별 2016~2019 |
+| F-4 | 재무위험·생애주기·전이 | 없음 | **완료**(`fin_risk_v2`, 2026-09-08) | **F-HS-1에서 13 cell `screen_pass`, 전부 등급 B 상한**(측정된 `revision` 경고). 양방향 4건 부호 확정 |
 | F-5 | `metric_rules` 확장 | 없음(매핑) | **F-5.0 완료**(2026-09-08) | F-5.1 태그 커버리지 PoC(신규 4 metric) |
 | F-6 | `fin_sue` XBRL 백필 | OpenDART(측정 뒤) | 미착수 | 대상 역산 |
 | F-7 | DS005 이벤트·elestock | 있음 | 미착수 (D-F2 확정: `elestock` 시작 / D-F3: PoC 뒤 6종) | DS005 PoC + `elestock` 스키마 |
 | F-8 | 매크로 2단계 시리즈 | 시리즈 정의 | 미착수 (D-F5 확정: 2단계 먼저) | ECOS item_code 확정 |
 | F-9 | `fin_pit` strict·휴장일·상폐·유니버스·Cronicle | 일부 | **F-9.3 종결**(2026-09-08, 더 받을 것 없음) | F-9.1 / F-9.2 |
-| F-HS | 새 config 사전등록·A→B→AB→C | — | **snapshot 2026-09-08 준비 완료** | F-HS-1 사전등록 YAML → 실행 승인 |
+| F-HS | 새 config 사전등록·A→B→AB→C | — | **F-HS-1 완료**(`3ca949e6`, 2026-09-09) | FS3 11 컬럼 → 모델 E5. 다음은 F-HS-C2·F-HS-2 |
 
 ---
 
@@ -155,12 +155,19 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
 - [ ] **F-9.8** freshness 월 예산 항목
 - [ ] **F-9.9**(새로 생긴 항목) **readiness 게이트 기본 `--required-coverage-ratio 1.0`이 원리상 통과 불가다.** 2026-09-08에서 38개 중 33개, 2026-08-23에서도 18개가 실패한다. 원인 두 가지: (a) `feature_dates` 격자가 일부 시리즈의 `asof_available_date`가 앞서 있어 **오늘을 넘어 뻗고**(09-21까지) 일별 시리즈가 미래 날짜에 값이 없다, (b) YoY 파생은 12개월 이력이 필요해 시작 구간 NULL이 구조적이다(`macro_cpi_yoy_latest` 253개). 고칠 방향은 격자를 마지막 수집 세션으로 clamp하거나 시리즈별 유효 시작 이후만 세는 것이다. 그때까지 이 게이트는 pass/fail로 쓰지 않는다
 
+- [ ] **F-9.10**(새로 생긴 항목) `run_spec.json`의 `command_line`이 실제 인자를 버린다. `command_line = ["horizon_scan", *(argv or [])]`인데 `__main__` 경로는 `argv=None`으로 들어와 `parse_args(None)`이 `sys.argv`를 읽으므로, 기록에는 `['horizon_scan']`만 남는다. 2026-08-30 run 넷이 다 그렇다. `config_hash`가 따로 남아 계보 추적에는 문제가 없지만 **재현 명령을 run_spec에서 복원할 수 없다**. 고치면 이후 run의 `run_spec` 내용이 바뀌므로 A/B 사이가 아니라 라운드 경계에서 넣는다
+
+- [ ] **F-9.11**(새로 생긴 항목) **시간 placebo 경계 셀의 `screen_pass`가 층마다 흔들린다.** `temporal_long_cell_repeats=100` / `temporal_p_max=0.10`인데 p≈0.1에서 100회 재추출의 표준오차가 0.030이다. 2026-09-09 run에서 `ev_payout_yield|bucket|60|120`이 0.0891 → 0.1287로 탈락, `mcap_krx_log|cum|0|120`이 0.1386 → 0.0495로 통과했고 **둘 다 다른 통계는 비트 동일**하다. 이동 거리 seed가 `config_hash`를 받으므로(의도된 재추출) 새 층마다 null이 바뀐다. 문턱 근처 셀은 replicate를 늘리거나 Monte Carlo 구간을 같이 보고해야 한다
+- [ ] **F-9.12**(새로 생긴 항목) **`compute-all`로 Phase B 마트를 미리 만든 snapshot에서 `--phase B`가 반드시 죽는다.** A0는 `analysis_config_hash`를 스캔 config 해시로 찍지만 `compute-all`·리포트 스크립트는 `None`으로 남기고, `run_phase_b_core`가 이 값을 고정하므로 `_cache_contract_matches`가 거부한다(옳은 거부다). 그런데 `--phase B`에 `--force`가 없고 `register_phase_b_marts`는 `duckdb.Error`·`FileNotFoundError`만 잡아 `RuntimeError`가 run을 죽인다. 2026-09-09에는 `register_phase_b_marts(force=True)`를 따로 돌려(34분) 넘겼다. `--force`를 붙이거나 계약 불일치를 재빌드로 처리하게 한다
+
 ### F-HS Horizon Scan 사전등록·실행
 
 - [x] **F-HS-1** overlay config `horizon_scan_expansion_202609.yaml`, hash `3ca949e6`, `registered_at: 2026-09-09`, 커밋 `e704e08`. F-2 4 + F-4 9 family = 66 cell, Phase B 102 → 168. 전 family `fdr_include: false`이라 Phase A 75개는 그대로고 앞선 세 층 hash(`ab0de634`/`889c3e83`/`236d0d35`)도 그대로다(테스트가 박아 둔다). 기록 → `results/f_hs1_preregistration_record.md`
       — 이 층이 드러낸 것 둘. (a) `feat_relation_stat`에 `_lag1`이 없어 **없는 컬럼에 계약을 얼릴 상황**이었다 → `relation_stat_v2`. 산식 불변(peer 11,292,902행·마트 7,053,322행·리포트 수치 전부 동일)이고, 연 단위 part가 매년 첫 세션 lag1을 NULL로 만드는 문제와 1년 넘는 거래 공백 121행을 `LAG1_MAX_GAP_DAYS=365`로 정리했다. (b) event cohort 2건은 `run_phase_b_event_scan`이 `fin_sue_event` grain에 묶여 있어 `fin_risk_event`를 의존성에 적어 `blocked_exploratory`로 얼린다
-- [ ] **F-HS-1 실행** 새 snapshot(S-1 잔여·F-6·F-9.2 반영) → A0 → A → B → AB. 기존 discovery 변화 0 확인, 단계 0 exact match
-- [ ] **F-HS-1 결과 문서** → `screen_pass` 컬럼 목록 = **FS3** → 모델 스트림 `05` E5에 기록
+- [x] **F-HS-1 실행** snapshot 2026-09-08 → A0 → A `20260909T032631-eb4867bb` → B `20260909T055405-eb4867bb` → AB `20260909T121215-eb4867bb`. **기존 discovery 변화 0** (공유 177 셀, 얻음 0·잃음 0), **단계 0 exact match** (`daily_ic` 892,420행 양방향 0, 실 스캔 412 셀 `|ΔIC|=0.0`). `m_ab` 177 → **231**, discovery 103 → **147**, `screen_pass` 53 → **85**, 등급 A=43·B=42·C=55·D=16. 기록 → `results/f_hs1_run_20260909.md`
+      — 짚어둘 것 셋. (a) 공유 셀 `screen_pass` 2건이 뒤집혔는데 둘 다 `p_temporal_nw`가 0.10을 넘나든 것이고 나머지 통계는 비트 동일하다(→ F-9.11). (b) F-4 7 family가 전부 등급 B 상한인데 **누락이 아니라 측정**이다 — `revision_ratio` 0.1014~0.1015, `fin_interest_coverage`는 `operating_income` fallback 0.9121. (c) Phase B가 마트 계약 스탬프 때문에 한 번 죽었다(→ F-9.12)
+- [x] **F-HS-1 결과 문서** `results/f_hs1_run_20260909.md`. **FS3 신규 11 컬럼** — A: `rel_peer_dispersion_20d`·`rel_own_minus_peer_20d`·`rel_peer_mom_20d`·`rel_peer_bigcap_lag_ret_5d`, B: `fin_net_debt_to_mcap`·`fin_ext_finance_to_assets`·`fin_interest_coverage`·`fin_lifecycle_stage`·`fin_debt_to_assets`·`fin_profit_turn`·`fin_lifecycle_transition`. 레지스트리 전체는 29 컬럼
+- [ ] **F-HS-1 → 모델 `05` E5 기록.** `fin_interest_coverage`는 경고 둘을 같이 넘긴다 — `fin_operating_profitability`와 ρ=0.87(분자 공유), `operating_income` fallback 0.9121
 - [ ] **F-HS-C2** Phase C 2라운드(F-8.6)
 - [ ] **F-HS-2** F-3·F-5·F-7 family(D-F1·PoC 결과 뒤)
 
@@ -178,7 +185,9 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
 | F-7 백필 | PoC 뒤. N6급이면 8만 호출 | N6 83,700 |
 | F-8 백필 | 시리즈 10 × 12년 일별, 수 분 | ECOS/FRED |
 | S-1 잔여 | 약 1,300 법인 × 11년 × 3 ≈ 4.3만 호출, 키 2개 며칠 | `10_work_breakdown.md` S-1 |
-| F-HS-1 실행 | A0 + A(60분) + B(45분) + AB(1초) ≈ 2시간, Phase C +30분 | 08-23 실측 |
+| F-HS-1 실행 | **A0 8분 + A 105분 + B 378분 + AB 1초 미만 ≈ 8.7시간** (마트 재빌드 34분 별도) | 2026-09-09 실측. 08-23은 A 62분 + B 142분 ≈ 3.4시간이었다 — 옛 표의 "A 60분 + B 45분"은 B가 틀렸다 |
+| F-HS 결합 permutation | replicate당 **148초** (08-23은 37초) | 각 replicate가 결합 모집단 전체를 다시 스캔한다. `m_ab` 177 → 231이라 4배. family를 더 늘리면 선형 이상으로 늘어난다 |
+| F-HS Phase A permutation | 48 → **89.5분** | 가설이 늘어서가 아니다. seed가 `config_hash`를 받아 null을 새로 뽑는다(`real_scan`은 7.6 → 7.7분으로 동일) |
 
 ---
 
