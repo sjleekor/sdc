@@ -19,7 +19,7 @@
 | F-7 | DS005 이벤트·elestock | 있음 | 미착수 (D-F2 확정: `elestock` 시작 / D-F3: PoC 뒤 6종) | DS005 PoC + `elestock` 스키마 |
 | F-8 | 매크로 2단계 시리즈 | 시리즈 정의 | 미착수 (D-F5 확정: 2단계 먼저) | ECOS item_code 확정 |
 | F-9 | `fin_pit` strict·휴장일·상폐·유니버스·Cronicle | 일부 | **F-9.3 종결**(2026-09-08, 더 받을 것 없음) | F-9.1 / F-9.2 |
-| F-HS | 새 config 사전등록·A→B→AB→C | — | **F-HS-1 완료**(`3ca949e6`, 2026-09-09) | FS3 11 컬럼 → 모델 E5. 다음은 F-HS-C2·F-HS-2 |
+| F-HS | 새 config 사전등록·A→B→AB→C | — | **F-HS-1 완료**(`3ca949e6`, 2026-09-09), FS3 인계 완료 | F-HS-C2(F-8 선행) / F-HS-2 |
 
 ---
 
@@ -150,8 +150,14 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
       — [x] `emsugdoe907`("SDC Backfill DART Corp Profile (one-time)") **삭제**. 2026-08-15에 1회 1,300.6초 실행 code=0으로 목적 달성, `--force`가 없어 월 스냅샷으로는 못 쓴다
       — [x] `sdc_backfill_s1_remainder` **삭제**(F-9.3 종결, 이유는 그쪽 §4)
       — [ ] `emsugmrjp0a`("SDC Backfill N3 Universe Snapshots (one-time)") 삭제 — `timing=manual`이라 자동으로 안 돌고 급하지 않다. `06` §4가 삭제 대상으로 지목
+            **2026-09-09 조회:** 아직 있다(`enabled=1`, `timing=false`). 마지막 실행은 2026-08-16 09:06 `jmsv1p53q0n`, 3,699초 뒤 **수동 abort**(code=1) — KRX가 이 호스트를 막은 날이다. 그 앞 2026-08-15 23:53 `jmsuhx5wl0d`는 code=0
       — [ ] `emr0r4xgb0h`("SDC Common Backfill 2015 (one-time)") — 검증 후 삭제 대상(별건)
+            **2026-09-09 조회:** 아직 있다(`enabled=1`, `timing=false`). 마지막 실행 2026-07-04 06:08 `jmr5fdw6c0e`가 **32,174초(8시간 56분) code=0으로 완주**했다. 그 앞 세 번(`jmr0r6nir0i`·`jmr23rbc20y`·`jmr4nuu1n01`)은 code=1이다. 남은 것은 커버리지 검증과 이벤트 삭제뿐이다
+      — 같은 조회에서 확인한 것: 전체 20 이벤트, active job 0, `sdc_backfill_s1_remainder`와 `emsugdoe907`은 실제로 없다(삭제 반영됨), `sdc_monthly_corp_profile_history`는 `timing={1일 05:30}`·`catch_up=1`·`max_children=1`·`timeout=5400`으로 등록돼 있다. `manual`로 보이는 일별 이벤트 7개는 전부 chain으로 걸려 있다(`opendart_corp`→`financials`→`share_info`→`xbrl`, `fdr_universe`→`pykrx_prices`→`krx_flows`→`krx_common`, `ecos_common_daily`→`ecos_common_macro`)
       — 월 insider(F-7.5)·일 major-events(F-7)는 수집기가 아직 없어 해당 없음
+      — **2026-09-09: 두 이벤트 삭제를 시도했으나 도구 정책이 prod 스케줄러 mutation을 막았다.** 삭제 명령은 사람이 실행한다:
+        `curl -fsS -X POST -H "X-API-Key: $APIKEY" -H 'Content-Type: application/json' -d '{"id":"<event-id>"}' http://sj2-server:3012/api/app/delete_event/v1`
+        지우기 전에 두 이벤트의 정의(`params.script` 포함)를 받아 뒀고, 없어지는 정보는 아래 F-9.14에 옮겨 적었다
 - [ ] **F-9.8** freshness 월 예산 항목
 - [ ] **F-9.9**(새로 생긴 항목) **readiness 게이트 기본 `--required-coverage-ratio 1.0`이 원리상 통과 불가다.** 2026-09-08에서 38개 중 33개, 2026-08-23에서도 18개가 실패한다. 원인 두 가지: (a) `feature_dates` 격자가 일부 시리즈의 `asof_available_date`가 앞서 있어 **오늘을 넘어 뻗고**(09-21까지) 일별 시리즈가 미래 날짜에 값이 없다, (b) YoY 파생은 12개월 이력이 필요해 시작 구간 NULL이 구조적이다(`macro_cpi_yoy_latest` 253개). 고칠 방향은 격자를 마지막 수집 세션으로 clamp하거나 시리즈별 유효 시작 이후만 세는 것이다. 그때까지 이 게이트는 pass/fail로 쓰지 않는다
 
@@ -164,6 +170,14 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
       — 진짜 산식 변경도 여전히 재빌드로 처리된다(그게 맞다). 재빌드는 공짜가 아니라서 warning으로 남긴다
       — **`force=True` 중간에 끊으면 마트가 빈다.** `materialize`가 쓰기 전에 `rmtree`하기 때문이다. 2026-09-09에 검증 중 `feat_fin_scan_daily`를 이렇게 날려 다시 만들었다. 발행된 run 산출물은 별도 디렉터리라 무사했다
 
+- [ ] **F-9.14**(새로 생긴 항목, 2026-09-09 발견) **월말 PIT 유니버스 스냅샷이 2014~2018만 있다.** prod `stock_master_snapshot`은 `PYKRX_BACKFILL` 60행(2014-01-31~2018-12-31, 월말 12 × 5년)과 `FDR` 83행(2026-04-10~09-07, 일별 수집)뿐이다. **2019-01~2025-12의 84개 월말이 비어 있다** — `emsugmrjp0a` 이벤트가 2026-08-16 실행에서 2014~2018을 넣고 2019년부터 전부 실패했고(KRX가 이 호스트를 막은 날), 그 뒤 다시 돌지 않았다
+      — 지금은 메울 수 있다: `universe backfill-snapshots`의 기본 source가 KRX Open API(K-4)이고 `deploy/prod/bin/universe-backfill-snapshots.sh`가 그 경로를 쓴다(`docs/operations.md` §583이 pykrx 문을 닫힌 것으로 적는다). 옛 이벤트 스크립트의 연도별 `docker compose run` 쪼개기·45초 sleep은 **pykrx 로그인 수명 때문에 있던 것이라 Open API에서는 필요 없다** — 그래서 그 스크립트를 되살리지 않고 새로 짠다
+      — 이 공백은 F-9.6(`dim_universe_daily_krx` 집합 차이)과 F-1의 소급 판정에 걸린다. 2019~2025 PIT 유니버스가 없으면 그 구간 유니버스는 현재 상태의 소급이다
+- [x] **F-9.13 완료 2026-09-09** 09-08 snapshot의 `feat_fin_scan_daily`가 **0바이트로 남아 있었다** — `part-000000.parquet` 0B, `_cache_metadata.json` 없음. F-9.12가 적은 `force=True` 중간 중단 자국이고, 그때 "다시 만들었다"고 적은 것과 실제 디스크가 달랐다. 같은 snapshot의 다른 마트 20개는 정상이었다(`feat_fin_risk` 77MB, `feat_relation_stat` 555MB)
+      — 고친 방법: Phase B run과 **같은 경로**를 그대로 호출했다(`register_phase_b_marts(con, lake)`, `force` 없이). F-9.12의 새 동작이 설계대로 걸렸다 — 로그가 `mart cache metadata is missing for 'feat_fin_scan_daily' … rebuilding under this run's contract`를 남기고 **그 하나만** 다시 만들었고, 계약이 맞는 12개는 등록만 됐다
+      — 결과: **7,242,208행 / 2007-06-05~2026-09-07 / 208MB, 26분**(1,558초). 13 마트 available. `sql_hash`가 `9656de5eb96b9b14`로 08-23 빌드와 **같다** — F-4.1이 박아 둔 값이고, 산식이 그대로라는 뜻이라 발행된 run과 같은 정의다. `analysis_config_hash`는 이제 `3ca949e6`로 찍혔다
+      — 34분은 13개 전량이 아니라 사실상 이 한 마트 값이었다(`register_phase_b_marts` docstring이 "most of it feat_fin_scan_daily"라고 적은 대로)
+
 ### F-HS Horizon Scan 사전등록·실행
 
 - [x] **F-HS-1** overlay config `horizon_scan_expansion_202609.yaml`, hash `3ca949e6`, `registered_at: 2026-09-09`, 커밋 `e704e08`. F-2 4 + F-4 9 family = 66 cell, Phase B 102 → 168. 전 family `fdr_include: false`이라 Phase A 75개는 그대로고 앞선 세 층 hash(`ab0de634`/`889c3e83`/`236d0d35`)도 그대로다(테스트가 박아 둔다). 기록 → `results/f_hs1_preregistration_record.md`
@@ -171,7 +185,9 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
 - [x] **F-HS-1 실행** snapshot 2026-09-08 → A0 → A `20260909T032631-eb4867bb` → B `20260909T055405-eb4867bb` → AB `20260909T121215-eb4867bb`. **기존 discovery 변화 0** (공유 177 셀, 얻음 0·잃음 0), **단계 0 exact match** (`daily_ic` 892,420행 양방향 0, 실 스캔 412 셀 `|ΔIC|=0.0`). `m_ab` 177 → **231**, discovery 103 → **147**, `screen_pass` 53 → **85**, 등급 A=43·B=42·C=55·D=16. 기록 → `results/f_hs1_run_20260909.md`
       — 짚어둘 것 셋. (a) 공유 셀 `screen_pass` 2건이 뒤집혔는데 둘 다 `p_temporal_nw`가 0.10을 넘나든 것이고 나머지 통계는 비트 동일하다(→ F-9.11). (b) F-4 7 family가 전부 등급 B 상한인데 **누락이 아니라 측정**이다 — `revision_ratio` 0.1014~0.1015, `fin_interest_coverage`는 `operating_income` fallback 0.9121. (c) Phase B가 마트 계약 스탬프 때문에 한 번 죽었다(→ F-9.12)
 - [x] **F-HS-1 결과 문서** `results/f_hs1_run_20260909.md`. **FS3 신규 11 컬럼** — A: `rel_peer_dispersion_20d`·`rel_own_minus_peer_20d`·`rel_peer_mom_20d`·`rel_peer_bigcap_lag_ret_5d`, B: `fin_net_debt_to_mcap`·`fin_ext_finance_to_assets`·`fin_interest_coverage`·`fin_lifecycle_stage`·`fin_debt_to_assets`·`fin_profit_turn`·`fin_lifecycle_transition`. 레지스트리 전체는 29 컬럼
-- [ ] **F-HS-1 → 모델 `05` E5 기록.** `fin_interest_coverage`는 경고 둘을 같이 넘긴다 — `fin_operating_profitability`와 ρ=0.87(분자 공유), `operating_income` fallback 0.9121
+- [x] **F-HS-1 → 모델 `05` E5 기록 완료 2026-09-09.** `20260907_model_experiment/02` §1.5에 11 컬럼·마트·기대 부호·검정 horizon·최대 `|IC|`, `05` §1·§2 E5에 run 12(4 h × 시드 3)·선택 규칙. `fin_interest_coverage`는 경고 둘을 같이 넘겼다 — `fin_operating_profitability`와 ρ=0.87(분자 공유), `operating_income` fallback 0.9121
+      — 기록하면서 **E5 선행 조건 하나가 드러났다**: E0~E4 공통 snapshot 2026-08-23의 `feat_relation_stat`·`feat_fin_risk`는 **v1 빌드**이고(`sql_hash` 다름, `analysis_config_hash=None`) `stock_metric_vintage_fact`도 F-5.0 이전이다. E5는 08-23에서 `stock_metric_vintage_fact`→`fin_quarterly_metric_vintage`→`feat_fin_risk`, `dim_peer_monthly`→`feat_relation_stat`를 재빌드한 뒤 돈다. FS0~FS2는 안 바뀐다(`feat_fin_scan_daily`가 F-5.0의 4 metric을 읽지 않고 `sql_hash`가 불변이라 캐시 유지)
+      — h 배치 규칙을 같이 박았다: 채택 config가 FS1h면 FS3도 검정 horizon 밖 h에서 뺀다. 결과를 보고 컬럼을 고르는 것을 막는다
 - [ ] **F-HS-C2** Phase C 2라운드(F-8.6)
 - [ ] **F-HS-2** F-3·F-5·F-7 family(D-F1·PoC 결과 뒤)
 
@@ -188,7 +204,7 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
 | F-6 백필 | 측정 뒤 | — |
 | F-7 백필 | PoC 뒤. N6급이면 8만 호출 | N6 83,700 |
 | F-8 백필 | 시리즈 10 × 12년 일별, 수 분 | ECOS/FRED |
-| S-1 잔여 | 약 1,300 법인 × 11년 × 3 ≈ 4.3만 호출, 키 2개 며칠 | `10_work_breakdown.md` S-1 |
+| ~~S-1 잔여~~ | **실측 131,292 요청 / 5시간 45분 / 저장 0행**(2026-09-08 종결). 옛 추정 "1,300 법인 ≈ 4.3만 호출"은 대상이 866이고 보고서·fs_div 축을 빼먹어 둘 다 틀렸다 | F-9.3 결과 §1~2 |
 | F-HS-1 실행 | **A0 8분 + A 105분 + B 378분 + AB 1초 미만 ≈ 8.7시간** (마트 재빌드 34분 별도) | 2026-09-09 실측. 08-23은 A 62분 + B 142분 ≈ 3.4시간이었다 — 옛 표의 "A 60분 + B 45분"은 B가 틀렸다 |
 | F-HS 결합 permutation | replicate당 **148초** (08-23은 37초) | 각 replicate가 결합 모집단 전체를 다시 스캔한다. `m_ab` 177 → 231이라 4배. family를 더 늘리면 선형 이상으로 늘어난다 |
 | F-HS Phase A permutation | 48 → **89.5분** | 가설이 늘어서가 아니다. seed가 `config_hash`를 받아 null을 새로 뽑는다(`real_scan`은 7.6 → 7.7분으로 동일) |
