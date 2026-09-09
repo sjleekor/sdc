@@ -42,6 +42,19 @@ uv run krx-collector dart backfill-xbrl-receipts --targets-file targets/sue_xbrl
 
 - 대상 측정 문서 1회, 백필 완료(`ingestion_runs` success/partial, 오류 목록), coverage 0.00 → 실측값, `fin_sue` 6 cell이 `insufficient`에서 판정으로 바뀜(결과가 D여도 완료).
 
+**진행 (2026-09-10 기준)**
+
+| 완료 기준 | 상태 |
+|---|---|
+| 대상 측정 문서 1회 | ✅ F-6.1 → [`results/sue_backfill_targets_202609.md`](results/sue_backfill_targets_202609.md). 22,700 접수 / 2,807 법인 |
+| 백필 완료 | ✅ F-6.2 → [`results/f6_2_sue_backfill_20260910.md`](results/f6_2_sue_backfill_20260910.md). 2026-09-10 02:24, **47 run 전부 `success`**, 오류 0, `partial` 0 |
+| coverage 실측 | ⏳ F-6.3. 접수·XBRL 가용성 기준으로는 산출 가능 분기 33,141 → **75,293**(×2.27)이지만, 이것은 **상한**이고 vintage 층은 재빌드해야 안다 |
+| 6 cell 재판정 | ⏳ F-6.3 |
+
+§1.2의 "연속 9분기"는 F-6.2에서 코드로 확인됐다: `comparative_eps`가 같은 보고서의
+`value_lag_4q`라 보고서 하나가 `seasonal_change` 하나를 만들고, `history_count >= 8`에
+자기 자신을 더해 9다. 비교값이 4분기 전 보고서에서 왔다면 13개가 필요했다.
+
 ---
 
 ## 2. F-7 — DS005 주요사항보고서 구조화 이벤트
