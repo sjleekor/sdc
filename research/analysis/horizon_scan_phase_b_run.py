@@ -50,7 +50,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import shutil
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
@@ -196,7 +198,7 @@ from research.etl.features.relation_stat import (
 )
 from research.etl.features.sue_event import SUE_EVENT_TABLE, materialize_sue_event
 from research.etl.lake import connect, register_persisted_derived_mart, register_views
-from research.etl.mart import mart_root, register_mart_view
+from research.etl.mart import StaleMartContract, mart_root, register_mart_view
 from research.etl.marts.financial_quarters import (
     FQMV_TABLE,
     materialize_fin_quarterly_metric_vintage,
@@ -220,6 +222,8 @@ from research.etl.phase_b_quality import (
 from research.etl.snapshot import resolve_config
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+logger = logging.getLogger(__name__)
 
 
 def _source_quality_for_config(
@@ -618,14 +622,42 @@ def register_phase_b_marts(
     ``build_phase_b_readiness_rows`` is what turns "not in this set" into the
     correct ``blocked_exploratory`` role for the specific candidate cells that
     need it (never the whole run).
+
+    ``force`` rebuilds every mart unconditionally. A *stale* one is rebuilt
+    either way — see ``_try``.
     """
     available: set[str] = set()
 
-    def _try(name: str, build) -> None:
+    def _try(name: str, build: Callable[[bool], object]) -> None:
+        """Build one mart, best-effort, rebuilding it if the cache is stale.
+
+        ``duckdb.Error``/``FileNotFoundError`` mean the inputs are genuinely
+        absent, so the mart is left out of the available set (see above).
+
+        ``StaleMartContract`` is a different thing and must not be treated the
+        same way. The mart is *there*, but it was written under another
+        contract — most often ``analysis_config_hash=None``, because only A0
+        stamps that field and ``compute-all``/the report scripts do not, so
+        every Phase B mart on a snapshot built that way is stale for this run.
+        Reusing it would be wrong, which is why ``materialize`` refuses. But
+        dying is also wrong: this function is the thing that builds these
+        marts, and rebuilding is the whole remedy the error asks for. Before
+        this, ``--phase B`` (which has no ``--force``) could not start at all
+        on such a snapshot — it died on the first mart, naming only that one.
+
+        The rebuild is logged because it is not free: on snapshot 2026-09-08 it
+        was 34 minutes for 13 marts, most of it ``feat_fin_scan_daily``.
+        """
         try:
-            build()
+            build(force)
         except (duckdb.Error, FileNotFoundError):
             return
+        except StaleMartContract as exc:
+            logger.warning("%s: %s — rebuilding under this run's contract", name, exc)
+            try:
+                build(True)
+            except (duckdb.Error, FileNotFoundError):
+                return
         available.add(name)
 
     bounds = con.execute("SELECT min(trade_date), max(trade_date) FROM daily_ohlcv").fetchone()
@@ -633,11 +665,11 @@ def register_phase_b_marts(
 
     _try(
         MARKET_CAP_TABLE,
-        lambda: materialize_market_cap(con, lake, force=force),
+        lambda rebuild: materialize_market_cap(con, lake, force=rebuild),
     )
     _try(
         FILING_ACTIVITY_TABLE,
-        lambda: materialize_filing_activity(con, lake, force=force),
+        lambda rebuild: materialize_filing_activity(con, lake, force=rebuild),
     )
 
     # F-2. dim_peer_monthly is the monthly peer-set root, not a daily mart, so
@@ -646,12 +678,12 @@ def register_phase_b_marts(
     # name the thing their features actually rest on.
     _try(
         PEER_MONTHLY_TABLE,
-        lambda: materialize_peer_monthly(con, lake, force=force),
+        lambda rebuild: materialize_peer_monthly(con, lake, force=rebuild),
     )
     if PEER_MONTHLY_TABLE in available:
         _try(
             RELATION_STAT_TABLE,
-            lambda: materialize_relation_stat(con, lake, force=force),
+            lambda rebuild: materialize_relation_stat(con, lake, force=rebuild),
         )
 
     # feat_macro_exposure reads common_feature_daily_fact. It is bound from the
@@ -662,47 +694,51 @@ def register_phase_b_marts(
     # `available`, which is what blocks the six macro-exposure families (§3).
     _try(
         COMMON_FEATURE_FACT_VIEW,
-        lambda: register_persisted_derived_mart(con, lake, COMMON_FEATURE_FACT_VIEW),
+        lambda _rebuild: register_persisted_derived_mart(con, lake, COMMON_FEATURE_FACT_VIEW),
     )
     if COMMON_FEATURE_FACT_VIEW in available:
         _try(
             MACRO_EXPOSURE_TABLE,
-            lambda: materialize_macro_exposure(con, lake, force=force),
+            lambda rebuild: materialize_macro_exposure(con, lake, force=rebuild),
         )
 
     _try(
         "stock_metric_vintage_fact",
-        lambda: materialize_stock_metric_vintage_fact(
-            con, lake, trading_days=trading_days, force=force
+        lambda rebuild: materialize_stock_metric_vintage_fact(
+            con, lake, trading_days=trading_days, force=rebuild
         ),
     )
     if "stock_metric_vintage_fact" in available:
         _try(
             PERIODIC_EXTRAS_TABLE,
-            lambda: materialize_periodic_extras(con, lake, force=force),
+            lambda rebuild: materialize_periodic_extras(con, lake, force=rebuild),
         )
         _try(
             "fin_quarterly_metric_vintage",
-            lambda: materialize_fin_quarterly_metric_vintage(con, lake, force=force),
+            lambda rebuild: materialize_fin_quarterly_metric_vintage(con, lake, force=rebuild),
         )
     if "fin_quarterly_metric_vintage" in available:
         _try(
             "feat_fin_scan_daily",
-            lambda: materialize_fin_scan_daily(con, lake, force=force),
+            lambda rebuild: materialize_fin_scan_daily(con, lake, force=rebuild),
         )
         _try(
             "feat_event_scan_daily",
-            lambda: materialize_event_scan_daily(con, lake, trading_days=trading_days, force=force),
+            lambda rebuild: materialize_event_scan_daily(
+                con, lake, trading_days=trading_days, force=rebuild
+            ),
         )
         _try(
             "fin_sue_event",
-            lambda: materialize_sue_event(con, lake, force=force),
+            lambda rebuild: materialize_sue_event(con, lake, force=rebuild),
         )
         # F-4. Shares fin_scan's vintage rules via fin_vintage, so it hangs off
         # the same quarterly-vintage root.
         _try(
             FIN_RISK_TABLE,
-            lambda: materialize_fin_risk(con, lake, trading_days=trading_days, force=force),
+            lambda rebuild: materialize_fin_risk(
+                con, lake, trading_days=trading_days, force=rebuild
+            ),
         )
     return available
 

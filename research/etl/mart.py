@@ -28,6 +28,23 @@ from research.etl.lake import _sql_str_literal
 FEATURE_MART_NAME = "feature_mart"
 
 
+class StaleMartContract(RuntimeError):
+    """A mart exists on disk but was not written under the current contract.
+
+    Raised instead of reusing it — reuse is the failure the cache keys exist to
+    stop. It says nothing about *why* the contract differs: a changed formula, a
+    changed output schema, or a different (or absent) ``analysis_config_hash``
+    all land here.
+
+    Subclasses ``RuntimeError`` so callers that only ever wanted the message
+    keep working. The type exists so a caller that owns the mart's build step
+    can tell "this needs rebuilding" apart from a genuine failure without
+    matching on message text — see ``register_phase_b_marts``, where dying on
+    this meant a Phase B run could not start on a snapshot whose marts were
+    pre-built by ``compute-all`` (which does not stamp ``analysis_config_hash``).
+    """
+
+
 def mart_root(config: LakeConfig) -> Path:
     """Root for the snapshot's feature mart (``data_lake/feature_mart/...``)."""
     return (
@@ -121,15 +138,17 @@ def materialize(
     if is_materialized(config, name) and not force:
         metadata_path = _metadata_path(config, name)
         if not metadata_path.is_file():
-            raise RuntimeError(
+            raise StaleMartContract(
                 f"mart cache metadata is missing for {name!r}; rerun with force=True"
             )
         try:
             actual = json.loads(metadata_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"invalid mart cache metadata for {name!r}; use force=True") from exc
+            raise StaleMartContract(
+                f"invalid mart cache metadata for {name!r}; use force=True"
+            ) from exc
         if not _cache_contract_matches(actual, expected):
-            raise RuntimeError(
+            raise StaleMartContract(
                 f"mart cache contract mismatch for {name!r}; use force=True to rebuild"
             )
         return table_dir
@@ -186,15 +205,17 @@ def materialize_in_parts(
     if is_materialized(config, name) and not force:
         metadata_path = _metadata_path(config, name)
         if not metadata_path.is_file():
-            raise RuntimeError(
+            raise StaleMartContract(
                 f"mart cache metadata is missing for {name!r}; rerun with force=True"
             )
         try:
             actual = json.loads(metadata_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"invalid mart cache metadata for {name!r}; use force=True") from exc
+            raise StaleMartContract(
+                f"invalid mart cache metadata for {name!r}; use force=True"
+            ) from exc
         if not _cache_contract_matches(actual, expected):
-            raise RuntimeError(
+            raise StaleMartContract(
                 f"mart cache contract mismatch for {name!r}; use force=True to rebuild"
             )
         return table_dir
@@ -237,13 +258,17 @@ def register_mart_view(
         )
     metadata_path = _metadata_path(config, name)
     if not metadata_path.is_file():
-        raise RuntimeError(f"mart cache metadata is missing for {name!r}; rebuild with force=True")
+        raise StaleMartContract(
+            f"mart cache metadata is missing for {name!r}; rebuild with force=True"
+        )
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"invalid mart cache metadata for {name!r}") from exc
+        raise StaleMartContract(f"invalid mart cache metadata for {name!r}") from exc
     if metadata.get("analysis_config_hash") != config.analysis_config_hash:
-        raise RuntimeError(f"mart cache config hash mismatch for {name!r}; rebuild with force=True")
+        raise StaleMartContract(
+            f"mart cache config hash mismatch for {name!r}; rebuild with force=True"
+        )
     view = view_name or name
     glob = _sql_str_literal(mart_glob(config, name))
     con.execute(

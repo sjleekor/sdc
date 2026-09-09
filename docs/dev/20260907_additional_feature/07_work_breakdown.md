@@ -158,7 +158,11 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
 - [ ] **F-9.10**(새로 생긴 항목) `run_spec.json`의 `command_line`이 실제 인자를 버린다. `command_line = ["horizon_scan", *(argv or [])]`인데 `__main__` 경로는 `argv=None`으로 들어와 `parse_args(None)`이 `sys.argv`를 읽으므로, 기록에는 `['horizon_scan']`만 남는다. 2026-08-30 run 넷이 다 그렇다. `config_hash`가 따로 남아 계보 추적에는 문제가 없지만 **재현 명령을 run_spec에서 복원할 수 없다**. 고치면 이후 run의 `run_spec` 내용이 바뀌므로 A/B 사이가 아니라 라운드 경계에서 넣는다
 
 - [ ] **F-9.11**(새로 생긴 항목) **시간 placebo 경계 셀의 `screen_pass`가 층마다 흔들린다.** `temporal_long_cell_repeats=100` / `temporal_p_max=0.10`인데 p≈0.1에서 100회 재추출의 표준오차가 0.030이다. 2026-09-09 run에서 `ev_payout_yield|bucket|60|120`이 0.0891 → 0.1287로 탈락, `mcap_krx_log|cum|0|120`이 0.1386 → 0.0495로 통과했고 **둘 다 다른 통계는 비트 동일**하다. 이동 거리 seed가 `config_hash`를 받으므로(의도된 재추출) 새 층마다 null이 바뀐다. 문턱 근처 셀은 replicate를 늘리거나 Monte Carlo 구간을 같이 보고해야 한다
-- [ ] **F-9.12**(새로 생긴 항목) **`compute-all`로 Phase B 마트를 미리 만든 snapshot에서 `--phase B`가 반드시 죽는다.** A0는 `analysis_config_hash`를 스캔 config 해시로 찍지만 `compute-all`·리포트 스크립트는 `None`으로 남기고, `run_phase_b_core`가 이 값을 고정하므로 `_cache_contract_matches`가 거부한다(옳은 거부다). 그런데 `--phase B`에 `--force`가 없고 `register_phase_b_marts`는 `duckdb.Error`·`FileNotFoundError`만 잡아 `RuntimeError`가 run을 죽인다. 2026-09-09에는 `register_phase_b_marts(force=True)`를 따로 돌려(34분) 넘겼다. `--force`를 붙이거나 계약 불일치를 재빌드로 처리하게 한다
+- [x] **F-9.12 완료 2026-09-09** `register_phase_b_marts`가 계약 불일치를 재빌드로 처리한다. `--force` 플래그를 붙이는 쪽은 택하지 않았다 — 사람이 미리 알아야 하고, 이미 맞는 마트까지 전부 다시 만든다. 지금은 **불일치한 것만** 다시 만든다
+      — `research/etl/mart.py`에 `StaleMartContract(RuntimeError)`를 두고 9개 raise 자리를 옮겼다. 메시지 문자열로 구분하면 문구가 바뀔 때 조용히 안 걸리기 때문이다. `RuntimeError` 하위라 기존 `except RuntimeError`와 `pytest.raises(RuntimeError, match=...)`는 그대로 동작한다
+      — `register_mart_view`의 raise도 같은 타입으로 바꿨지만 **동작은 안 바꿨다.** A0 마트를 bind할 때 불일치하면 A0와 Phase B의 config가 다르다는 뜻이므로 죽는 것이 맞다
+      — 진짜 산식 변경도 여전히 재빌드로 처리된다(그게 맞다). 재빌드는 공짜가 아니라서 warning으로 남긴다
+      — **`force=True` 중간에 끊으면 마트가 빈다.** `materialize`가 쓰기 전에 `rmtree`하기 때문이다. 2026-09-09에 검증 중 `feat_fin_scan_daily`를 이렇게 날려 다시 만들었다. 발행된 run 산출물은 별도 디렉터리라 무사했다
 
 ### F-HS Horizon Scan 사전등록·실행
 

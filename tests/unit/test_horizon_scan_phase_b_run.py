@@ -38,6 +38,7 @@ from research.analysis.horizon_scan_phase_b_run import (
 from research.analysis.horizon_scan_readiness import build_primary_hypothesis_registry
 from research.analysis.horizon_scan_run_spec import compute_run_content_hash, kst_now_iso
 from research.analysis.horizon_scan_runner import apply_global_bh
+from research.etl.mart import StaleMartContract
 
 # --- register_phase_b_marts: dependency order + graceful degradation ---
 
@@ -49,11 +50,28 @@ def _con_with_daily_ohlcv() -> duckdb.DuckDBPyConnection:
     return con
 
 
-def _stub(monkeypatch: pytest.MonkeyPatch, name: str, calls: list[str], *, fail: bool = False):
-    def _fn(*_args, **_kwargs):
-        calls.append(name)
+def _stub(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    calls: list[str],
+    *,
+    fail: bool = False,
+    stale_until_forced: bool = False,
+):
+    """Stand in for one mart builder, recording the call.
+
+    ``stale_until_forced`` mimics a mart on disk that was written under another
+    contract: ``materialize`` refuses unless the caller asks for a rebuild, so
+    the stub raises ``StaleMartContract`` for ``force=False`` and succeeds for
+    ``force=True``.
+    """
+
+    def _fn(*_args, force: bool = False, **_kwargs):
+        calls.append(f"{name}:force" if force else name)
         if fail:
             raise duckdb.CatalogException(f"{name} unavailable")
+        if stale_until_forced and not force:
+            raise StaleMartContract(f"mart cache contract mismatch for {name!r}")
 
     monkeypatch.setattr(phase_b_run, f"materialize_{name}", _fn)
 
@@ -80,8 +98,10 @@ def _stub_all_marts(
     *,
     fail: str | None = None,
     common_fact_present: bool = True,
+    stale: set[str] | None = None,
 ) -> None:
     _stub_common_fact(monkeypatch, calls, present=common_fact_present)
+    stale = stale or set()
     for name in (
         "market_cap",
         "filing_activity",
@@ -96,7 +116,13 @@ def _stub_all_marts(
         "sue_event",
         "fin_risk",
     ):
-        _stub(monkeypatch, name, calls, fail=name == fail)
+        _stub(
+            monkeypatch,
+            name,
+            calls,
+            fail=name == fail,
+            stale_until_forced=name in stale,
+        )
 
 
 def test_register_phase_b_marts_all_succeed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -256,6 +282,63 @@ def test_register_phase_b_marts_stops_after_second_stage_failure(
         "periodic_extras",
         "fin_quarterly_metric_vintage",
     ]
+
+
+def test_register_phase_b_marts_rebuilds_a_stale_mart_instead_of_dying(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F-9.12. Only A0 stamps ``analysis_config_hash``; ``compute-all`` and the
+    report scripts leave it None, so on a snapshot whose Phase B marts were
+    pre-built that way *every* one of them is stale for this run. ``--phase B``
+    has no ``--force``, so dying here meant the run could not start at all --
+    it stopped on the first mart and named only that one."""
+    calls: list[str] = []
+    _stub_all_marts(monkeypatch, calls, stale={"market_cap", "fin_scan_daily"})
+
+    result = register_phase_b_marts(_con_with_daily_ohlcv(), lake=object())
+
+    # Both stale marts are available, and each was retried exactly once.
+    assert "feat_market_cap" in result
+    assert "feat_fin_scan_daily" in result
+    assert calls.count("market_cap") == 1
+    assert calls.count("market_cap:force") == 1
+    assert calls.count("fin_scan_daily") == 1
+    assert calls.count("fin_scan_daily:force") == 1
+    # A mart whose contract already matched is never rebuilt.
+    assert "filing_activity:force" not in calls
+    # Downstream marts still run: a stale root does not truncate the order.
+    assert "fin_sue_event" in result
+    assert "feat_fin_risk" in result
+
+
+def test_register_phase_b_marts_does_not_retry_a_genuinely_absent_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing raw source is not a stale cache, so it must not be rebuilt --
+    retrying would just fail again, and the mart belongs out of the set."""
+    calls: list[str] = []
+    _stub_all_marts(monkeypatch, calls, fail="event_scan_daily")
+
+    result = register_phase_b_marts(_con_with_daily_ohlcv(), lake=object())
+
+    assert "feat_event_scan_daily" not in result
+    assert calls.count("event_scan_daily") == 1
+    assert "event_scan_daily:force" not in calls
+
+
+def test_register_phase_b_marts_force_rebuilds_everything_without_a_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``force=True`` asks for the rebuild up front, so a stale mart never
+    raises and there is nothing to retry."""
+    calls: list[str] = []
+    _stub_all_marts(monkeypatch, calls, stale={"market_cap"})
+
+    register_phase_b_marts(_con_with_daily_ohlcv(), lake=object(), force=True)
+
+    assert calls.count("market_cap:force") == 1
+    assert "market_cap" not in calls  # the unforced attempt never happened
+    assert all(c.endswith(":force") for c in calls if c != "common_feature_daily_fact")
 
 
 # --- compute_phase_b_gate_updates: §9 B-9 rule wiring, robustness calls mocked ---
