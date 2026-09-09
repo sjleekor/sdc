@@ -89,7 +89,13 @@ _CAL_TABLE = "_fin_risk_calendar"
 #:            so the fingerprint has to move too — a re-run under fin_risk_v1
 #:            would otherwise reuse an artifact of an identical run spec while
 #:            producing different numbers.
-FORMULA_VERSION = "fin_risk_v2"
+#:   fin_risk_v3 — adds F-5.4's three derived families on the five metrics
+#:            F-5.1/F-5.2 mapped (`current_assets`, `current_liabilities`,
+#:            `retained_earnings`, `borrowings_short_term`,
+#:            `borrowings_long_term`). The nine v2 families are untouched
+#:            formula-for-formula, but the mart's schema and SQL text both move,
+#:            so the fingerprint has to.
+FORMULA_VERSION = "fin_risk_v3"
 
 #: Interest coverage above this is capped. A coverage of 400x and one of 4,000x
 #: say the same thing ("no debt service pressure") and the difference is mostly
@@ -120,7 +126,33 @@ _METRICS: tuple[str, ...] = (
     "operating_cash_flow",
     "investing_cash_flow",
     "financing_cash_flow",
+    # F-5.4. `revenue` was already canonical; the five below arrived with
+    # F-5.1/F-5.2 and are also registered in `financial_quarters.INSTANT_METRICS`
+    # -- a metric absent from that set never reaches this mart, whatever
+    # `metric_rules` says about it.
+    "revenue",
+    "current_assets",
+    "current_liabilities",
+    "retained_earnings",
+    "borrowings_short_term",
+    "borrowings_long_term",
 )
+
+#: Altman (1968) table 1 for public manufacturers, verbatim. The weights are
+#: the paper's and are not this repository's to re-fit (the same rule
+#: `LIFECYCLE_STAGES` follows for Dickinson).
+#:
+#: F-5.1 is what makes the full form possible: `03` §3 left `fin_altman_z`
+#: conditional on "becoming the full form rather than a reduced one", and
+#: retained earnings -- measured at 0.959 coverage from 2015 -- is the term that
+#: decides it. All five are now available.
+ALTMAN_WEIGHTS: dict[str, float] = {
+    "working_capital_to_assets": 1.2,
+    "retained_earnings_to_assets": 1.4,
+    "ebit_to_assets": 3.3,
+    "market_equity_to_liabilities": 0.6,
+    "sales_to_assets": 1.0,
+}
 
 #: Dickinson (2011) table 1, verbatim. Stage numbering is the paper's:
 #: 1 Introduction, 2 Growth, 3 Mature, 4 Shake-out, 5 Decline. Eight sign
@@ -148,6 +180,12 @@ PRIMARY_COLUMNS: tuple[str, ...] = (
     "fin_profit_turn",
     "fin_dividend_initiation",
     "fin_negative_equity_exit",
+    # F-5.4. Registered in a *later* F-HS config than the nine above (03 §3:
+    # "F-5의 파생 family는 F-4와 같은 F-HS config에 넣지 않는다"), so these are
+    # built and reported now and preregistered separately.
+    "fin_current_ratio",
+    "fin_borrowings_to_mcap",
+    "fin_altman_z",
 )
 #: Exploratory decomposition and quality flags. Reported, not preregistered.
 DIAGNOSTIC_COLUMNS: tuple[str, ...] = (
@@ -156,6 +194,18 @@ DIAGNOSTIC_COLUMNS: tuple[str, ...] = (
     "fin_lifecycle_prev_stage",
     "fin_lifecycle_prev_aligned",
     "fin_interest_coverage_capped",
+    # F-5.4. `fin_borrowings_total` is the numerator in won, kept so the
+    # short + long sum can be audited against the balance sheet -- the
+    # reconciliation F-5.1 §6.3 ran on 10,012 corp-years is a claim about this
+    # value. The five Altman terms are emitted individually because a composite
+    # score is uninterpretable without them, and because `03` §3 asks whether
+    # the full form beats the reduced one.
+    "fin_borrowings_total",
+    "fin_altman_wc_to_assets",
+    "fin_altman_re_to_assets",
+    "fin_altman_ebit_to_assets",
+    "fin_altman_mve_to_liabilities",
+    "fin_altman_sales_to_assets",
     "fs_basis_used",
 )
 #: One availability date per family group, plus its age in days — the same
@@ -169,6 +219,9 @@ AVAILABILITY_GROUPS: tuple[str, ...] = (
     "profit_turn",
     "negative_equity",
     "dividend",
+    "current_ratio",
+    "borrowings",
+    "altman",
 )
 
 _STOCK_KIND_RANK_SQL = (
@@ -364,6 +417,18 @@ def build_fin_risk_sql(
         f"AS {group}_fin_age_days"
         for group in AVAILABILITY_GROUPS
     )
+    # Altman's weights, written into the SQL text so a changed weight changes
+    # the mart's cache key rather than silently reusing the old score.
+    altman_sum = "\n                        + ".join(
+        f"{ALTMAN_WEIGHTS[term]} * fin_altman_{alias}"
+        for term, alias in (
+            ("working_capital_to_assets", "wc_to_assets"),
+            ("retained_earnings_to_assets", "re_to_assets"),
+            ("ebit_to_assets", "ebit_to_assets"),
+            ("market_equity_to_liabilities", "mve_to_liabilities"),
+            ("sales_to_assets", "sales_to_assets"),
+        )
+    )
     dividend_sql = build_dividend_initiation_sql(
         shareholder_return_view=shareholder_return_view,
         calendar_table=calendar_table,
@@ -434,7 +499,14 @@ def build_fin_risk_sql(
             greatest(operating_cash_flow_asof, investing_cash_flow_asof,
                      financing_cash_flow_asof) AS lifecycle_available_from,
             net_income_asof AS profit_turn_available_from,
-            total_equity_asof AS negative_equity_available_from
+            total_equity_asof AS negative_equity_available_from,
+            greatest(current_assets_asof, current_liabilities_asof)
+                AS current_ratio_available_from,
+            greatest(borrowings_short_term_asof, borrowings_long_term_asof)
+                AS borrowings_available_from,
+            greatest(current_assets_asof, current_liabilities_asof, retained_earnings_asof,
+                     operating_income_asof, revenue_asof, total_assets_asof,
+                     total_liabilities_asof) AS altman_available_from
         FROM resolved
     ),
     staged AS (
@@ -456,7 +528,8 @@ def build_fin_risk_sql(
             leverage_available_from, net_debt_available_from, coverage_available_from,
             ext_finance_available_from, lifecycle_available_from,
             profit_turn_available_from, negative_equity_available_from,
-            dividend_available_from,
+            dividend_available_from, current_ratio_available_from,
+            borrowings_available_from, altman_available_from,
             -- ``base_ok`` gates only the market-cap-dependent ratio, which is
             -- what ``feat_fin_scan_daily`` does: ``fin_book_to_market`` and the
             -- other price-scaled columns carry it, ``fin_gross_profitability``
@@ -510,8 +583,68 @@ def build_fin_risk_sql(
             CASE WHEN total_equity_selected IS NOT NULL AND total_equity_prev IS NOT NULL
                  THEN CASE WHEN total_equity_prev <= 0 AND total_equity_selected > 0 THEN 1
                            ELSE 0 END
-            END AS fin_negative_equity_exit
+            END AS fin_negative_equity_exit,
+            -- F-5.4 ---------------------------------------------------------
+            CASE WHEN current_liabilities_selected > 0 AND current_assets_selected IS NOT NULL
+                 THEN current_assets_selected / current_liabilities_selected
+            END AS fin_current_ratio,
+            -- Short + long only. The current portion of long-term borrowings
+            -- never reached 0.5 coverage (max 0.466) so it is not a required
+            -- component; omitting it understates interest-bearing debt by a
+            -- median 10.2% and a p90 59.7%, which the card states. The sum was
+            -- reconciled first: across 10,012 corp-years with all three parts,
+            -- short + long never exceeds total liabilities (F-5.1 §6.3).
+            CASE WHEN borrowings_short_term_selected IS NOT NULL
+                      AND borrowings_long_term_selected IS NOT NULL
+                 THEN borrowings_short_term_selected + borrowings_long_term_selected
+            END AS fin_borrowings_total,
+            CASE WHEN base_ok
+                      AND borrowings_short_term_selected IS NOT NULL
+                      AND borrowings_long_term_selected IS NOT NULL
+                 THEN (borrowings_short_term_selected + borrowings_long_term_selected)
+                      / market_cap_pit
+            END AS fin_borrowings_to_mcap,
+            -- Altman's five terms, each emitted so the composite is readable.
+            CASE WHEN total_assets_selected > 0
+                      AND current_assets_selected IS NOT NULL
+                      AND current_liabilities_selected IS NOT NULL
+                 THEN (current_assets_selected - current_liabilities_selected)
+                      / total_assets_selected
+            END AS fin_altman_wc_to_assets,
+            CASE WHEN total_assets_selected > 0 AND retained_earnings_selected IS NOT NULL
+                 THEN retained_earnings_selected / total_assets_selected
+            END AS fin_altman_re_to_assets,
+            -- EBIT is approximated by operating income. Korean filers report
+            -- 영업이익 as a standard line and a true EBIT would need interest and
+            -- tax added back from the income statement, which canonical does not
+            -- carry -- stated rather than silently equated.
+            CASE WHEN total_assets_selected > 0 AND operating_income_selected IS NOT NULL
+                 THEN operating_income_selected / total_assets_selected
+            END AS fin_altman_ebit_to_assets,
+            CASE WHEN base_ok AND total_liabilities_selected > 0
+                 THEN market_cap_pit / total_liabilities_selected
+            END AS fin_altman_mve_to_liabilities,
+            CASE WHEN total_assets_selected > 0 AND revenue_selected IS NOT NULL
+                 THEN revenue_selected / total_assets_selected
+            END AS fin_altman_sales_to_assets
         FROM staged
+    )
+    ,
+    with_altman AS (
+        SELECT
+            *,
+            -- All five terms or nothing. A partial sum would put a company
+            -- missing its sales line into the same distribution as one that
+            -- scored low on five real terms, and Altman's cut-offs are
+            -- statements about the complete score.
+            CASE WHEN fin_altman_wc_to_assets IS NOT NULL
+                      AND fin_altman_re_to_assets IS NOT NULL
+                      AND fin_altman_ebit_to_assets IS NOT NULL
+                      AND fin_altman_mve_to_liabilities IS NOT NULL
+                      AND fin_altman_sales_to_assets IS NOT NULL
+                 THEN {altman_sum}
+            END AS fin_altman_z
+        FROM ratios
     )
     SELECT
         trade_date, ticker, market,
@@ -519,9 +652,13 @@ def build_fin_risk_sql(
         {lag1},
         fin_lifecycle_transition_up, fin_lifecycle_transition_down,
         fin_lifecycle_prev_stage, fin_lifecycle_prev_aligned,
-        fin_interest_coverage_capped, fs_basis_used,
+        fin_interest_coverage_capped,
+        fin_borrowings_total,
+        fin_altman_wc_to_assets, fin_altman_re_to_assets, fin_altman_ebit_to_assets,
+        fin_altman_mve_to_liabilities, fin_altman_sales_to_assets,
+        fs_basis_used,
         {asof_outputs}
-    FROM ratios
+    FROM with_altman
     """
 
 

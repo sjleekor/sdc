@@ -14,7 +14,7 @@
 | F-2 | 통계적 peer 관계 피쳐 | 없음 | **완료**(`relation_stat_v2`, 2026-09-09) | **F-HS-1에서 19 cell 등급 A `screen_pass`.** 양방향 2건 부호 `−`로 확정 |
 | F-3 | 업종 관계 피쳐 | 없음(F-1 선행) | 대기(D-F1) — 선행 마트는 준비됨 | 비-seed 3쌍(2026-12-01 스냅샷) 뒤 판정 |
 | F-4 | 재무위험·생애주기·전이 | 없음 | **완료**(`fin_risk_v2`, 2026-09-08) | **F-HS-1에서 13 cell `screen_pass`, 전부 등급 B 상한**(측정된 `revision` 경고). 양방향 4건 부호 확정 |
-| F-5 | `metric_rules` 확장 | 없음(매핑) | **F-5.0~F-5.3 완료**(2026-09-09) | F-5.4 파생 family **3개** |
+| F-5 | `metric_rules` 확장 | 없음(매핑) | **F-5.0~F-5.4 완료**(`fin_risk_v3`, 2026-09-09) | 커버리지 리포트는 다음 F-HS config A0 |
 | F-6 | `fin_sue` XBRL 백필 | OpenDART **22,700 호출**(측정됨) | **F-6.1 완료**(2026-09-09) | F-6.2 prod 백필(키 예산 2일) |
 | F-7 | DS005 이벤트·elestock | 있음 | 미착수 (D-F2 확정: `elestock` 시작 / D-F3: PoC 뒤 6종) | DS005 PoC + `elestock` 스키마 |
 | F-8 | 매크로 2단계 시리즈 | 시리즈 정의 | 미착수 (D-F5 확정: 2단계 먼저) | ECOS item_code 확정 |
@@ -127,7 +127,13 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
       — 기록할 한계 둘. (a) `retained_earnings`의 2015~2016은 raw 0.959인데 **vintage 0.72**다(나머지 넷은 raw와 vintage가 거의 같다). 0.5는 넘으므로 표본 시작은 2015이지만 그 두 해의 횡단면이 72%임을 카드에 적는다. (b) **차입금은 최근으로 갈수록 나빠진다** — 단기 0.826(2015) → 0.552(2025), 장기 0.714 → **0.495**(2025년 문턱 아래). 방향이 보통과 반대다
       — (b)의 원인은 2023년 이후 taxonomy로 보인다. `ifrs-full_Borrowings`(1,118 법인)와 `ifrs-full_BorrowingsInterestRate`(1,095 법인)가 2023년부터만 있고 둘 다 차입금 명세 주석 모양이다. **성분에 붙이지 않았다** — 이름이 합계이고 커버리지가 0.40이라 붙이면 어떤 법인은 단기만, 어떤 법인은 총액을 담아 분자의 뜻이 법인에 따라 달라진다. 행 수로는 판정할 수 없다
       — `borrowings_long_term`만 2015~2022 역산이 0%다. 주 규칙 `dart_LongTermBorrowingsGross`가 statement 쪽에서 2015~2026을 고르게 덮는다(87,019행 / 2,384 법인) — 철자 문제가 없는 유일한 신규 metric이다
-- [ ] **F-5.4** 파생 family **3개**(`fin_current_ratio`, `fin_borrowings_to_mcap`, `fin_altman_z` **완전판**) → F-HS-2 또는 3. ~~`fin_rnd_to_sales`·`fin_bm_intangible_adj`~~는 F-5.1에서 재료가 없어 취소됐다
+- [x] **F-5.4 마트 완료 2026-09-09** `feat_fin_risk`에 파생 family **3개** 추가 → `fin_risk_v3`. 유닛 19개(`test_fin_risk_derived.py`). ~~`fin_rnd_to_sales`·`fin_bm_intangible_adj`~~는 F-5.1에서 재료가 없어 취소됐다
+      — `fin_current_ratio` = 유동자산 / 유동부채. 분모 0은 NULL이다
+      — `fin_borrowings_to_mcap` = (단기 + 장기) / 시가총액. 성분 하나가 없으면 **NULL이고 0으로 안 채운다** — 없는 쪽을 0으로 보면 공시가 부실한 법인이 부채가 적은 것으로 보이고 그 오차가 공시 품질과 상관된다. 감사용으로 `fin_borrowings_total`(원 단위)을 같이 낸다
+      — **`fin_altman_z`는 완전판이다**(다섯 항). 가중치는 Altman(1968) 표 1 그대로이고 이 저장소가 다시 맞출 것이 아니다(`LIFECYCLE_STAGES`와 같은 규칙). 다섯 항을 각각 컬럼으로 내고, **하나라도 NULL이면 점수는 NULL이다** — 부분합은 매출 라인이 없는 법인을 진짜로 낮게 나온 법인과 같은 분포에 놓는다
+      — EBIT는 `operating_income`으로 근사한다. 진짜 EBIT는 이자·법인세를 되돌려 더해야 하고 canonical에 그 항목이 없다. 근사임을 적었고 조용히 같다고 하지 않았다
+      — **`financial_quarters.INSTANT_METRICS`에 다섯 개를 넣어야 했다.** `metric_rules`에만 등록해도 `_ALL_QUARTERED_METRICS`가 B-3 입력을 걸러서 `feat_fin_risk`까지 오지 않는다. F-5.2에서 놓친 연결이다
+      - [ ] **커버리지·분포 리포트는 다음 F-HS config의 A0에서 낸다.** `fin_risk_v3`로 올려서 마트를 지금 다시 만들면 F-HS-1이 발행한 2026-09-08 `feature_mart`를 덮는다 — F-5.0이 지킨 규칙("canonical 마트는 안 건드린다")대로 미룬다. 그 config에서 어차피 재빌드된다
 
 ### F-6 `fin_sue` 백필 (`04` §1)
 

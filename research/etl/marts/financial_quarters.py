@@ -77,6 +77,16 @@ INSTANT_METRICS = frozenset(
         "cash_and_cash_equivalents",
         "issued_shares",
         "treasury_shares",
+        # F-5.1/F-5.2. All five are balance-sheet lines, so they take the
+        # instant path: one quarter is enough and no TTM accumulation applies.
+        # Registering the metric in `metric_rules` is not sufficient on its own
+        # -- `_ALL_QUARTERED_METRICS` filters this mart's input, so a metric
+        # absent here never reaches `feat_fin_risk` at all.
+        "current_assets",
+        "current_liabilities",
+        "retained_earnings",
+        "borrowings_short_term",
+        "borrowings_long_term",
     }
 )
 WEIGHTED_SHARE_METRICS = frozenset({"weighted_avg_shares", "diluted_shares"})
