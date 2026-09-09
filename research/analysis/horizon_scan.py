@@ -19,6 +19,7 @@ import argparse
 import hashlib
 import json
 import math
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -980,8 +981,16 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="--phase B only: reuse Phase A permutation cell statistics",
     )
-    args = parser.parse_args(argv)
-    command_line = ["horizon_scan", *(argv or [])]
+    # F-9.10. `argv or []` recorded only ["horizon_scan"] for every real run:
+    # __main__ calls main() with argv=None, parse_args(None) then reads sys.argv
+    # itself, and the empty list is what reached run_spec.json. All four
+    # 2026-08-30 runs are missing their arguments because of this. config_hash
+    # still pins the contract, so lineage was never lost -- what was lost is the
+    # ability to reproduce a run from its own spec. Resolve the effective argv
+    # once and use the same list for parsing and for the record.
+    effective_argv = list(argv) if argv is not None else sys.argv[1:]
+    args = parser.parse_args(effective_argv)
+    command_line = ["horizon_scan", *effective_argv]
 
     if args.phase == "A":
         published = run_phase_a(

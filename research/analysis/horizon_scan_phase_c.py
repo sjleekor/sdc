@@ -37,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import sys
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -988,7 +989,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", default="sj2_remote")
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--output-root", type=Path, default=Path("research/output/horizon_scan"))
-    args = parser.parse_args(argv)
+    # F-9.10, same bug as horizon_scan.main: see the comment there.
+    effective_argv = list(argv) if argv is not None else sys.argv[1:]
+    args = parser.parse_args(effective_argv)
 
     published = run_phase_c(
         phase_a_run_dir=args.phase_a_run_dir,
@@ -996,7 +999,7 @@ def main(argv: list[str] | None = None) -> int:
         snapshot_date=args.snapshot_date,
         source=args.source,
         output_root=args.output_root,
-        command_line=["horizon_scan_phase_c", *(argv or [])],
+        command_line=["horizon_scan_phase_c", *effective_argv],
         config_path=args.config,
     )
     print(published)

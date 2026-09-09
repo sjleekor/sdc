@@ -18,7 +18,7 @@
 | F-6 | `fin_sue` XBRL 백필 | OpenDART(측정 뒤) | 미착수 | 대상 역산 |
 | F-7 | DS005 이벤트·elestock | 있음 | 미착수 (D-F2 확정: `elestock` 시작 / D-F3: PoC 뒤 6종) | DS005 PoC + `elestock` 스키마 |
 | F-8 | 매크로 2단계 시리즈 | 시리즈 정의 | 미착수 (D-F5 확정: 2단계 먼저) | ECOS item_code 확정 |
-| F-9 | `fin_pit` strict·휴장일·상폐·유니버스·Cronicle | 일부 | F-9.2·**F-9.3 종결**·F-9.7·F-9.12·F-9.13 완료 | F-9.1 / **F-9.14**(월말 스냅샷 2019~2025 공백) |
+| F-9 | `fin_pit` strict·휴장일·상폐·유니버스·Cronicle | 일부 | F-9.2·**F-9.3 종결**·F-9.7·**F-9.10**·F-9.12·F-9.13·F-9.14 완료 | **F-9.2 prod 배포**(미완) / F-9.1 / F-9.9 / F-9.11 |
 | F-HS | 새 config 사전등록·A→B→AB→C | — | **F-HS-1 완료**(`3ca949e6`, 2026-09-09), FS3 인계 완료 | F-HS-C2(F-8 선행) / F-HS-2 |
 
 ---
@@ -180,7 +180,10 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
 - [ ] **F-9.8** freshness 월 예산 항목
 - [ ] **F-9.9**(새로 생긴 항목) **readiness 게이트 기본 `--required-coverage-ratio 1.0`이 원리상 통과 불가다.** 2026-09-08에서 38개 중 33개, 2026-08-23에서도 18개가 실패한다. 원인 두 가지: (a) `feature_dates` 격자가 일부 시리즈의 `asof_available_date`가 앞서 있어 **오늘을 넘어 뻗고**(09-21까지) 일별 시리즈가 미래 날짜에 값이 없다, (b) YoY 파생은 12개월 이력이 필요해 시작 구간 NULL이 구조적이다(`macro_cpi_yoy_latest` 253개). 고칠 방향은 격자를 마지막 수집 세션으로 clamp하거나 시리즈별 유효 시작 이후만 세는 것이다. 그때까지 이 게이트는 pass/fail로 쓰지 않는다
 
-- [ ] **F-9.10**(새로 생긴 항목) `run_spec.json`의 `command_line`이 실제 인자를 버린다. `command_line = ["horizon_scan", *(argv or [])]`인데 `__main__` 경로는 `argv=None`으로 들어와 `parse_args(None)`이 `sys.argv`를 읽으므로, 기록에는 `['horizon_scan']`만 남는다. 2026-08-30 run 넷이 다 그렇다. `config_hash`가 따로 남아 계보 추적에는 문제가 없지만 **재현 명령을 run_spec에서 복원할 수 없다**. 고치면 이후 run의 `run_spec` 내용이 바뀌므로 A/B 사이가 아니라 라운드 경계에서 넣는다
+- [x] **F-9.10 완료 2026-09-09** `run_spec.json`의 `command_line`이 실제 인자를 버렸다. `command_line = ["horizon_scan", *(argv or [])]`인데 `__main__` 경로는 `argv=None`으로 들어와 `parse_args(None)`이 `sys.argv`를 직접 읽으므로 기록에는 `['horizon_scan']`만 남았다. 2026-08-30 run 넷이 다 그렇다
+      — 고친 방법: `effective_argv = list(argv) if argv is not None else sys.argv[1:]`를 한 번 정하고 **파싱과 기록에 같은 리스트**를 쓴다. 같은 버그가 `horizon_scan_phase_c.main`에도 있어 같이 고쳤다
+      — `argv=[]`(진짜 인자 없음)과 `argv=None`(인자를 sys.argv에서 읽음)이 `or` 때문에 구분되지 않았던 것이 원인이다. 유닛 4개로 두 호출 형태를 다 박았다
+      — **라운드 경계에서 넣었다**(F-HS-1 완료 뒤). 이후 run의 `run_spec` 내용이 바뀌므로 A/B 사이에 넣으면 안 되는 변경이다. `config_hash`는 그대로라 발행된 run의 계보는 영향이 없다
 
 - [ ] **F-9.11**(새로 생긴 항목) **시간 placebo 경계 셀의 `screen_pass`가 층마다 흔들린다.** `temporal_long_cell_repeats=100` / `temporal_p_max=0.10`인데 p≈0.1에서 100회 재추출의 표준오차가 0.030이다. 2026-09-09 run에서 `ev_payout_yield|bucket|60|120`이 0.0891 → 0.1287로 탈락, `mcap_krx_log|cum|0|120`이 0.1386 → 0.0495로 통과했고 **둘 다 다른 통계는 비트 동일**하다. 이동 거리 seed가 `config_hash`를 받으므로(의도된 재추출) 새 층마다 null이 바뀐다. 문턱 근처 셀은 replicate를 늘리거나 Monte Carlo 구간을 같이 보고해야 한다
 - [x] **F-9.12 완료 2026-09-09** `register_phase_b_marts`가 계약 불일치를 재빌드로 처리한다. `--force` 플래그를 붙이는 쪽은 택하지 않았다 — 사람이 미리 알아야 하고, 이미 맞는 마트까지 전부 다시 만든다. 지금은 **불일치한 것만** 다시 만든다
