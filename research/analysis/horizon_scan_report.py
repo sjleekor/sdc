@@ -22,6 +22,10 @@ import numpy as np
 matplotlib.use("Agg")  # A-9 plots are rendered headless (run directory artifacts, not a UI)
 import matplotlib.pyplot as plt  # noqa: E402
 
+from research.analysis.horizon_scan_permutation import (  # noqa: E402
+    TEMPORAL_MARGINAL_SE_MULTIPLE,
+)
+
 
 def _aligned(ic_mean: float | None, expected_sign: str | None) -> float | None:
     if ic_mean is None or not math.isfinite(ic_mean):
@@ -246,6 +250,24 @@ def assign_evidence_grade(
 
 # --- family conclusion card assembly (§5 A-8 card schema) ---
 
+def _marginal_note(source: dict) -> str:
+    """`" (marginal: p_max within Ns)"` when the placebo verdict is MC noise.
+
+    F-9.11. The temporal placebo runs 100 replicates, so at p around 0.10 the
+    Monte Carlo error of p is 0.030 -- and because the shift seed is derived
+    from ``config_hash``, each new preregistration layer redraws the null. Two
+    cells changed side between the 2026-08-30 and 2026-09-09 layers with every
+    other statistic bit-identical. The verdict still stands as preregistered;
+    this only stops it being read as evidence.
+    """
+    if not source.get("temporal_null_marginal"):
+        return ""
+    band = source.get("temporal_marginal_band")
+    if band is None:
+        return " (marginal)"
+    return f" (marginal: within {TEMPORAL_MARGINAL_SE_MULTIPLE:.0f} MC SE of p_max, ±{band:.3f})"
+
+
 _FAMILY_CARD_FIELDS = (
     "family",
     "domain",
@@ -280,6 +302,9 @@ _FAMILY_CARD_FIELDS = (
     "kosdaq_weight_mean",
     "p_temporal_nw",
     "temporal_null_pass",
+    "p_temporal_nw_se",
+    "temporal_marginal_band",
+    "temporal_null_marginal",
     "q_fdr_global",
     "evidence_grade",
     "screen_pass",
@@ -319,6 +344,9 @@ def build_family_card(
     kosdaq_weight_mean: float | None,
     p_temporal_nw: float | None,
     temporal_null_pass: bool | None,
+    p_temporal_nw_se: float | None = None,
+    temporal_marginal_band: float | None = None,
+    temporal_null_marginal: bool | None = None,
     q_fdr_global: float | None,
     evidence_grade: str,
     screen_pass: bool,
@@ -370,6 +398,9 @@ def build_family_card(
         "kosdaq_weight_mean": kosdaq_weight_mean,
         "p_temporal_nw": p_temporal_nw,
         "temporal_null_pass": temporal_null_pass,
+        "p_temporal_nw_se": p_temporal_nw_se,
+        "temporal_marginal_band": temporal_marginal_band,
+        "temporal_null_marginal": temporal_null_marginal,
         "q_fdr_global": q_fdr_global,
         "evidence_grade": evidence_grade,
         "screen_pass": screen_pass,
@@ -721,7 +752,8 @@ def _render_family_card_md(card: dict[str, Any]) -> str:
     )
     if card.get("p_temporal_nw") is not None:
         lines.append(
-            f"- temporal placebo: p={card['p_temporal_nw']:.3f} pass={card['temporal_null_pass']}"
+            f"- temporal placebo: p={card['p_temporal_nw']:.3f} "
+            f"pass={card['temporal_null_pass']}{_marginal_note(card)}"
         )
     if card["warnings"]:
         lines.append(f"- warnings: {'; '.join(card['warnings'])}")
@@ -799,7 +831,8 @@ def render_markdown_report(context: dict[str, Any]) -> str:
         ),
     ]
     long_cell_lines = [
-        f"  - `{hid}`: p_temporal_nw={v.get('p_temporal_nw')}, pass={v.get('temporal_null_pass')}"
+        f"  - `{hid}`: p_temporal_nw={v.get('p_temporal_nw')}, "
+        f"pass={v.get('temporal_null_pass')}{_marginal_note(v)}"
         for hid, v in temp.get("per_cell", {}).items()
     ] or ["  - (no nw_lag>=59 primary cells)"]
     sections.append(

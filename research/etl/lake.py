@@ -214,8 +214,22 @@ def _common_feature_calendars(
     """KRX session calendars for the common build, derived from the raw lake.
 
     ``feature_dates`` = KRX sessions from the first observation availability
-    through the last; ``trading_days`` = the stale calendar (same span). Uses
-    ``get_trading_days`` so it matches the Postgres build's KRX calendar exactly.
+    through the last session the lake actually reaches; ``trading_days`` = the
+    stale calendar (same span). Uses ``get_trading_days`` so it matches the
+    Postgres build's KRX calendar exactly.
+
+    **The end is clamped to the last priced session (F-9.9).** ``available_from_date``
+    is an *announced* availability, so a monthly ECOS series legitimately carries
+    a future one: measured on snapshot 2026-09-08, ``macro_cpi`` and
+    ``macro_consumer_sentiment`` both say 2026-09-21 while the last KRX session
+    with prices is 2026-09-07. Taking the raw maximum stretched the grid ten
+    sessions past the end of the data, and every daily series was then charged
+    with missing values for sessions that have not happened -- which is what made
+    the readiness gate impossible to pass at its own default
+    (``--required-coverage-ratio 1.0`` failed 33 of 38 features).
+
+    A lake without ``ohlcv_view`` is left unclamped rather than failed: the
+    clamp is a correction to an upper bound, not an input the calendar needs.
     """
     from krx_collector.infra.calendar.trading_days import get_trading_days
 
@@ -227,6 +241,12 @@ def _common_feature_calendars(
     if first_avail is None:
         return [], []
     end = max(d for d in (last_avail, last_obs) if d is not None)
+    try:
+        last_session = con.execute(f"SELECT max(trade_date) FROM {ohlcv_view}").fetchone()[0]
+    except duckdb.Error:
+        last_session = None
+    if last_session is not None and last_session < end:
+        end = last_session
     sessions = list(get_trading_days(first_avail, end))
     # feature_dates and the stale calendar share the same KRX session span here;
     # the orchestrator can narrow feature_dates for incremental/backfill runs.

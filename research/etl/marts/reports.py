@@ -48,6 +48,11 @@ class ReadinessRow:
     #: First feature date this feature was judged over. ``None`` when the whole
     #: calendar was used, which is also what a feature with no facts gets.
     window_start: date | None = None
+    #: Grid dates before ``window_start`` that carry a fact with a NULL value —
+    #: the derivation warm-up excluded from the judgement. Reported rather than
+    #: hidden: a YoY feature needing twelve months is expected to have one, and
+    #: a large number on a feature that should have none is a real finding.
+    warmup_null_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,15 +137,69 @@ def _first_feature_dates(
     cfdf_view: str,
     codes: Sequence[str],
 ) -> dict[str, date]:
-    """Earliest date each feature has a fact for."""
+    """Earliest date each feature has a non-NULL value for (F-9.9).
+
+    Not the first *fact*: a derived feature emits a row from its input's first
+    date but cannot carry a value until its window fills, so a YoY series has a
+    structurally NULL run at the front (measured: ``macro_cpi_yoy_latest``, 253
+    dates). Judging from the first fact charged every such feature with those
+    nulls forever, which no amount of collection can fix.
+
+    A leading NULL run is a warm-up, not a hole. Holes *inside* the span still
+    count, and the excluded run is reported as ``warmup_null_count`` so a
+    surprisingly long one is visible rather than silently forgiven.
+    """
     rows = con.execute(f"""
         WITH feature_codes(feature_code) AS ({_values_list(list(codes))})
-        SELECT c.feature_code, min(f.feature_date)
+        SELECT c.feature_code, min(f.feature_date) FILTER (WHERE f.value_numeric IS NOT NULL)
         FROM feature_codes c
         LEFT JOIN {cfdf_view} f ON f.feature_code = c.feature_code
         GROUP BY c.feature_code
         """).fetchall()
     return {code: first for code, first in rows if first is not None}
+
+
+def _window_counts(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    cfdf_view: str,
+    feature_dates: Sequence[date],
+    window_starts: dict[str, date],
+) -> dict[str, tuple[int, int, int, int]]:
+    """Per-feature ``(fact, non_null, null, pit_violation)`` counts inside the window.
+
+    ``coverage_report``'s counts span the whole calendar, so they cannot be
+    reused once the window moves off the first fact: the leading NULL rows are
+    real facts and would keep ``null_count`` positive. Recomputed here rather
+    than by changing ``coverage_report``, whose output is frozen in
+    ``golden/common_feature_reports.json`` and is a separate report.
+    """
+    if not window_starts:
+        return {}
+    starts = ", ".join(
+        f"('{code}', DATE '{start.isoformat()}')" for code, start in sorted(window_starts.items())
+    )
+    rows = con.execute(f"""
+        WITH windows(feature_code, window_start) AS (VALUES {starts}),
+        feature_dates(feature_date) AS ({_date_values_list(feature_dates)})
+        SELECT
+            w.feature_code,
+            count(f.feature_code) AS fact_count,
+            count(f.value_numeric) AS non_null_count,
+            count(*) FILTER (
+                WHERE f.feature_code IS NOT NULL AND f.value_numeric IS NULL
+            ) AS null_count,
+            count(*) FILTER (
+                WHERE f.feature_code IS NOT NULL AND f.asof_available_date > fd.feature_date
+            ) AS pit_violation_count
+        FROM windows w
+        JOIN feature_dates fd ON fd.feature_date >= w.window_start
+        LEFT JOIN {cfdf_view} f
+          ON f.feature_code = w.feature_code
+         AND f.feature_date = fd.feature_date
+        GROUP BY w.feature_code
+        """).fetchall()
+    return {code: (facts, non_null, nulls, pit) for code, facts, non_null, nulls, pit in rows}
 
 
 def readiness_report(
@@ -176,6 +235,12 @@ def readiness_report(
         _first_feature_dates(con, cfdf_view=cfdf_view, codes=codes) if per_feature_window else {}
     )
     ordered_dates = sorted(feature_dates)
+    window_counts = _window_counts(
+        con,
+        cfdf_view=cfdf_view,
+        feature_dates=ordered_dates,
+        window_starts=first_dates,
+    )
 
     out: list[ReadinessRow] = []
     for row in coverage_report(
@@ -187,30 +252,35 @@ def readiness_report(
         target_count = row.target_count
         missing_count = row.missing_count
         coverage_ratio = row.coverage_ratio
+        null_count = row.null_count
+        pit_violation_count = row.pit_violation_count
         window_start: date | None = None
+        warmup_null_count = 0
 
         first = first_dates.get(row.feature_code)
         if first is not None:
             window_start = first
             target_count = sum(1 for day in ordered_dates if day >= first)
-            # Facts can only exist on or after the first one, so fact_count is
-            # already confined to the window; only the target moves.
-            missing_count = max(target_count - row.fact_count, 0)
-            coverage_ratio = (
-                round(row.non_null_count / target_count, 4) if target_count > 0 else 0.0
-            )
+            facts, non_null, nulls, pit = window_counts.get(row.feature_code, (0, 0, 0, 0))
+            missing_count = max(target_count - facts, 0)
+            coverage_ratio = round(non_null / target_count, 4) if target_count > 0 else 0.0
+            null_count = nulls
+            pit_violation_count = pit
+            # Everything the whole-calendar pass saw minus what the window sees:
+            # the derivation warm-up, reported rather than charged.
+            warmup_null_count = max(row.null_count - nulls, 0)
 
         blockers: list[str] = []
         if target_count == 0:
             blockers.append("target_count=0")
         if coverage_ratio < required_coverage_ratio:
             blockers.append(f"coverage_ratio={coverage_ratio} < required={required_coverage_ratio}")
-        if row.null_count > 0:
-            blockers.append(f"null_count={row.null_count}")
+        if null_count > 0:
+            blockers.append(f"null_count={null_count}")
         if missing_count > 0:
             blockers.append(f"missing_count={missing_count}")
-        if row.pit_violation_count > 0:
-            blockers.append(f"pit_violation_count={row.pit_violation_count}")
+        if pit_violation_count > 0:
+            blockers.append(f"pit_violation_count={pit_violation_count}")
         out.append(
             ReadinessRow(
                 feature_code=row.feature_code,
@@ -218,6 +288,7 @@ def readiness_report(
                 ready=not blockers,
                 blockers=tuple(blockers),
                 window_start=window_start,
+                warmup_null_count=warmup_null_count,
             )
         )
     out.sort(key=lambda r: (not r.ready, r.feature_code))

@@ -923,6 +923,11 @@ def compute_phase_b_gate_updates(
                         "offset_status": nonoverlap_by_id.get(hid, {}).get("offset_status"),
                         "temporal_null_pass": temporal_pass,
                         "p_temporal_nw": temporal.get("p_temporal_nw"),
+                        # F-9.11: the MC error of p, so a pass/fail that landed
+                        # inside it reads as a coin toss rather than a finding.
+                        "p_temporal_nw_se": temporal.get("p_temporal_nw_se"),
+                        "temporal_marginal_band": temporal.get("temporal_marginal_band"),
+                        "temporal_null_marginal": temporal.get("temporal_null_marginal"),
                     }
                 )
                 temporal_placebo_rows.append(

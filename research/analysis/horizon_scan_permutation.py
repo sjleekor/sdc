@@ -162,18 +162,65 @@ def empirical_discovery_count_p(
     return (1 + at_least) / (len(null_discovery_counts) + 1)
 
 
+#: How many Monte Carlo standard errors from ``p_max`` still counts as "the
+#: threshold decided this, not the data" (F-9.11). Two, so the band is the
+#: conventional 95% one; fixed here rather than per call site so a marginal cell
+#: means the same thing in every layer.
+TEMPORAL_MARGINAL_SE_MULTIPLE = 2.0
+
+
 def temporal_placebo_p(
     real_abs_t_nw: float, shifted_abs_t_nw: list[float], *, p_max: float = 0.10
 ) -> dict[str, Any]:
     """§A-6b: ``p_temporal_nw = (1 + #{|t_shift| >= |t_real|}) / (repeats + 1)``,
     ``temporal_null_pass = p_temporal_nw < p_max``. Only meaningful for the
     long (``nw_lag >= 59``) primary cells this placebo is run against.
+
+    Also reports the Monte Carlo uncertainty of ``p`` itself (F-9.11), because
+    the pass/fail alone overstates what 100 replicates can resolve. The shift
+    seed is derived from ``config_hash``, so every new preregistration layer
+    draws a fresh null and a cell sitting near ``p_max`` changes side between
+    layers on nothing but that redraw. Measured on the 2026-09-09 run:
+    ``ev_payout_yield|bucket|60|120`` went 0.0891 -> 0.1287 (pass -> fail) and
+    ``mcap_krx_log|cum|0|120`` went 0.1386 -> 0.0495 (fail -> pass), with every
+    other statistic on both cells bit-identical.
+
+    ``temporal_null_marginal`` says the decision fell inside that noise. It is a
+    *diagnostic*, deliberately not an input to ``temporal_null_pass`` or to
+    ``screen_pass``: the rule and the replicate count are preregistered
+    (``temporal_p_max``, ``temporal_long_cell_repeats``) and changing either
+    after seeing results is what preregistration exists to prevent. What was
+    missing is the reader being told the flip is a coin toss.
     """
     if not shifted_abs_t_nw:
         raise ValueError("shifted_abs_t_nw must be non-empty")
+    repeats = len(shifted_abs_t_nw)
     at_least = sum(1 for t in shifted_abs_t_nw if t >= real_abs_t_nw)
-    p = (1 + at_least) / (len(shifted_abs_t_nw) + 1)
-    return {"p_temporal_nw": p, "temporal_null_pass": bool(p < p_max)}
+    p = (1 + at_least) / (repeats + 1)
+    # Two standard errors, both binomial, and they answer different questions.
+    #
+    # `p_temporal_nw_se` is the error of *this* estimate, taken at the observed
+    # p -- what a reader wants next to the number.
+    #
+    # The marginal band is taken at `p_max`, not at the observed p, because the
+    # question it answers is "could a redraw put this cell on the other side of
+    # the threshold?" -- a statement about the neighbourhood of p_max. Using the
+    # observed p instead shrinks the band exactly where p is small, and it
+    # misses a real flip: mcap_krx_log|cum|0|120 moved 0.1386 -> 0.0495, and
+    # 0.0495 is 0.0505 away from 0.10 against a 2-SE-at-p-hat band of 0.0434.
+    # At p_max=0.10 with 100 replicates the band is 0.060, spanning 0.04..0.16,
+    # which contains both measured flips.
+    standard_error = math.sqrt(max(p * (1.0 - p), 0.0) / repeats)
+    threshold_se = math.sqrt(max(p_max * (1.0 - p_max), 0.0) / repeats)
+    marginal_band = TEMPORAL_MARGINAL_SE_MULTIPLE * threshold_se
+    return {
+        "p_temporal_nw": p,
+        "temporal_null_pass": bool(p < p_max),
+        "temporal_repeats": repeats,
+        "p_temporal_nw_se": standard_error,
+        "temporal_marginal_band": marginal_band,
+        "temporal_null_marginal": bool(abs(p - p_max) <= marginal_band),
+    }
 
 
 # --- A-6a/A-6b replicate-loop orchestration (checkpoint/resume-safe) ---

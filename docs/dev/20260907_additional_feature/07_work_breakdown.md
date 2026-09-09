@@ -18,7 +18,7 @@
 | F-6 | `fin_sue` XBRL 백필 | OpenDART(측정 뒤) | 미착수 | 대상 역산 |
 | F-7 | DS005 이벤트·elestock | 있음 | 미착수 (D-F2 확정: `elestock` 시작 / D-F3: PoC 뒤 6종) | DS005 PoC + `elestock` 스키마 |
 | F-8 | 매크로 2단계 시리즈 | 시리즈 정의 | 미착수 (D-F5 확정: 2단계 먼저) | ECOS item_code 확정 |
-| F-9 | `fin_pit` strict·휴장일·상폐·유니버스·Cronicle | 일부 | F-9.2·**F-9.3 종결**·F-9.7·**F-9.10**·F-9.12·F-9.13·F-9.14 완료 | **F-9.2 prod 배포**(미완) / F-9.1 / F-9.9 / F-9.11 |
+| F-9 | `fin_pit` strict·휴장일·상폐·유니버스·Cronicle | 일부 | F-9.2·**F-9.3 종결**·F-9.7·**F-9.9~F-9.11**·F-9.12·F-9.13·F-9.14 완료 | **F-9.2 prod 배포** / F-9.1 / F-9.4~F-9.6 / F-9.8 |
 | F-HS | 새 config 사전등록·A→B→AB→C | — | **F-HS-1 완료**(`3ca949e6`, 2026-09-09), FS3 인계 완료 | F-HS-C2(F-8 선행) / F-HS-2 |
 
 ---
@@ -183,14 +183,23 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
       — **삭제 뒤 확인(2026-09-09 19:18):** 전체 이벤트 20 → **18**, 삭제 대상 0개 남음. `timing=false`로 남은 7개는 **전부 chain 대상**이므로(`opendart_corp`→`financials`→`share_info`→`xbrl`, `fdr_universe`→`pykrx_prices`→`krx_flows`→`krx_common`, `ecos_common_daily`→`ecos_common_macro`) 고아 수동 이벤트는 없다. 같은 시각 active job은 정상 스케줄 잡 하나(`sdc_kis_flows_trial`, 19:00 시작)뿐이었다
       — 삭제는 `delete_event` API로 했고 둘 다 `{"code":0}`. 지우기 전에 두 이벤트의 정의(`params.script` 포함)를 받아 뒀고, 없어지는 정보는 F-9.14에 옮겨 적었다
 - [ ] **F-9.8** freshness 월 예산 항목
-- [ ] **F-9.9**(새로 생긴 항목) **readiness 게이트 기본 `--required-coverage-ratio 1.0`이 원리상 통과 불가다.** 2026-09-08에서 38개 중 33개, 2026-08-23에서도 18개가 실패한다. 원인 두 가지: (a) `feature_dates` 격자가 일부 시리즈의 `asof_available_date`가 앞서 있어 **오늘을 넘어 뻗고**(09-21까지) 일별 시리즈가 미래 날짜에 값이 없다, (b) YoY 파생은 12개월 이력이 필요해 시작 구간 NULL이 구조적이다(`macro_cpi_yoy_latest` 253개). 고칠 방향은 격자를 마지막 수집 세션으로 clamp하거나 시리즈별 유효 시작 이후만 세는 것이다. 그때까지 이 게이트는 pass/fail로 쓰지 않는다
+- [x] **F-9.9 완료 2026-09-09** readiness 게이트가 기본값에서 통과 가능해졌다. 원인 둘을 다 고쳤고 유닛 13개(`test_readiness_window.py`)
+      — **(a) 격자가 데이터 끝을 넘어 뻗었다.** `available_from_date`는 *예고된* 공개일이라 월별 ECOS 시리즈가 미래 날짜를 정당하게 들고 있다 — snapshot 2026-09-08에서 `macro_cpi`·`macro_consumer_sentiment`가 **2026-09-21**인데 마지막 가격 세션은 09-07이다. raw max를 그대로 쓰면 격자가 10세션 더 뻗고 모든 일별 시리즈가 아직 오지 않은 세션의 결측을 뒤집어쓴다. `_common_feature_calendars`가 이제 마지막 가격 세션으로 clamp한다(`ohlcv_view` 인자가 이미 있었는데 안 쓰이고 있었다). 가격이 관측보다 앞서도 **격자를 늘리지는 않는다** — clamp는 상한 보정이다
+      — **(b) 파생의 워밍업을 결측으로 셌다.** 판정 시작점을 첫 *fact*가 아니라 **첫 non-NULL 값**으로 옮겼다. YoY는 입력 첫날부터 행을 내지만 12개월이 차기 전에는 값을 못 담는다(`macro_cpi_yoy_latest` 253개). 앞머리 NULL 구간은 구멍이 아니라 워밍업이다
+      — **구간 안의 결함은 그대로 잡힌다.** 창을 옮기면 `coverage_report`의 전체 격자 카운트를 재사용할 수 없어(앞머리 NULL도 실제 fact다) `_window_counts`로 창 안에서 다시 센다. 구간 내부 NULL·결측 날짜·PIT 위반은 전부 여전히 blocker다 — 2017-10-10 추석 휴장이 보이는 이유가 그것이다
+      — 잘려나간 워밍업은 `warmup_null_count`로 **보고한다.** YoY가 12개월치를 갖는 것은 정상이고, 없어야 할 피쳐에 큰 값이 찍히면 그건 진짜 발견이다
+      — `coverage_report`는 안 건드렸다. golden(`golden/common_feature_reports.json`)에 얼려 있고 별개 리포트다
 
 - [x] **F-9.10 완료 2026-09-09** `run_spec.json`의 `command_line`이 실제 인자를 버렸다. `command_line = ["horizon_scan", *(argv or [])]`인데 `__main__` 경로는 `argv=None`으로 들어와 `parse_args(None)`이 `sys.argv`를 직접 읽으므로 기록에는 `['horizon_scan']`만 남았다. 2026-08-30 run 넷이 다 그렇다
       — 고친 방법: `effective_argv = list(argv) if argv is not None else sys.argv[1:]`를 한 번 정하고 **파싱과 기록에 같은 리스트**를 쓴다. 같은 버그가 `horizon_scan_phase_c.main`에도 있어 같이 고쳤다
       — `argv=[]`(진짜 인자 없음)과 `argv=None`(인자를 sys.argv에서 읽음)이 `or` 때문에 구분되지 않았던 것이 원인이다. 유닛 4개로 두 호출 형태를 다 박았다
       — **라운드 경계에서 넣었다**(F-HS-1 완료 뒤). 이후 run의 `run_spec` 내용이 바뀌므로 A/B 사이에 넣으면 안 되는 변경이다. `config_hash`는 그대로라 발행된 run의 계보는 영향이 없다
 
-- [ ] **F-9.11**(새로 생긴 항목) **시간 placebo 경계 셀의 `screen_pass`가 층마다 흔들린다.** `temporal_long_cell_repeats=100` / `temporal_p_max=0.10`인데 p≈0.1에서 100회 재추출의 표준오차가 0.030이다. 2026-09-09 run에서 `ev_payout_yield|bucket|60|120`이 0.0891 → 0.1287로 탈락, `mcap_krx_log|cum|0|120`이 0.1386 → 0.0495로 통과했고 **둘 다 다른 통계는 비트 동일**하다. 이동 거리 seed가 `config_hash`를 받으므로(의도된 재추출) 새 층마다 null이 바뀐다. 문턱 근처 셀은 replicate를 늘리거나 Monte Carlo 구간을 같이 보고해야 한다
+- [x] **F-9.11 완료 2026-09-09** 문턱 근처 셀에 Monte Carlo 구간을 같이 보고한다. 유닛 10개(`test_temporal_placebo_marginal.py`)
+      — **판정 규칙은 안 바꿨다.** `temporal_p_max`·`temporal_long_cell_repeats`는 얼린 config에 있고 결과를 보고 그것을 움직이는 것이 사전등록이 막으려는 바로 그것이다. replicate를 늘리는 쪽은 config 변경이라 새 층이 된다. 바뀐 것은 **노이즈 안에서 갈린 판정에 표시가 붙는다**는 것뿐이다
+      — 새 출력 셋: `p_temporal_nw_se`(추정치 자체의 오차), `temporal_marginal_band`, `temporal_null_marginal`. 카드와 placebo 절이 `(marginal: within 2 MC SE of p_max, ±0.060)`을 붙인다
+      — **밴드는 관측된 p̂이 아니라 `p_max`에서 잰다.** p̂에서 재면 p가 작은 곳에서 밴드가 좁아져 측정된 flip 하나를 놓친다 — `mcap_krx_log|cum|0|120`의 0.0495는 0.10에서 0.0505 떨어져 있는데 p̂ 기준 2-SE는 0.0434다. `p_max=0.10`·100 replicate 기준 밴드는 0.060이고 구간 0.04~0.16이 **측정된 flip 둘을 다 담는다**
+      — 답하는 질문이 다르기 때문이다: "재추출이 이 셀을 문턱 반대편으로 보낼 수 있나"는 `p_max` 근방에 대한 진술이다
 - [x] **F-9.12 완료 2026-09-09** `register_phase_b_marts`가 계약 불일치를 재빌드로 처리한다. `--force` 플래그를 붙이는 쪽은 택하지 않았다 — 사람이 미리 알아야 하고, 이미 맞는 마트까지 전부 다시 만든다. 지금은 **불일치한 것만** 다시 만든다
       — `research/etl/mart.py`에 `StaleMartContract(RuntimeError)`를 두고 9개 raise 자리를 옮겼다. 메시지 문자열로 구분하면 문구가 바뀔 때 조용히 안 걸리기 때문이다. `RuntimeError` 하위라 기존 `except RuntimeError`와 `pytest.raises(RuntimeError, match=...)`는 그대로 동작한다
       — `register_mart_view`의 raise도 같은 타입으로 바꿨지만 **동작은 안 바꿨다.** A0 마트를 bind할 때 불일치하면 A0와 Phase B의 config가 다르다는 뜻이므로 죽는 것이 맞다
