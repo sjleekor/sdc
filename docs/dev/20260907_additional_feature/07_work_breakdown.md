@@ -14,7 +14,7 @@
 | F-2 | 통계적 peer 관계 피쳐 | 없음 | **완료**(`relation_stat_v2`, 2026-09-09) | **F-HS-1에서 19 cell 등급 A `screen_pass`.** 양방향 2건 부호 `−`로 확정 |
 | F-3 | 업종 관계 피쳐 | 없음(F-1 선행) | 대기(D-F1) — 선행 마트는 준비됨 | 비-seed 3쌍(2026-12-01 스냅샷) 뒤 판정 |
 | F-4 | 재무위험·생애주기·전이 | 없음 | **완료**(`fin_risk_v2`, 2026-09-08) | **F-HS-1에서 13 cell `screen_pass`, 전부 등급 B 상한**(측정된 `revision` 경고). 양방향 4건 부호 확정 |
-| F-5 | `metric_rules` 확장 | 없음(매핑) | **F-5.0·F-5.1 완료**(2026-09-09) | F-5.2 규칙 등록(29 → **34**) |
+| F-5 | `metric_rules` 확장 | 없음(매핑) | **F-5.0~F-5.3 완료**(2026-09-09) | F-5.4 파생 family **3개** |
 | F-6 | `fin_sue` XBRL 백필 | OpenDART(측정 뒤) | 미착수 | 대상 역산 |
 | F-7 | DS005 이벤트·elestock | 있음 | 미착수 (D-F2 확정: `elestock` 시작 / D-F3: PoC 뒤 6종) | DS005 PoC + `elestock` 스키마 |
 | F-8 | 매크로 2단계 시리즈 | 시리즈 정의 | 미착수 (D-F5 확정: 2단계 먼저) | ECOS item_code 확정 |
@@ -121,7 +121,12 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
 - [x] **F-5.2 완료 2026-09-09** catalog 5 + 규칙 26개 추가 → **catalog 29 → 34, 규칙 129 → 155**. 유닛 9개(`test_metric_rules_ext.py`)
       — 기존 29 metric **golden 불변 확인**: 전체 유닛 스위트 통과. 새 규칙의 `rule_code`가 기존 것과 하나도 겹치지 않고, 29 metric 어느 것도 새 규칙을 받지 않는다는 것을 불변식으로 박았다
       — fallback 우선순위 규약도 테스트로 박았다: 새 metric의 XBRL fallback은 전부 statement 규칙보다 **낮은 우선순위**다(공백만 메우고 보고된 값을 덮지 않는다)
-- [ ] **F-5.3** vintage 재빌드, 역산 비율 기록 — **측정 중.** canonical snapshot은 건드리지 않는다: `build_stock_metric_vintage_fact_sql()`을 **in-memory**로 돌린다(F-5.0의 `data_lake_f50/` 심볼릭 링크 lake보다 간단하고, F-HS-1이 발행한 2026-09-08 feature_mart를 아예 안 만진다)
+- [x] **F-5.3 완료 2026-09-09** vintage 3,301,030행을 in-memory로 재빌드해 측정 → [`poc/metric_rules_ext.md`](poc/metric_rules_ext.md) §10~§12. **canonical snapshot은 안 건드렸다** — F-HS-1이 발행한 2026-09-08 `feature_mart`를 아예 만지지 않는다(F-5.0의 심볼릭 링크 lake보다 간단하다)
+      — 다섯 개 다 문턱을 넘어 **표본 시작은 전부 2015**다. `current_assets`·`current_liabilities`는 0.998~1.001로 참조 metric과 같은 급이다
+      — **역산 비율이 참조 metric과 똑같다**: 2015~2018은 99% 이상이 XBRL fallback인데 `total_assets`·`total_liabilities`가 이미 그렇게 작동해 왔다(statement 규칙이 `ifrs-full_` 철자만 매핑하고 2018년 이전 FS 행은 `ifrs_`를 쓴다). 신규 metric이 더 역산에 기대는 것이 **아니다**
+      — 기록할 한계 둘. (a) `retained_earnings`의 2015~2016은 raw 0.959인데 **vintage 0.72**다(나머지 넷은 raw와 vintage가 거의 같다). 0.5는 넘으므로 표본 시작은 2015이지만 그 두 해의 횡단면이 72%임을 카드에 적는다. (b) **차입금은 최근으로 갈수록 나빠진다** — 단기 0.826(2015) → 0.552(2025), 장기 0.714 → **0.495**(2025년 문턱 아래). 방향이 보통과 반대다
+      — (b)의 원인은 2023년 이후 taxonomy로 보인다. `ifrs-full_Borrowings`(1,118 법인)와 `ifrs-full_BorrowingsInterestRate`(1,095 법인)가 2023년부터만 있고 둘 다 차입금 명세 주석 모양이다. **성분에 붙이지 않았다** — 이름이 합계이고 커버리지가 0.40이라 붙이면 어떤 법인은 단기만, 어떤 법인은 총액을 담아 분자의 뜻이 법인에 따라 달라진다. 행 수로는 판정할 수 없다
+      — `borrowings_long_term`만 2015~2022 역산이 0%다. 주 규칙 `dart_LongTermBorrowingsGross`가 statement 쪽에서 2015~2026을 고르게 덮는다(87,019행 / 2,384 법인) — 철자 문제가 없는 유일한 신규 metric이다
 - [ ] **F-5.4** 파생 family **3개**(`fin_current_ratio`, `fin_borrowings_to_mcap`, `fin_altman_z` **완전판**) → F-HS-2 또는 3. ~~`fin_rnd_to_sales`·`fin_bm_intangible_adj`~~는 F-5.1에서 재료가 없어 취소됐다
 
 ### F-6 `fin_sue` 백필 (`04` §1)
