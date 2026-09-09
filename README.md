@@ -37,12 +37,13 @@ cp .env.example .env
 # `dart` 계열 명령은 OPENDART_API_KEY 또는 OPENDART_API_KEYS가 반드시 설정되어야 동작합니다
 # `common sync --sources ecos/fred`는 ECOS_API_KEY / FRED_API_KEY가 필요합니다
 # `flows sync-kis`는 KIS_APP_KEY / KIS_APP_SECRET이 필요합니다
+# `universe sync --source krx-openapi`, `prices market-cap-backfill`은 AUTH_KEYS(KRX Open API)가 필요합니다
 
 # 3. 데이터베이스 스키마 초기화
 uv run krx-collector db init
 
 # 4. 종목 유니버스 동기화
-uv run krx-collector universe sync --source fdr --markets kospi,kosdaq
+uv run krx-collector universe sync --source krx-openapi --markets kospi,kosdaq
 
 # 5. 일봉(OHLCV) 데이터 백필(수집) — 최초 1회: 전체 히스토리 수집
 uv run krx-collector prices backfill --market all
@@ -474,7 +475,7 @@ docker build -t ghcr.io/sjleekor/sdc:latest .
 
 ```bash
 docker run --rm --env-file .env ghcr.io/sjleekor/sdc:latest db init
-docker run --rm --env-file .env ghcr.io/sjleekor/sdc:latest universe sync --source fdr --markets kospi,kosdaq
+docker run --rm --env-file .env ghcr.io/sjleekor/sdc:latest universe sync --source krx-openapi --markets kospi,kosdaq
 docker run --rm --env-file .env ghcr.io/sjleekor/sdc:latest prices backfill --market all --incremental
 ```
 
@@ -506,7 +507,7 @@ docker compose up -d
 docker compose run --rm collector db init
 
 # 4. 종목 유니버스 동기화
-docker compose run --rm collector universe sync --source fdr --markets kospi,kosdaq
+docker compose run --rm collector universe sync --source krx-openapi --markets kospi,kosdaq
 
 # 5. 일봉 증분 수집
 docker compose run --rm collector prices backfill --market all --incremental

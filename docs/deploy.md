@@ -57,12 +57,12 @@ Cronicle script는 `set -euo pipefail`을 사용하므로 앞 단계 래퍼가 �
 ### 1. `universe-sync.sh`
 
 ```bash
-docker compose run --rm collector universe sync --source fdr --markets kospi,kosdaq
+docker compose run --rm collector universe sync --source krx-openapi --markets kospi,kosdaq
 ```
 
 | 항목 | 내용 |
 |---|---|
-| 외부 source | FinanceDataReader `StockListing("KOSPI")`, `StockListing("KOSDAQ")`; 실패 시 pykrx fallback |
+| 외부 source | KRX Open API `sto/stk_isu_base_info`, `sto/ksq_isu_base_info` (`AUTH_KEYS` 필요, T+1 발행이라 최대 10일 뒤로 탐색). 2026-09-09까지는 FinanceDataReader였다 |
 | 주요 read table | `stock_master` |
 | write table | `stock_master_snapshot`, `stock_master_snapshot_items`, `stock_master`, `ingestion_runs` |
 | `ingestion_runs.run_type` | `universe_sync` |

@@ -4,16 +4,24 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/lib/sdc-wrapper.sh"
 
-# Still --source fdr, and that is a pending item rather than a choice (K-5).
+# --source krx-openapi since 2026-09-09 (K-5). fdr is not a fallback: it broke.
 #
-# fdr reads its listing rows from a GitHub CSV cache, but calls
-# data.krx.co.kr/comm/bldAttendant/executeForResourceBundle.cmd twice per
-# invocation — the second one a duplicate — purely to read max_work_dt. Four
-# anonymous MDC requests a day, outside our throttle and outside our
-# accounting.
+# fdr never read the listing from KRX. It read max_work_dt off
+# data.krx.co.kr/comm/bldAttendant/executeForResourceBundle.cmd (twice per
+# invocation, the second a duplicate) and then pulled that date's CSV from the
+# FinanceData/fdr_krx_data_cache GitHub repo. That cache stopped publishing
+# after 2026-09-07.csv, so every run from 2026-09-08 died on `HTTP Error 404`
+# — and this event is the head of the daily chain, with no chain_error, so
+# prices, flows and krx common did not run either for two sessions.
 #
-# `--source krx-openapi` replaces it with the official endpoint, and brings a
-# real LIST_DD instead of FDR's best-effort listing-date column. It needs
-# AUTH_KEYS in this host's .env, which prod does not have yet. Flip this line
-# in the same change that adds the key.
-sdc_run_daily_collector fdr universe sync --source fdr --markets kospi,kosdaq
+# The official endpoint also removes the four unaccounted anonymous MDC
+# requests a day and brings a real LIST_DD instead of FDR's best-effort
+# listing-date column. It needs AUTH_KEYS, which prod has had since
+# 2026-08-18. It publishes T+1, which the provider absorbs by walking back up
+# to 10 days for the latest published day.
+#
+# Lock domain moves fdr -> krx_marketdata with the source, matching the other
+# two krx-openapi wrappers (prices-market-cap-backfill,
+# universe-backfill-snapshots). It is the head of the chain, so it takes the
+# lock uncontested; the cost is at most the 60s krx_marketdata throttle.
+sdc_run_daily_collector krx_marketdata universe sync --source krx-openapi --markets kospi,kosdaq

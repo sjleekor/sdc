@@ -22,7 +22,7 @@ KRX 정규장 시간: 09:00–15:30 KST. 당일의 온전한 데이터를 확보
 # │ │ │ │ ┌───── 요일 (dow)
 # │ │ │ │ │
 # 종목 유니버스 동기화 — 매일 16:00 KST (평일)
-  0  16  *  *  1-5  cd /opt/krx-data-pipeline && uv run krx-collector universe sync --source fdr
+  0  16  *  *  1-5  cd /opt/krx-data-pipeline && uv run krx-collector universe sync --source krx-openapi
 
 # 일봉 OHLCV 수집 (증분) — 매일 16:30 KST (평일)
 # --incremental: 각 티커의 MAX(trade_date) 이후만 가져오므로 일일 catch-up이 빠릅니다.
@@ -171,7 +171,7 @@ ORDER BY sm.listing_date DESC, sm.ticker;
 `stock_master` 데이터가 꼬였거나 완전히 새로 덮어쓰고 싶을 때 사용합니다:
 
 ```bash
-uv run krx-collector universe sync --source fdr --full-refresh
+uv run krx-collector universe sync --source krx-openapi --full-refresh
 ```
 
 증분 비교(Diff)를 계산하지 않고 기존 데이터를 모두 새 데이터로 교체합니다.
@@ -575,7 +575,7 @@ bin/parquet-compute-all.sh --from-step reports --required-coverage-ratio 0.0
 
 | 경로 | 문 | 상태 |
 |---|---|---|
-| `universe sync --source fdr` | **익명** (MDC 메타데이터 2요청 × 시장) | 매일 18:30 — **prod에 `AUTH_KEYS`가 들어오면 `--source krx-openapi`로 바꾼다** |
+| ~~`universe sync --source fdr`~~ | ~~**익명** (MDC 메타데이터 2요청 × 시장)~~ | **닫혔다.** 2026-09-09부터 prod는 `--source krx-openapi` (K-5). fdr이 행을 읽던 GitHub CSV 캐시가 `2026-09-07.csv`에서 멈춰 404가 났다 |
 | `flows sync` | MDC 로그인 | **KIS 6개 지표로 전환.** KIS 정기 이벤트를 등록했고, `short_selling_balance_quantity` 보완 때문에 기존 KRX 체인은 유지한다 |
 | `common sync --sources krx` | MDC 로그인 | 매일 (체인) — 대체재 없음 |
 | ~~`prices backfill`~~ | ~~pykrx 로그인~~ | **닫혔다.** naver 직접 어댑터가 기본값 |
