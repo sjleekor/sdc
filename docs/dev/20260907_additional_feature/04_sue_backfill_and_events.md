@@ -15,18 +15,19 @@
 
 1. `dart_filing_receipt_raw`에서 정기보고서(사업·반기·분기) **원본 접수**(정정 제외) 목록을 뽑는다. 2015~2025, `report_nm`·`rcept_no`·`corp_code`.
 2. `dart_xbrl_document`에 그 `rcept_no`의 XBRL이 있는지 대조한다. 없는 접수가 백필 대상 후보다.
-3. `fin_sue`가 요구하는 것은 **분기 EPS 연속 8개 + 이번 분기**다. 법인별로 "연속 9분기가 되기 위해 빠진 접수"만 대상으로 좁힌다. 이미 8개가 안 되는 구간을 다 채울 필요는 없다.
+3. `fin_sue`가 요구하는 것은 **분기 EPS 연속 8개 + 이번 분기**다(F-6.1에서 코드로 확인: `comparative_eps`가 같은 보고서의 `value_lag_4q`라 보고서 하나가 `seasonal_change` 하나를 만든다 — 13분기가 아니다). 법인별로 "연속 9분기가 되기 위해 빠진 접수"만 대상으로 좁힌다. **아홉 분기 중 하나라도 제출되지 않은 창은 제외한다** — 받아도 완성되지 않는다.
 4. 규모 측정 산출물: `results/sue_backfill_targets_2026MM.md` — 법인 수, 접수 수, 연도 분포, 예상 호출 수. **측정 전에는 규모를 말하지 않는다.** 참고로 정기보고서 정정은 2022~2025 5,041건이었다(`08` §4.3).
 
 ### 1.3 실행
 
 ```bash
 # 대상 파일 생성 (신규 스크립트)
-uv run --extra analysis python -m research.analysis.sue_backfill_targets --snapshot-date 2026-08-23 --out targets/sue_xbrl_targets.csv
+uv run python -m research.analysis.sue_backfill_targets --snapshot-date 2026-09-08 --source sj2_remote --out targets/sue_xbrl_targets.jsonl
 # 백필 (기존 CLI)
 uv run krx-collector dart backfill-xbrl-receipts --targets-file targets/sue_xbrl_targets.csv --rate-limit-seconds 0.2
 ```
 
+- 대상 파일은 **JSON lines**다(`ticker`·`corp_code`·`bsns_year`·`reprt_code`·`rcept_no`) — 위 `.csv`는 F-6.1에서 정정했다.
 - `dart backfill-xbrl-receipts`는 `(corp, filing, receipt)` 목록을 받아 XBRL을 받는다. `--force`는 쓰지 않는다(있는 문서는 skip).
 - 다중 키 rotation, 일 한도 도달 시 exit 75 → 다음 날 재개(skip-if-present). 대상이 수만 건이면 slice ledger를 쓰는 편이 안전하다 — 규모 측정 뒤 결정.
 - prod에서 돌린다(raw는 prod Postgres). `opendart` lock 공유, 04:00 체인·23:30 filings와 겹치지 않는 시간대.

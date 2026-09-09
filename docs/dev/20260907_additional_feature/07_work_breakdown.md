@@ -15,7 +15,7 @@
 | F-3 | 업종 관계 피쳐 | 없음(F-1 선행) | 대기(D-F1) — 선행 마트는 준비됨 | 비-seed 3쌍(2026-12-01 스냅샷) 뒤 판정 |
 | F-4 | 재무위험·생애주기·전이 | 없음 | **완료**(`fin_risk_v2`, 2026-09-08) | **F-HS-1에서 13 cell `screen_pass`, 전부 등급 B 상한**(측정된 `revision` 경고). 양방향 4건 부호 확정 |
 | F-5 | `metric_rules` 확장 | 없음(매핑) | **F-5.0~F-5.3 완료**(2026-09-09) | F-5.4 파생 family **3개** |
-| F-6 | `fin_sue` XBRL 백필 | OpenDART(측정 뒤) | 미착수 | 대상 역산 |
+| F-6 | `fin_sue` XBRL 백필 | OpenDART **22,700 호출**(측정됨) | **F-6.1 완료**(2026-09-09) | F-6.2 prod 백필(키 예산 2일) |
 | F-7 | DS005 이벤트·elestock | 있음 | 미착수 (D-F2 확정: `elestock` 시작 / D-F3: PoC 뒤 6종) | DS005 PoC + `elestock` 스키마 |
 | F-8 | 매크로 2단계 시리즈 | 시리즈 정의 | 미착수 (D-F5 확정: 2단계 먼저) | ECOS item_code 확정 |
 | F-9 | `fin_pit` strict·휴장일·상폐·유니버스·Cronicle | 일부 | F-9.2·**F-9.3 종결**·F-9.7·**F-9.9~F-9.11**·F-9.12·F-9.13·F-9.14 완료 | **F-9.2 prod 배포** / F-9.1 / F-9.4~F-9.6 / F-9.8 |
@@ -131,7 +131,13 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
 
 ### F-6 `fin_sue` 백필 (`04` §1)
 
-- [ ] **F-6.1** 대상 역산 스크립트 + 측정 문서(법인·접수·호출 수)
+- [x] **F-6.1 완료 2026-09-09** `research/analysis/sue_backfill_targets.py` + 유닛 12개 → [`results/sue_backfill_targets_202609.md`](results/sue_backfill_targets_202609.md). 수집 0
+      — **필요한 것은 13분기가 아니라 연속 9분기다.** `sue_event.py`의 `comparative_eps`가 `value_lag_4q` — **같은 보고서 안의 비교 컬럼**이라(`comparative_policy='as_was_lag4q'`) 보고서 하나가 `seasonal_change` 하나를 만든다. `history_count >= 8` + 자기 자신 = 9. 비교값이 4분기 전 보고서에서 왔다면 13개였다
+      — 규모: 원본 정기보고서 **110,687건 / 3,407 법인**, XBRL 없는 접수 25,370건, 그중 **대상 22,700건 / 2,807 법인**(10.5% 제외)
+      — **좁히기의 핵심은 "채울 수 없는 창"이다**(7,041개). 아홉 분기 중 하나라도 애초에 제출되지 않았으면 아무리 받아도 완성되지 않으므로 그 안의 결측은 대상이 아니다. 창 판정: 완성 가능 48,810 / 이미 완성 33,141 / 채울 수 없음 7,041
+      — 연도 분포는 **2015년이 지배적**이다(대상 6,267건). 2015년은 원본 접수 8,036건 중 6,791건이 XBRL이 없다(84.5%). 2016~2023은 연 1,400~1,900건, 2024~2025는 650~1,130건
+      — 호출 **약 22,700회**. 키 2개면 2일. slice ledger를 **쓴다**(여러 날에 걸친다). F-9.3과 달리 회수 불가 대상이 반복되는 문제는 없다 — 대상은 제출된 보고서이고 없는 것은 XBRL 문서뿐이다
+      — **정정:** `04` §1.3의 `--out targets/sue_xbrl_targets.csv`는 확장자가 틀렸다. `backfill-xbrl-receipts`가 파싱하는 것은 **JSON lines**다(`cli/app.py`). 대상 파일은 저장소에 넣지 않는다 — 같은 snapshot에서 그대로 재생성된다
 - [ ] **F-6.2** prod 백필 실행(`dart backfill-xbrl-receipts --targets-file`), exit 75 재개, 완료 기록
 - [ ] **F-6.3** 새 snapshot 재빌드 → `effective_start`·coverage 확인 → 기존 사전등록으로 재판정(F-HS-1과 같은 snapshot)
 
