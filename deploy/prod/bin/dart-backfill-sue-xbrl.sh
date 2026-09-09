@@ -12,7 +12,16 @@
 # WHY A DRIVER AND NOT ONE LONG RUN
 #
 # Measured on 50 targets, 2026-09-09 22:58 KST: 28 s, so 1.79 req/s and the
-# whole file is about 3 h 31 min. That is far too long to stop before a
+# whole file is about 3 h 31 min at a 0.2 s rate limit.
+#
+# RATE LIMIT 0.1, NOT 0.2. Of that 0.56 s per target, 0.2 s was the deliberate
+# sleep and about 0.26 s the API round trip plus zip parse, so halving the sleep
+# takes the file to roughly 2 h 22 min -- 38 minutes of margin against a
+# deadline that matters. 0.1 is not a new number: dart-backfill-s1-remainder.sh
+# has used it as its default all along, and F-9.3 sustained 131,292 requests
+# over 5 h 45 min at 6.34 req/s with zero failures. This backfill peaks around
+# 2.8 req/s, well inside that. A throttle answer is retried and rotated across
+# the nine keys anyway, so the downside is a slower chunk, not a lost one. That is far too long to stop before a
 # scheduled opendart job, and F-9.3 established the rule this driver follows —
 # a wall-clock guard only holds if the work unit is shorter than the interval
 # between checks. So the unit here is one chunk of DART_SUE_CHUNK_SIZE targets:
@@ -24,12 +33,26 @@
 #
 #   1. Self lock (non-blocking). Two overlapping triggers must not both drive
 #      the queue; the second exits 0 rather than fighting for the opendart lock.
-#   2. Blackout 02:30-05:00. The daily chain runs 04:00-04:04. A chunk admitted
-#      at 02:29 ends about 02:34, so the margin is over an hour.
+#   2. Blackout 03:40-05:00. The daily chain runs 04:00-04:04, and what has to
+#      hold is that no chunk owns the opendart lock when it starts.
+#
+#      The S-1 driver uses 02:30 for this because its work unit is about 35
+#      minutes: a unit admitted at 02:29 ends around 03:05, and the 90-minute
+#      gap is what makes that safe. This driver's unit is about 4 minutes, so
+#      the same gap is 20x larger than the thing it protects against. 03:40
+#      keeps a real margin proportional to the unit -- a chunk admitted at
+#      03:39 ends about 03:43, 17 minutes clear -- and the failure mode needs
+#      more than that anyway: the chain waits 900 s for the lock before giving
+#      up, so a chunk would have to run past 04:15, four times its measured
+#      length, to break it.
+#
+#      Nothing else is scheduled between 00:00 and 04:00 (verified against
+#      get_schedule 2026-09-09: the neighbouring jobs are 23:00, 23:30 and
+#      04:00), so this opens 00:00-03:40 as one continuous window.
 #   3. Deadline 23:00. `sdc_daily_opendart_filings` runs 23:30-23:44 and shares
 #      both the opendart lock and the API quota. As in the S-1 driver the
 #      deadline closes only the evening side, so a 00:10 trigger is admitted and
-#      the 00:00-02:30 stretch is usable.
+#      the 00:00-03:40 stretch is usable.
 #
 # Each chunk takes and releases the opendart lock itself, so the lock is free
 # between chunks and a daily job can slip in even inside an open window.
@@ -62,8 +85,8 @@ source "$script_dir/lib/sdc-wrapper.sh"
 targets_file="${DART_SUE_TARGETS_FILE:-/home/whi/apps/sdc/targets/sue_targets.jsonl}"
 chunk_dir="${DART_SUE_CHUNK_DIR:-/home/whi/apps/sdc/targets/chunks}"
 chunk_size="${DART_SUE_CHUNK_SIZE:-500}"
-rate_limit_seconds="${DART_SUE_RATE_LIMIT_SECONDS:-0.2}"
-blackout_start="${DART_SUE_BLACKOUT_START:-0230}"
+rate_limit_seconds="${DART_SUE_RATE_LIMIT_SECONDS:-0.1}"
+blackout_start="${DART_SUE_BLACKOUT_START:-0340}"
 blackout_end="${DART_SUE_BLACKOUT_END:-0500}"
 deadline="${DART_SUE_DEADLINE:-2300}"
 self_lock="${DART_SUE_LOCK_FILE:-$SDC_LOCK_DIR/sue-xbrl.lock}"
@@ -152,7 +175,8 @@ main() {
   export SDC_LOCK_WAIT_SECONDS="${DART_SUE_LOCK_WAIT_SECONDS:-900}"
   export SDC_LOCK_CONFLICT_MODE=fail
 
-  local processed=0 rc=0
+  local total processed=0 rc=0 walked_all=1
+  total=$(find "$chunk_dir" -maxdepth 1 -name 'chunk-*.jsonl' | wc -l)
   # `for` over a glob, and every child gets </dev/null. F-9.14: a
   # `while read` fed by a heredoc loses its input because `docker compose run`
   # inherits stdin and consumes the rest of it, so the loop silently does one
@@ -162,6 +186,7 @@ main() {
     [[ -e "$chunk" ]] || break
     if window_closed; then
       sdc_log "stopping before $(basename "$chunk"); $processed chunk(s) run this pass"
+      walked_all=0
       break
     fi
     sdc_with_source_lock opendart run_chunk "$chunk" < /dev/null
@@ -177,7 +202,14 @@ main() {
     fi
   done
 
-  sdc_log "pass complete: $processed chunk(s) run"
+  sdc_log "pass complete: $processed of $total chunk(s) run"
+  # Every chunk walked means every target was attempted. Anything still without
+  # a document after that is a `no_data` answer, which the ledger has retired
+  # permanently -- so this, not a coverage query, is the completion condition,
+  # and it is printed as a fixed token so a driving loop can test for it.
+  if (( walked_all == 1 && processed == total && total > 0 )); then
+    sdc_log "SUE_BACKFILL_COMPLETE: all $total chunk(s) walked"
+  fi
   return 0
 }
 
