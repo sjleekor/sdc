@@ -18,7 +18,7 @@
 | F-6 | `fin_sue` XBRL 백필 | OpenDART(측정 뒤) | 미착수 | 대상 역산 |
 | F-7 | DS005 이벤트·elestock | 있음 | 미착수 (D-F2 확정: `elestock` 시작 / D-F3: PoC 뒤 6종) | DS005 PoC + `elestock` 스키마 |
 | F-8 | 매크로 2단계 시리즈 | 시리즈 정의 | 미착수 (D-F5 확정: 2단계 먼저) | ECOS item_code 확정 |
-| F-9 | `fin_pit` strict·휴장일·상폐·유니버스·Cronicle | 일부 | **F-9.3 종결**(2026-09-08, 더 받을 것 없음) | F-9.1 / F-9.2 |
+| F-9 | `fin_pit` strict·휴장일·상폐·유니버스·Cronicle | 일부 | F-9.2·**F-9.3 종결**·F-9.7·F-9.12·F-9.13 완료 | F-9.1 / **F-9.14**(월말 스냅샷 2019~2025 공백) |
 | F-HS | 새 config 사전등록·A→B→AB→C | — | **F-HS-1 완료**(`3ca949e6`, 2026-09-09), FS3 인계 완료 | F-HS-C2(F-8 선행) / F-HS-2 |
 
 ---
@@ -145,19 +145,18 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
 - [ ] **F-9.4** S-2: `universe backfill-master` → 상폐 종목 `prices backfill`
 - [ ] **F-9.5** S-3: `delisted_date` 확정, 상폐 종목 라벨 정책 문서화
 - [ ] **F-9.6** `dim_universe_daily_krx`(`daily_market_cap` 기준) + 집합 차이 리포트
-- [~] **F-9.7** Cronicle 정리 — 부분 완료 2026-09-08
+- [x] **F-9.7 완료** Cronicle 정리 — 2026-09-08 시작, **2026-09-09 마무리**
       — [x] 월 corp-profile 이벤트 등록(F-1.6과 같은 항목)
       — [x] `emsugdoe907`("SDC Backfill DART Corp Profile (one-time)") **삭제**. 2026-08-15에 1회 1,300.6초 실행 code=0으로 목적 달성, `--force`가 없어 월 스냅샷으로는 못 쓴다
       — [x] `sdc_backfill_s1_remainder` **삭제**(F-9.3 종결, 이유는 그쪽 §4)
-      — [ ] `emsugmrjp0a`("SDC Backfill N3 Universe Snapshots (one-time)") 삭제 — `timing=manual`이라 자동으로 안 돌고 급하지 않다. `06` §4가 삭제 대상으로 지목
-            **2026-09-09 조회:** 아직 있다(`enabled=1`, `timing=false`). 마지막 실행은 2026-08-16 09:06 `jmsv1p53q0n`, 3,699초 뒤 **수동 abort**(code=1) — KRX가 이 호스트를 막은 날이다. 그 앞 2026-08-15 23:53 `jmsuhx5wl0d`는 code=0
-      — [ ] `emr0r4xgb0h`("SDC Common Backfill 2015 (one-time)") — 검증 후 삭제 대상(별건)
-            **2026-09-09 조회:** 아직 있다(`enabled=1`, `timing=false`). 마지막 실행 2026-07-04 06:08 `jmr5fdw6c0e`가 **32,174초(8시간 56분) code=0으로 완주**했다. 그 앞 세 번(`jmr0r6nir0i`·`jmr23rbc20y`·`jmr4nuu1n01`)은 code=1이다. 남은 것은 커버리지 검증과 이벤트 삭제뿐이다
+      — [x] `emsugmrjp0a`("SDC Backfill N3 Universe Snapshots (one-time)") **삭제 2026-09-09** (`{"code":0}`). `06` §4가 삭제 대상으로 지목했다
+            지우기 전 실측: 마지막 실행 2026-08-16 09:06 `jmsv1p53q0n`, 3,699초 뒤 **수동 abort**(code=1) — KRX가 이 호스트를 막은 날이다. 그 앞 2026-08-15 23:53 `jmsuhx5wl0d`는 code=0으로 2014~2018을 넣었다. **남은 데이터 공백은 F-9.14**이고 스크립트를 되살리는 방식이 아니다(pykrx 경로)
+      — [x] `emr0r4xgb0h`("SDC Common Backfill 2015 (one-time)") **삭제 2026-09-09** (`{"code":0}`)
+            지우기 전 실측: 마지막 실행 2026-07-04 06:08 `jmr5fdw6c0e`가 **32,174초(8시간 56분) code=0으로 완주**했다. 그 앞 세 번(`jmr0r6nir0i`·`jmr23rbc20y`·`jmr4nuu1n01`)은 code=1이다. 백필은 그때 끝나 있었고 남은 것이 이벤트 삭제뿐이었다
       — 같은 조회에서 확인한 것: 전체 20 이벤트, active job 0, `sdc_backfill_s1_remainder`와 `emsugdoe907`은 실제로 없다(삭제 반영됨), `sdc_monthly_corp_profile_history`는 `timing={1일 05:30}`·`catch_up=1`·`max_children=1`·`timeout=5400`으로 등록돼 있다. `manual`로 보이는 일별 이벤트 7개는 전부 chain으로 걸려 있다(`opendart_corp`→`financials`→`share_info`→`xbrl`, `fdr_universe`→`pykrx_prices`→`krx_flows`→`krx_common`, `ecos_common_daily`→`ecos_common_macro`)
       — 월 insider(F-7.5)·일 major-events(F-7)는 수집기가 아직 없어 해당 없음
-      — **2026-09-09: 두 이벤트 삭제를 시도했으나 도구 정책이 prod 스케줄러 mutation을 막았다.** 삭제 명령은 사람이 실행한다:
-        `curl -fsS -X POST -H "X-API-Key: $APIKEY" -H 'Content-Type: application/json' -d '{"id":"<event-id>"}' http://sj2-server:3012/api/app/delete_event/v1`
-        지우기 전에 두 이벤트의 정의(`params.script` 포함)를 받아 뒀고, 없어지는 정보는 아래 F-9.14에 옮겨 적었다
+      — **삭제 뒤 확인(2026-09-09 19:18):** 전체 이벤트 20 → **18**, 삭제 대상 0개 남음. `timing=false`로 남은 7개는 **전부 chain 대상**이므로(`opendart_corp`→`financials`→`share_info`→`xbrl`, `fdr_universe`→`pykrx_prices`→`krx_flows`→`krx_common`, `ecos_common_daily`→`ecos_common_macro`) 고아 수동 이벤트는 없다. 같은 시각 active job은 정상 스케줄 잡 하나(`sdc_kis_flows_trial`, 19:00 시작)뿐이었다
+      — 삭제는 `delete_event` API로 했고 둘 다 `{"code":0}`. 지우기 전에 두 이벤트의 정의(`params.script` 포함)를 받아 뒀고, 없어지는 정보는 F-9.14에 옮겨 적었다
 - [ ] **F-9.8** freshness 월 예산 항목
 - [ ] **F-9.9**(새로 생긴 항목) **readiness 게이트 기본 `--required-coverage-ratio 1.0`이 원리상 통과 불가다.** 2026-09-08에서 38개 중 33개, 2026-08-23에서도 18개가 실패한다. 원인 두 가지: (a) `feature_dates` 격자가 일부 시리즈의 `asof_available_date`가 앞서 있어 **오늘을 넘어 뻗고**(09-21까지) 일별 시리즈가 미래 날짜에 값이 없다, (b) YoY 파생은 12개월 이력이 필요해 시작 구간 NULL이 구조적이다(`macro_cpi_yoy_latest` 253개). 고칠 방향은 격자를 마지막 수집 세션으로 clamp하거나 시리즈별 유효 시작 이후만 세는 것이다. 그때까지 이 게이트는 pass/fail로 쓰지 않는다
 
