@@ -163,12 +163,38 @@ def run(
     return 0
 
 
+def _build_industry_pit_if_present(con, cfg: LakeConfig, materialize) -> None:
+    """Build ``dim_industry_pit_daily``, or skip a lake that predates its raw input.
+
+    ``dart_corp_profile_history`` arrived with F-1.1 (2026-09-08), so every
+    snapshot exported before then simply has no such table and every snapshot
+    after it does. A missing raw input is the one condition under which this
+    mart is skipped rather than built; the empty-history case is a *failure*
+    (``compute_industry_observations`` raises), because a lake that carries the
+    table but no row means the monthly collection is broken, not absent.
+    """
+    import duckdb
+
+    from research.etl.lake import register_views
+
+    try:
+        register_views(con, cfg, tables=["dart_corp_profile_history"])
+        materialize(con, cfg, force=False)
+    except (duckdb.Error, FileNotFoundError) as exc:
+        _eprint(
+            "WARNING: dim_industry_pit_daily skipped — dart_corp_profile_history "
+            f"is not in this lake ({exc.__class__.__name__}). Snapshots before "
+            "2026-09-08 predate F-1.1."
+        )
+
+
 def _build_features(con, cfg: LakeConfig) -> None:
     """Build the A0 price/flow/label inputs plus legacy model feature views."""
     from research.etl.calendar import materialize_calendar
     from research.etl.features import common as cf_feat
     from research.etl.features import fin_pit
     from research.etl.features.flow import materialize_flow
+    from research.etl.features.industry_pit import materialize_industry_pit
     from research.etl.features.macro_exposure import materialize_macro_exposure
     from research.etl.features.market_cap import materialize_market_cap
     from research.etl.features.price import materialize_price
@@ -191,6 +217,7 @@ def _build_features(con, cfg: LakeConfig) -> None:
         tables=["krx_security_flow_raw", "daily_market_cap", "dart_filing_receipt_raw"],
     )
     materialize_stock_pit(con, cfg, force=False)
+    _build_industry_pit_if_present(con, cfg, materialize_industry_pit)
     # feat_market_cap carries its own mask (권리락 window), so it registers the
     # distortion view itself rather than relying on build order here.
     materialize_market_cap(con, cfg, force=False)
