@@ -15,7 +15,7 @@
 | F-3 | 업종 관계 피쳐 | 없음(F-1 선행) | 대기(D-F1) — 선행 마트는 준비됨 | 비-seed 3쌍(2026-12-01 스냅샷) 뒤 판정 |
 | F-4 | 재무위험·생애주기·전이 | 없음 | **완료**(`fin_risk_v2`, 2026-09-08) | **F-HS-1에서 13 cell `screen_pass`, 전부 등급 B 상한**(측정된 `revision` 경고). 양방향 4건 부호 확정 |
 | F-5 | `metric_rules` 확장 | 없음(매핑) | **F-5.0~F-5.4 완료**(`fin_risk_v3`, 2026-09-09) | 커버리지 리포트는 다음 F-HS config A0 |
-| F-6 | `fin_sue` XBRL 백필 | OpenDART **22,700 호출**(측정됨) | **F-6.1 완료**(2026-09-09) | F-6.2 prod 백필(키 예산 2일) |
+| F-6 | `fin_sue` XBRL 백필 | OpenDART **22,700 호출**(측정됨) | F-6.1 완료 / **F-6.2 진행 중**(2026-09-09 23:03~) | 완주 뒤 F-6.3 재빌드·재판정 |
 | F-7 | DS005 이벤트·elestock | 있음 | 미착수 (D-F2 확정: `elestock` 시작 / D-F3: PoC 뒤 6종) | DS005 PoC + `elestock` 스키마 |
 | F-8 | 매크로 2단계 시리즈 | 시리즈 정의 | 미착수 (D-F5 확정: 2단계 먼저) | ECOS item_code 확정 |
 | F-9 | `fin_pit` strict·휴장일·상폐·유니버스·Cronicle | 일부 | F-9.2(**배포 완료**)·**F-9.3 종결**·F-9.7·**F-9.9~F-9.11**·F-9.12·F-9.13·F-9.14 완료 | F-9.1 / F-9.4~F-9.6 / F-9.8 |
@@ -144,7 +144,16 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
       — 연도 분포는 **2015년이 지배적**이다(대상 6,267건). 2015년은 원본 접수 8,036건 중 6,791건이 XBRL이 없다(84.5%). 2016~2023은 연 1,400~1,900건, 2024~2025는 650~1,130건
       — 호출 **약 22,700회**. 키 2개면 2일. slice ledger를 **쓴다**(여러 날에 걸친다). F-9.3과 달리 회수 불가 대상이 반복되는 문제는 없다 — 대상은 제출된 보고서이고 없는 것은 XBRL 문서뿐이다
       — **정정:** `04` §1.3의 `--out targets/sue_xbrl_targets.csv`는 확장자가 틀렸다. `backfill-xbrl-receipts`가 파싱하는 것은 **JSON lines**다(`cli/app.py`). 대상 파일은 저장소에 넣지 않는다 — 같은 snapshot에서 그대로 재생성된다
-- [ ] **F-6.2** prod 백필 실행(`dart backfill-xbrl-receipts --targets-file`), exit 75 재개, 완료 기록
+- [ ] **F-6.2 착수 2026-09-09 23:03 KST** prod 백필 진행 중. 드라이버 `deploy/prod/bin/dart-backfill-sue-xbrl.sh`, 외부 루프 `/home/whi/sue_loop.sh`(PID 146095, PPID 1·자체 세션이라 접속과 무관)
+      — **키가 9개다**(2개가 아니다). 프로브 로그에 `key#1`~`key#9`가 돈다. 일 예산 90,000이므로 22,700건은 **하루 안에 들어간다** — F-6.1이 "2일"이라고 적은 것은 키 개수를 2로 잡아 틀렸다
+      — 처리량 실측: **50건 28초 = 1.79 req/s**(2026-09-09 22:58, prod). 22,700건은 **약 3시간 31분**이다. 프로브 결과 문서 47건·팩트 44,585건·no_data 3건, 오류 0, ticker 매핑 실패 0
+      — 작업 단위는 **500건 청크**(약 280초). F-9.3이 세운 규칙 — 가드는 작업 단위가 검사 간격보다 짧아야 걸린다 — 을 따랐다. 46개 청크로 분할됐고 23:02 첫 실행에서 `window closed: past deadline 2300`으로 정확히 멈췄다
+      — 가드 값은 `dart-backfill-s1-remainder.sh`의 것을 **그대로** 썼다: self lock(non-blocking) / blackout 02:30~05:00(04:00 체인) / deadline 23:00(23:30 filings). deadline이 저녁 쪽만 닫으므로 **00:00~02:30이 열려 있다**
+      — 실측한 opendart lock 점유: 04:00:00~04:03:36(체인), 23:30:00~23:43:51(filings). 그래서 빈 창은 05:00~23:00과 00:00~02:30이다
+      — **래퍼를 안 쓰고 `docker compose run`을 직접 부른다.** `sdc_run_daily_collector`가 volume을 못 넘기고, collector의 유일한 마운트 `./state:/state`는 KIS 토큰 캐시 전용이라 그걸 전용(轉用)하면 compose 주석이 거짓이 된다. lock은 `sdc_with_source_lock`으로 그대로 잡는다
+      — **디스크 영향을 기록한다.** `dart_xbrl_fact_raw`가 이미 **136 GB**(문서 95,767개 → 문서당 1.42 MB)이므로 22,700건은 **약 32 GB** 늘린다. DB 221 GB → 약 253 GB, 디스크 59% → 63%(여유 359 GB). `db sync-remote`와 raw parquet export도 그만큼 무거워진다
+      — 완주 판정은 커버리지 쿼리가 아니라 **전 청크 완주**다(`SUE_BACKFILL_COMPLETE`). 전부 돌았으면 남은 공백은 `no_data`이고 ledger가 TTL 없이 영구 은퇴시킨다 — F-9.3의 반복 요청 문제가 여기서는 구조적으로 없다
+      - [ ] 완료 뒤 `ingestion_runs` 요약·오류 목록 기록
 - [ ] **F-6.3** 새 snapshot 재빌드 → `effective_start`·coverage 확인 → 기존 사전등록으로 재판정(F-HS-1과 같은 snapshot)
 
 ### F-7 구조화 이벤트 (`04` §2·§3)
