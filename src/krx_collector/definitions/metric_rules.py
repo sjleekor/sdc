@@ -35,6 +35,27 @@ def default_metric_catalog() -> list[MetricCatalogEntry]:
         MetricCatalogEntry("total_assets", "총자산", "financial", "KRW", "자산총계"),
         MetricCatalogEntry("total_liabilities", "총부채", "financial", "KRW", "부채총계"),
         MetricCatalogEntry("total_equity", "총자본", "financial", "KRW", "자본총계"),
+        # F-5.1. Five accounts measured on the 2026-09-08 lake before being
+        # mapped; coverage tables and the two rejections are in
+        # docs/dev/20260907_additional_feature/poc/metric_rules_ext.md 6-8.
+        MetricCatalogEntry(
+            "current_assets", "유동자산", "financial", "KRW", "재무상태표 유동자산"
+        ),
+        MetricCatalogEntry(
+            "current_liabilities", "유동부채", "financial", "KRW", "재무상태표 유동부채"
+        ),
+        MetricCatalogEntry(
+            "retained_earnings", "이익잉여금", "financial", "KRW", "재무상태표 이익잉여금"
+        ),
+        # Short and long term are separate metrics, not one `borrowings`: a
+        # mapping rule picks ONE winner per (metric, corp, period, basis), so a
+        # sum is not expressible here. feat_fin_risk adds them (PoC 7 decision 3).
+        MetricCatalogEntry(
+            "borrowings_short_term", "단기차입금", "financial", "KRW", "재무상태표 단기차입금"
+        ),
+        MetricCatalogEntry(
+            "borrowings_long_term", "장기차입금", "financial", "KRW", "재무상태표 장기차입금"
+        ),
         MetricCatalogEntry(
             "cash_and_cash_equivalents",
             "현금및현금성자산",
@@ -213,6 +234,21 @@ def default_metric_mapping_rules() -> list[MetricMappingRule]:
         ("total_assets", "ifrs-full_Assets", "BS"),
         ("total_liabilities", "ifrs-full_Liabilities", "BS"),
         ("total_equity", "ifrs-full_Equity", "BS"),
+        # F-5.1. Same shape as total_assets/total_liabilities: the statement rule
+        # names the `ifrs-full_` spelling and the `ifrs_` one arrives as an XBRL
+        # fallback below. `ifrs-full_ShorttermBorrowings` is labelled 차입금 by
+        # some filers and 단기차입금 by others -- the concept is the 단기차입금
+        # line either way, which is why the label is not what is matched on.
+        ("current_assets", "ifrs-full_CurrentAssets", "BS"),
+        ("current_liabilities", "ifrs-full_CurrentLiabilities", "BS"),
+        ("retained_earnings", "ifrs-full_RetainedEarnings", "BS"),
+        ("borrowings_short_term", "ifrs-full_ShorttermBorrowings", "BS"),
+        # dart_LongTermBorrowingsGross is the 장기차입금 balance-sheet line.
+        # `ifrs-full_LongtermBorrowings` only exists from 2023 (539 corps), so it
+        # is the fallback, not the primary. "Gross" is gross of the present-value
+        # discount, shown as a separate contra for 148 corps -- a small overstatement,
+        # bounded: short + long never exceeds total liabilities in 10,012 corp-years.
+        ("borrowings_long_term", "dart_LongTermBorrowingsGross", "BS"),
         ("cash_and_cash_equivalents", "ifrs-full_CashAndCashEquivalents", "BS"),
         ("operating_cash_flow", "ifrs-full_CashFlowsFromUsedInOperatingActivities", "CF"),
         ("investing_cash_flow", "ifrs-full_CashFlowsFromUsedInInvestingActivities", "CF"),
@@ -473,6 +509,28 @@ def default_metric_mapping_rules() -> list[MetricMappingRule]:
                 "ifrs-full_CashAndCashEquivalents",
                 "ifrs_CashAndCashEquivalents",
             ],
+        ),
+        # F-5.1. The third spelling on short-term borrowings is not decoration:
+        # with only the two ifrs forms, 2015 cross-sectional coverage is 0.003,
+        # and dart_ShortTermBorrowings (2015-2017, 1,673 corps) takes the same
+        # year to 0.823. The `ifrs-full_`-only mistake F-5.0 caught, again.
+        ("current_assets", ["ifrs-full_CurrentAssets", "ifrs_CurrentAssets"]),
+        (
+            "current_liabilities",
+            ["ifrs-full_CurrentLiabilities", "ifrs_CurrentLiabilities"],
+        ),
+        ("retained_earnings", ["ifrs-full_RetainedEarnings", "ifrs_RetainedEarnings"]),
+        (
+            "borrowings_short_term",
+            [
+                "ifrs-full_ShorttermBorrowings",
+                "ifrs_ShorttermBorrowings",
+                "dart_ShortTermBorrowings",
+            ],
+        ),
+        (
+            "borrowings_long_term",
+            ["dart_LongTermBorrowingsGross", "ifrs-full_LongtermBorrowings"],
         ),
     ]
     for metric_code, concept_ids in xbrl_fallback_specs:

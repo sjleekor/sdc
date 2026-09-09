@@ -14,7 +14,7 @@
 | F-2 | 통계적 peer 관계 피쳐 | 없음 | **완료**(`relation_stat_v2`, 2026-09-09) | **F-HS-1에서 19 cell 등급 A `screen_pass`.** 양방향 2건 부호 `−`로 확정 |
 | F-3 | 업종 관계 피쳐 | 없음(F-1 선행) | 대기(D-F1) — 선행 마트는 준비됨 | 비-seed 3쌍(2026-12-01 스냅샷) 뒤 판정 |
 | F-4 | 재무위험·생애주기·전이 | 없음 | **완료**(`fin_risk_v2`, 2026-09-08) | **F-HS-1에서 13 cell `screen_pass`, 전부 등급 B 상한**(측정된 `revision` 경고). 양방향 4건 부호 확정 |
-| F-5 | `metric_rules` 확장 | 없음(매핑) | **F-5.0 완료**(2026-09-08) | F-5.1 태그 커버리지 PoC(신규 4 metric) |
+| F-5 | `metric_rules` 확장 | 없음(매핑) | **F-5.0·F-5.1 완료**(2026-09-09) | F-5.2 규칙 등록(29 → **34**) |
 | F-6 | `fin_sue` XBRL 백필 | OpenDART(측정 뒤) | 미착수 | 대상 역산 |
 | F-7 | DS005 이벤트·elestock | 있음 | 미착수 (D-F2 확정: `elestock` 시작 / D-F3: PoC 뒤 6종) | DS005 PoC + `elestock` 스키마 |
 | F-8 | 매크로 2단계 시리즈 | 시리즈 정의 | 미착수 (D-F5 확정: 2단계 먼저) | ECOS item_code 확정 |
@@ -106,14 +106,23 @@ FS3 인계   F-HS-1 screen_pass → 모델 E5
 
 ### F-5 `metric_rules` 확장 (`03` §3)
 
-- [ ] **F-5.1** 태그 커버리지 PoC(`current_assets`, `current_liabilities`, `borrowings`, `rnd_expense`) → `poc/metric_rules_ext.md`
+- [x] **F-5.1 완료 2026-09-09** 태그 커버리지 PoC → [`poc/metric_rules_ext.md`](poc/metric_rules_ext.md) §6~§9. 수집 0, lake snapshot 2026-09-08만 읽었다. 판정 문턱은 F-5.0 §0의 0.5를 그대로 썼다(새로 고른 값이 아니다)
+      — **또 철자였다.** 단기차입금은 두 철자(`ifrs-full_`/`ifrs_`)만으로 2015년 커버리지가 **0.003**이다. 세 번째 철자 `dart_ShortTermBorrowings`를 붙이면 같은 해가 **0.823** — 규칙 하나에 260배다
+      — 통과 셋: `current_assets` 0.994 / `current_liabilities` 0.993 / (**추가**) `retained_earnings` 0.959, 전부 2015년부터. instant 값이라 TTM 4분기가 필요 없고 분기별 법인-연도 수가 참조 metric과 사실상 같다
+      — **`retained_earnings`는 원래 목록에 없었다.** `03` §3이 `fin_altman_z`를 "완전판이 되면"으로 조건부로 뒀는데 그 조건을 정하는 값이라 같이 쟀다. 결과: **Altman Z 다섯 항이 다 있다**(WC·RE·EBIT·MVE·Sales)
+      — **`borrowings`는 단일 metric으로 불가하다.** 매핑 규칙 모델이 `(metric, corp, period, basis)`마다 하나만 고르므로 합산을 표현할 수 없다. 성분 둘(`borrowings_short_term` 0.823 / `borrowings_long_term` 0.731)을 등록하고 합은 `feat_fin_risk`에서 한다. 합산 유효성은 확인했다 — 10,012 법인-연도에서 `단기+장기 > 부채총계`가 **0건**
+      — `borrowings_current_portion` **탈락**(최대 0.466). 빼면 이자부부채를 중위 **10.2%**, 90분위 **59.7%** 과소계상하므로 카드에 적는다. 문턱을 낮추는 쪽은 택하지 않았다 — 0.4 구간 법인이 대형주에 쏠려 분자 정의가 종목 크기에 따라 달라진다
+      — **`rnd_expense` 탈락.** XBRL은 2023년부터만(447 법인), 2025년에도 0.136이다. FS 쪽은 `-표준계정코드 미사용-`/'연구개발비' 5,639행 **203 법인**뿐이다. `dart_Capitalised...` 계열은 바이오 임상단계 **자본화** 개발비 주석이지 경상연구개발비가 아니다
+      — 결과로 **F-5.4가 5 family → 3**이 된다: `fin_rnd_to_sales`·`fin_bm_intangible_adj`(Peters-Taylor는 R&D 이력이 재료)를 만들지 않는다
 - [x] **F-5.0 완료 2026-09-08** 기존 4 metric에 XBRL fallback 16규칙 추가 → [`poc/metric_rules_ext.md`](poc/metric_rules_ext.md)
       — 판정 규칙 두 개를 **측정 전에 커밋**했다(`05a1b3e`). 처음 제안한 "행 수 50%"는 틀린 양이라 폐기 — TTM은 연속 4분기를 요구하므로 분기의 50%를 무작위로 가지면 사용 가능 확률이 6%다
       — vintage 행 증가: `interest_paid` +38,957 / `investing_cash_flow` +51,668 / `financing_cash_flow` +49,446 / `cash_and_cash_equivalents` +50,335
       — **canonical 마트는 안 건드렸다.** 별도 lake(`data_lake_f50/`, raw·A0 마트는 심볼릭 링크)에서 측정했다. F-HS-1은 `07` §7대로 새 snapshot에서 돈다
-- [ ] **F-5.2** catalog·매핑 규칙 추가, 기존 29 metric golden 불변
-- [ ] **F-5.3** vintage 재빌드, 역산 비율 기록
-- [ ] **F-5.4** 파생 family(`fin_current_ratio`, `fin_borrowings_to_mcap`, `fin_altman_z`, `fin_rnd_to_sales`, `fin_bm_intangible_adj`) → F-HS-2 또는 3
+- [x] **F-5.2 완료 2026-09-09** catalog 5 + 규칙 26개 추가 → **catalog 29 → 34, 규칙 129 → 155**. 유닛 9개(`test_metric_rules_ext.py`)
+      — 기존 29 metric **golden 불변 확인**: 전체 유닛 스위트 통과. 새 규칙의 `rule_code`가 기존 것과 하나도 겹치지 않고, 29 metric 어느 것도 새 규칙을 받지 않는다는 것을 불변식으로 박았다
+      — fallback 우선순위 규약도 테스트로 박았다: 새 metric의 XBRL fallback은 전부 statement 규칙보다 **낮은 우선순위**다(공백만 메우고 보고된 값을 덮지 않는다)
+- [ ] **F-5.3** vintage 재빌드, 역산 비율 기록 — **측정 중.** canonical snapshot은 건드리지 않는다: `build_stock_metric_vintage_fact_sql()`을 **in-memory**로 돌린다(F-5.0의 `data_lake_f50/` 심볼릭 링크 lake보다 간단하고, F-HS-1이 발행한 2026-09-08 feature_mart를 아예 안 만진다)
+- [ ] **F-5.4** 파생 family **3개**(`fin_current_ratio`, `fin_borrowings_to_mcap`, `fin_altman_z` **완전판**) → F-HS-2 또는 3. ~~`fin_rnd_to_sales`·`fin_bm_intangible_adj`~~는 F-5.1에서 재료가 없어 취소됐다
 
 ### F-6 `fin_sue` 백필 (`04` §1)
 

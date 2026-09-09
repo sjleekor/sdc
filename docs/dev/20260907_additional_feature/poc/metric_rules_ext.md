@@ -1,4 +1,11 @@
-# F-5.0 PoC — 현금흐름 4 metric의 XBRL fallback
+# F-5 PoC — `metric_rules` 확장
+
+- §0~§5: **F-5.0** 현금흐름 4 metric의 XBRL fallback (2026-09-08, 완료)
+- §6~§9: **F-5.1** 신규 계정 태그 커버리지 (2026-09-09, 완료)
+
+---
+
+# F-5.0 — 현금흐름 4 metric의 XBRL fallback
 
 - 작성: 2026-09-08
 - 배경: F-4.6. `feat_fin_risk`의 9 family 중 **5개가 2020년부터만 존재한다.**
@@ -189,3 +196,140 @@ vintage 마트를 v1(기존 규칙)과 v2(새 규칙)로 각각 빌드해 대조
 - F-HS-1 사전등록 카드에 family별 표본 시작(§3 결정 B 표)을 적는다.
 - `../results/f4_fin_risk_verification.md`의 "5개 family가 2020년부터만 존재한다"는
   이 변경으로 해소됐다. 재생성은 새 snapshot에서 한다.
+
+---
+
+# F-5.1 — 신규 계정 태그 커버리지
+
+- 작성: 2026-09-09
+- 대상: `03_financial_risk_lifecycle_transition.md` §3의 계정 넷 — `current_assets`,
+  `current_liabilities`, `borrowings`, `rnd_expense`. **수집은 0이다.** lake snapshot
+  2026-09-08(`sj2_remote`)의 `dart_xbrl_fact_raw`·`dart_financial_statement_raw`만 읽었다.
+- 판정 규칙은 **F-5.0 §0의 것을 그대로 쓴다**(횡단면 커버리지 0.5, family별,
+  2026-09-08 고정). 이번 측정을 위해 새로 고른 문턱이 아니다.
+
+## 6. 측정
+
+분모는 그 해에 자산총계(`ifrs-full_Assets`/`ifrs_Assets`)를 보고한 법인 수다 — 횡단면
+피쳐가 실제로 채점될 모집단이다. 분자는 두 원천(`dart_financial_statement_raw`의
+`account_id`, `dart_xbrl_fact_raw`의 `concept_id`) 합집합에서 값이 있는 법인 수다.
+
+| 후보 | 2015 | 2016 | 2017 | 2018 | 2020 | 2022 | 2025 | 첫 0.5 |
+|---|---|---|---|---|---|---|---|---|
+| `total_liabilities` (참조) | 0.998 | 0.999 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 2015 |
+| **`current_assets`** | 0.994 | 0.997 | 0.998 | 0.999 | 0.999 | 0.999 | 0.970 | **2015** |
+| **`current_liabilities`** | 0.993 | 0.996 | 0.998 | 0.998 | 0.998 | 0.999 | 0.968 | **2015** |
+| **`retained_earnings`** (추가) | 0.959 | 0.968 | 0.997 | 0.996 | 0.996 | 0.997 | 0.999 | **2015** |
+| `borrowings_short_term` (2 철자) | 0.003 | 0.008 | 0.764 | 0.781 | 0.780 | 0.777 | 0.627 | 2017 |
+| **`borrowings_short_term` (3 철자)** | 0.823 | 0.834 | 0.850 | 0.781 | 0.780 | 0.777 | 0.627 | **2015** |
+| **`borrowings_long_term`** | 0.731 | 0.735 | 0.745 | 0.669 | 0.674 | 0.684 | 0.555 | **2015** |
+| `borrowings_current_portion` | 0.427 | 0.444 | 0.466 | 0.402 | 0.394 | 0.410 | 0.368 | **없음** |
+| `rnd_expense` | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.136 | **없음** |
+
+### 6.1 또 철자였다
+
+F-5.0의 교훈이 그대로 반복된다. 두 철자(`ifrs-full_` / `ifrs_`)만으로는 단기차입금의
+2015~2016이 **0.003·0.008**이다. 그 두 해를 채우는 것은 세 번째 철자
+`dart_ShortTermBorrowings`(48,251행, 1,673 법인, 2015~2017)이고, 붙이면 같은 해가
+**0.823·0.834**가 된다. 2015년 커버리지가 260배 늘어난 것이 규칙 하나다.
+
+### 6.2 `current_assets`는 분기까지 참조 metric과 같다
+
+이 둘은 instant(BS) 값이라 TTM 연속 4분기를 요구하지 않는다 — F-5.0에서
+`fin_net_debt_to_mcap`이 나머지 넷보다 한 해 빨랐던 것과 같은 이유다. 분기 보고서별
+법인-연도 수도 참조 metric과 사실상 같다.
+
+| reprt_code | `current_assets` | `total_liabilities` (참조) |
+|---|---|---|
+| 11011 (사업보고서) | 24,653 | 24,946 |
+| 11012 (반기) | 23,926 | 24,171 |
+| 11013 (1분기) | 23,657 | 23,906 |
+| 11014 (3분기) | 22,113 | 22,423 |
+
+### 6.3 차입금 합산은 이중계상이 없다
+
+`borrowings`는 단일 태그가 없어 합산이 필요하다. 합이 유효한지 먼저 확인했다 —
+사업보고서(11011)·연결(CFS)에서 세 값이 다 있는 **10,012 법인-연도** 기준:
+
+- `단기 + 장기 > 부채총계`인 경우 **0건** (0.00%). 중위 비율은 0.411이다.
+- 유동성장기차입금까지 더해도 초과 **0건**.
+
+즉 이중계상은 없다. 반대로 **빠지는 쪽**은 있다: 유동성장기차입금을 뺀 합은
+그 값이 있는 5,017 법인-연도에서 중위 **10.2%**, 90분위 **59.7%** 만큼 이자부부채를
+과소계상한다.
+
+## 7. 판정
+
+### 결정 1: `current_assets` · `current_liabilities` — **통과**
+
+2015년부터 0.99다. 참조 metric과 같은 급이고 분기까지 같다. `total_assets`·
+`total_liabilities`와 똑같은 형태(주 규칙 = `dart_financial_statement_raw`, fallback =
+`dart_xbrl_fact_raw` 두 철자)로 등록한다.
+
+### 결정 2: `retained_earnings` — **추가하고 통과**
+
+원래 목록에 없었다. `03` §3이 계정 넷만 적고 `fin_altman_z`를 "축소판이 아닌 완전판이
+되면"이라는 조건부로 뒀는데, 그 조건을 정하는 값이 이익잉여금이라 같이 쟀다. 2015년
+0.959다. 따라서 **Altman Z는 완전판으로 만들 수 있다** — 다섯 항이 모두 있다.
+
+| Altman 항 | 재료 | 상태 |
+|---|---|---|
+| WC/TA | `current_assets` − `current_liabilities`, `total_assets` | 신규 2 + 기존 1 |
+| RE/TA | `retained_earnings`, `total_assets` | **신규 1** + 기존 1 |
+| EBIT/TA | `operating_income`, `total_assets` | 기존 |
+| MVE/TL | `mcap_krx`, `total_liabilities` | 기존 |
+| Sales/TA | `revenue`, `total_assets` | 기존 |
+
+### 결정 3: `borrowings` — **단일 metric으로는 불가. 성분 2개로 등록한다**
+
+매핑 규칙 모델은 `(metric, corp, period, basis)`마다 우선순위로 **하나**를 고른다.
+합산을 표현할 수 없으므로 `borrowings` 하나를 등록하는 것은 애초에 불가능하다. 대신
+성분을 각각 metric으로 등록하고 합은 `feat_fin_risk`에서 한다(마트는 이미 metric 간
+산술을 한다).
+
+- `borrowings_short_term` — 세 철자 필수. 통과(2015년 0.823)
+- `borrowings_long_term` — `dart_LongTermBorrowingsGross` + `ifrs-full_LongtermBorrowings`.
+  통과(2015년 0.731)
+- `borrowings_current_portion` — **탈락**(최대 0.466, 문턱 0.5 미달). 필수 성분으로
+  쓰지 않는다.
+
+따라서 `fin_borrowings_to_mcap`의 분자는 `단기 + 장기`이고, 카드에 **"유동성장기차입금
+제외 — 중위 10.2%, 90분위 59.7% 과소계상"**을 적는다. 문턱을 낮춰 성분을 살리는 쪽은
+택하지 않았다: 0.4 커버리지 구간의 법인은 만기 구조를 자세히 공시하는 대형주에 쏠려
+있어, 그 성분을 넣으면 분자의 정의가 종목 크기에 따라 달라진다.
+
+### 결정 4: `rnd_expense` — **탈락**
+
+- XBRL `ifrs-full_ResearchAndDevelopmentExpense`는 **2023년부터만** 있다(10,471행,
+  447 법인). 2015~2022는 0.000이고 2025년에도 0.136이다.
+- `dart_Capitalised...` 계열은 바이오 임상단계별 **자본화** 개발비 주석이지 경상연구개발비가
+  아니다.
+- `dart_financial_statement_raw` 쪽은 `account_id = '-표준계정코드 미사용-'` /
+  `account_nm = '연구개발비'`가 5,639행 **203 법인**뿐이다. 표준계정코드를 안 쓴 값을
+  계정명으로 잡는 것이라 원천이 바뀌면 조용히 깨진다.
+
+그래서 F-5.4의 다섯 family 중 **둘은 만들지 않는다**: `fin_rnd_to_sales`,
+`fin_bm_intangible_adj`(Peters-Taylor는 R&D 이력 자체가 재료다). 남는 것은 셋이다 —
+`fin_current_ratio`, `fin_borrowings_to_mcap`, `fin_altman_z`(완전판).
+
+## 8. 등록할 metric — 5개
+
+| metric_code | 주 규칙(account_id) | XBRL fallback(concept_id) | 유효 시작 |
+|---|---|---|---|
+| `current_assets` | `ifrs-full_CurrentAssets` (BS) | `ifrs-full_CurrentAssets`, `ifrs_CurrentAssets` | 2015 |
+| `current_liabilities` | `ifrs-full_CurrentLiabilities` (BS) | `ifrs-full_CurrentLiabilities`, `ifrs_CurrentLiabilities` | 2015 |
+| `retained_earnings` | `ifrs-full_RetainedEarnings` (BS) | `ifrs-full_RetainedEarnings`, `ifrs_RetainedEarnings` | 2015 |
+| `borrowings_short_term` | `ifrs-full_ShorttermBorrowings` (BS) | 위 + `ifrs_ShorttermBorrowings`, `dart_ShortTermBorrowings` | 2015 |
+| `borrowings_long_term` | `dart_LongTermBorrowingsGross` (BS) | 위 + `ifrs-full_LongtermBorrowings` | 2015 |
+
+`fs_div`는 CFS·OFS 둘 다 등록한다(F-5.0의 `XBRL_FALLBACK_CFS_PRIORITY` /
+`XBRL_FALLBACK_OFS_PRIORITY` 구조를 그대로 쓴다).
+
+## 9. 다음 (F-5.2 ~ F-5.4)
+
+- F-5.2: `definitions/metric_rules.py`에 catalog 5 + 규칙 등록. **기존 29 metric의 규칙과
+  golden은 건드리지 않는다.** 29 → 34가 된다.
+- F-5.3: vintage 재빌드, 연도별 커버리지 실측(위 표는 raw 수준 대리 측정이다 — vintage는
+  strict PIT 접수일을 거치므로 값이 조금 낮아질 수 있다)
+- F-5.4: 파생 family **3개**(위 결정 4). F-4와 같은 config에 넣지 않는다 — 다음 F-HS
+  config다.
