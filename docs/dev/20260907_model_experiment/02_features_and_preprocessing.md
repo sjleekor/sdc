@@ -40,7 +40,12 @@ FS0 + T1 후보 5 + T2 후보 14에서 중복 3을 뺀 11.
 | 5 | `fin_*` 3, `ev_amendment/payout/issuance`, `own_*`, `hc_*` (사전등록 60·120) | 40 + 6 = 46 |
 | 20 | `fin_value_z`, `fin_gross_profitability`, `ev_payout_yield`, `ev_net_share_issuance_yoy`, `hc_*`, `own_major_stake_chg` | 40 + 9 = 49 |
 | 60 | `px_reversal_5d`, `flow_individual_netbuy_to_volume_5d` (half-life 5~10) | 40 + 14 = 54 |
-| 120 | `px_reversal_5d`, `px_maxret_20d`, `flow_individual_*` 2, `ev_filing_burst_60d`, `own_major_filing_60d` | 40 + 9 = 49 |
+| 120 | `px_reversal_5d`, `px_maxret_20d`, `flow_individual_*` 2, `ev_filing_burst_60d`, `own_major_filing_60d` | 40 + 10 = **50** |
+
+**h120 합계 정정 (2026-09-09).** 이 행은 원래 `40 + 9 = 49`로 적혀 있었다. 빼는 컬럼 6개를 세면
+FS1 추가 16개 중 10개가 남으므로 50이 맞다. 49를 맞추려면 컬럼 하나를 더 골라 빼야 하는데 그것은
+개수에 맞춰 피쳐를 고르는 것이라 §5의 규율에 어긋난다. **컬럼 목록이 정본이고 합계 표기가 오타였다**로
+확정했다(`features.py`의 `FS1H_DROPPED`가 이 목록이다).
 
 FS1과 FS1h 중 어느 쪽이 나은지는 E2가 답한다. 트리 모델이 관련 없는 피쳐를 스스로 무시하면 FS1이, 가설 수 증가가 과적합으로 이어지면 FS1h가 이긴다.
 
