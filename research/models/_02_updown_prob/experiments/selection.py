@@ -22,12 +22,10 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from research.models._02_updown_prob.evaluate import ECE_CEILING, PRIMARY_ECONOMIC
-from research.models._02_updown_prob.experiments.registry import Run
+from research.models._02_updown_prob.experiments.registry import FULL_GRID, Run
 
 # `05` §2 E0: adopt the rank profile unless it loses more than this in Rank IC.
 E0_RANK_IC_TOLERANCE = 0.005
-# The full grid each model family runs from E2 onward (`04` §2.1).
-FULL_GRID: dict[str, str] = {"hgb_clf": "HGB_CLF_GRID", "logit": "LOGIT_GRID"}
 
 
 @dataclass(frozen=True)

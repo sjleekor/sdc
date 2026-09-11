@@ -31,6 +31,12 @@ GRID_HGB_CLF_E1 = "HGB_CLF_GRID_E1"
 GRID_HGB_CLF = "HGB_CLF_GRID"
 GRID_LOGIT = "LOGIT_GRID"
 
+# Each family's full grid from E2 onward (`04` §2.1). A run that pins its own
+# model instead of inheriting it has to bring the matching grid along: E4b
+# forces ``hgb_clf`` because a monotonic constraint is an HGB feature, and at
+# h60 the inherited config is a logit whose grid is a list of ``C`` values.
+FULL_GRID: dict[str, str] = {"hgb_clf": GRID_HGB_CLF, "logit": GRID_LOGIT}
+
 
 @dataclass(frozen=True)
 class Run:
@@ -342,4 +348,14 @@ def resolve(run: Run, selections: dict[str, dict]) -> Run:
                 f"{run.run_id} needs {field_name!r} from {run.inherits}, which did not provide it"
             )
         updates[field_name] = inherited[field_name]
-    return replace(run, **updates) if updates else run
+    resolved = replace(run, **updates) if updates else run
+
+    # An inherited grid belongs to the inherited *model*. A run that overrode
+    # the model has to take that family's grid with it, or the runner hands
+    # ``C`` values to a gradient-booster and dies on TypeError — which is what
+    # E4b at h60 did, where the adopted config is a logit.
+    if run.grid == SELECTED and run.model != SELECTED:
+        expected = FULL_GRID.get(resolved.model)
+        if expected is not None and resolved.grid != expected:
+            resolved = replace(resolved, grid=expected)
+    return resolved

@@ -169,6 +169,39 @@ def test_resolve_fills_inherited_fields() -> None:
     assert resolved.feature_set == "FS1"  # E2's own axis is not inherited
 
 
+def test_a_pinned_model_drags_its_own_grid_along() -> None:
+    """E4b at h60: the adopted config is a logit, the constraint needs HGB.
+
+    Left alone, the run inherited ``LOGIT_GRID`` — a list of ``C`` values —
+    and handed it to ``HistGradientBoostingClassifier``, which raises
+    ``TypeError``. The grid has to follow the model the run pinned.
+    """
+    run = rg.stage_runs("E4", horizon=60, variant="E4b-monotonic")[0]
+    assert (run.model, run.grid) == ("hgb_clf", rg.SELECTED)
+    logit_at_h60 = _selection("E2", model="logit", grid="LOGIT_GRID")
+    resolved = rg.resolve(run, {s: logit_at_h60 for s in ("E0", "E1", "E2")})
+    assert resolved.model == "hgb_clf"
+    assert resolved.grid == "HGB_CLF_GRID"
+    assert resolved.monotonic is True
+
+
+def test_an_inherited_model_keeps_the_inherited_grid() -> None:
+    """The correction is for a pinned model only — E4a must not be touched."""
+    run = rg.stage_runs("E4", horizon=60, variant="E4a-seed")[0]
+    assert (run.model, run.grid) == (rg.SELECTED, rg.SELECTED)
+    logit_at_h60 = _selection("E2", model="logit", grid="LOGIT_GRID")
+    resolved = rg.resolve(run, {s: logit_at_h60 for s in ("E0", "E1", "E2")})
+    assert (resolved.model, resolved.grid) == ("logit", "LOGIT_GRID")
+
+
+def test_a_pinned_grid_survives_the_correction() -> None:
+    """E1 screens the families on a deliberately small grid (`04` §2.1)."""
+    run = next(r for r in rg.stage_runs("E1", horizon=20) if r.model == "hgb_clf")
+    assert run.grid == "HGB_CLF_GRID_E1"
+    resolved = rg.resolve(run, {"E0": _selection("E0")})
+    assert resolved.grid == "HGB_CLF_GRID_E1"
+
+
 def test_resolve_refuses_a_missing_selection_instead_of_defaulting() -> None:
     run = rg.stage_runs("E1", horizon=20)[0]
     with pytest.raises(ValueError, match="selection is missing"):
