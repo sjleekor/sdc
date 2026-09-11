@@ -94,6 +94,15 @@ def _sql_hash(select_sql: str) -> str:
     return hashlib.sha256(select_sql.encode()).hexdigest()
 
 
+def sql_contract_hash(select_sql: str) -> str:
+    """Public name for the SQL-text cache key (see :func:`_sql_hash`).
+
+    A read-only consumer uses it to answer "is the mart on disk the one my own
+    definition would have produced?" without being allowed to rebuild it.
+    """
+    return _sql_hash(select_sql)
+
+
 def _expected_metadata(
     con: duckdb.DuckDBPyConnection, config: LakeConfig, select_sql: str
 ) -> dict[str, str | None]:
@@ -238,6 +247,24 @@ def materialize_in_parts(
         json.dumps(expected, sort_keys=True) + "\n", encoding="utf-8"
     )
     return table_dir
+
+
+def mart_cache_metadata(config: LakeConfig, name: str) -> dict | None:
+    """The contract a materialized mart was written under, or None if unstamped.
+
+    Read-only consumers need this: a model that must *not* rebuild a mart (the
+    A0 marts a horizon-scan run published, say) still has to record which build
+    it read, and :func:`register_mart_view`'s all-or-nothing hash check cannot
+    express that. Returns the stored dict as-is — ``analysis_config_hash`` may
+    legitimately be None for a mart written by ``compute-all``.
+    """
+    path = _metadata_path(config, name)
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise StaleMartContract(f"invalid mart cache metadata for {name!r}") from exc
 
 
 def register_mart_view(

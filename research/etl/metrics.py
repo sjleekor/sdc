@@ -11,6 +11,13 @@ more than pointwise RMSE (etl_00 §6). The primary metrics are computed PER DATE
   - top_minus_bottom   : Q-top mean minus Q-bottom mean realized excess (Q5-Q1).
   - hit_ratio_top      : fraction of top-quantile names with positive realized excess.
 
+A probability model needs a second half of this (20260907_model_experiment `03`
+§2.1): a ranking is judged by whether the order was right, a probability also by
+whether the *number* was right. :func:`classification_report`,
+:func:`reliability_table` and :func:`threshold_economic_report` add log-loss,
+Brier, AUC, ECE, precision/lift@k and the ``p >= tau`` portfolio to the same
+per-date-then-average discipline.
+
 All functions take per-row arrays/columns plus a date key for the per-date
 grouping. Pure numpy/polars; sklearn is not needed here.
 
@@ -1027,4 +1034,376 @@ def evaluate(
         top_decile_spread=top_dec,
         top_minus_bottom=tmb,
         hit_ratio_top=hit,
+    )
+
+
+# --- probability metrics (20260907_model_experiment `03` §2.1) --------------
+
+# log-loss is unbounded at p in {0, 1}: one confident miss would otherwise
+# decide a whole fold. `03` §2.1 fixes the clip so every run reports the same
+# number rather than one that depends on how extreme a model dares to be.
+PROB_CLIP = 1e-6
+DEFAULT_PROB_BINS = 10
+
+
+@dataclass(frozen=True)
+class ClassificationReport:
+    """Probability quality for one slice — accuracy of order *and* of level.
+
+    ``log_loss`` is the preregistered primary metric at every horizon (`03`
+    §3.2); ``ece`` is what says whether the number can be read as a
+    probability at all (a p=0.7 bucket that realizes 0.55 is a ranking with a
+    probability's clothes on). ``auc_daily_mean`` is the honest ranking figure
+    for a cross-sectional model — the pooled AUC also mixes *dates*, so a model
+    that merely knows which days were good would score on it.
+
+    ``base_rate`` is the mean of the per-date positive rate over the dates that
+    entered ``precision_at_k``, so ``lift_at_k`` is the ratio of two quantities
+    measured on the same dates.
+    """
+
+    n_obs: int
+    n_dates: int
+    base_rate: float
+    log_loss: float
+    brier: float
+    auc_pooled: float
+    auc_daily_mean: float
+    n_dates_auc: int
+    ece: float
+    n_bins: int
+    k: int
+    precision_at_k: float
+    lift_at_k: float
+
+    def as_dict(self) -> dict:
+        return {
+            "n_obs": self.n_obs,
+            "n_dates": self.n_dates,
+            "base_rate": self.base_rate,
+            "log_loss": self.log_loss,
+            "brier": self.brier,
+            "auc_pooled": self.auc_pooled,
+            "auc_daily_mean": self.auc_daily_mean,
+            "n_dates_auc": self.n_dates_auc,
+            "ece": self.ece,
+            "n_bins": self.n_bins,
+            "k": self.k,
+            "precision_at_k": self.precision_at_k,
+            "lift_at_k": self.lift_at_k,
+        }
+
+
+def _binary_clean(df: pl.DataFrame, date_col: str, pred_col: str, y_col: str) -> pl.DataFrame:
+    """Rows with a finite probability in [0,1] and a 0/1 label.
+
+    A prediction outside [0,1] is rejected rather than clipped: it means a rank
+    score or a raw margin was passed in, and every metric below would still
+    return a plausible-looking number.
+    """
+    clean = df.select([date_col, pred_col, y_col]).drop_nulls()
+    clean = clean.filter(pl.col(pred_col).is_finite())
+    if clean.height == 0:
+        return clean
+    p_min, p_max = clean[pred_col].min(), clean[pred_col].max()
+    if p_min < 0.0 or p_max > 1.0:
+        raise ValueError(f"{pred_col!r} must be a probability in [0,1]; got [{p_min}, {p_max}]")
+    labels = set(clean[y_col].unique().to_list())
+    if not labels <= {0, 1, 0.0, 1.0, True, False}:
+        raise ValueError(f"{y_col!r} must be binary 0/1; got values {sorted(labels)[:5]}")
+    return clean.with_columns(pl.col(y_col).cast(pl.Float64).alias(y_col))
+
+
+def binary_log_loss(p: np.ndarray, y: np.ndarray, *, clip: float = PROB_CLIP) -> float:
+    """``-mean(y ln p + (1-y) ln(1-p))`` with ``p`` clipped to [clip, 1-clip]."""
+    if p.size == 0:
+        return float("nan")
+    q = np.clip(p, clip, 1.0 - clip)
+    return float(-np.mean(y * np.log(q) + (1.0 - y) * np.log1p(-q)))
+
+
+def brier_score(p: np.ndarray, y: np.ndarray) -> float:
+    """``mean((p - y)^2)`` — the squared-error half of the calibration picture."""
+    if p.size == 0:
+        return float("nan")
+    return float(np.mean((p - y) ** 2))
+
+
+def binary_auc(p: np.ndarray, y: np.ndarray) -> float:
+    """Rank-based AUC; ties split credit, matching ``sklearn.roc_auc_score``.
+
+    NaN when one class is absent — an AUC is undefined there, and a 0.5 would
+    quietly drag a daily average toward "no skill".
+    """
+    n_pos = float(y.sum())
+    n_neg = float(y.size - n_pos)
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+    ranks = _rankdata(p)
+    return float((ranks[y == 1].sum() - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg))
+
+
+def expected_calibration_error(
+    p: np.ndarray, y: np.ndarray, *, n_bins: int = DEFAULT_PROB_BINS
+) -> float:
+    """``sum_b (n_b/N) * |mean(p_b) - mean(y_b)|`` over equal-width bins on [0,1]."""
+    table = _reliability_rows(p, y, n_bins=n_bins)
+    if not table:
+        return float("nan")
+    total = sum(row["n"] for row in table)
+    return float(sum(row["n"] / total * abs(row["gap"]) for row in table))
+
+
+def _bin_index(p: np.ndarray, n_bins: int) -> np.ndarray:
+    """Equal-width bin index on [0,1]; ``p == 1`` lands in the last bin."""
+    idx = np.floor(p * n_bins).astype(int)
+    return np.clip(idx, 0, n_bins - 1)
+
+
+def _reliability_rows(
+    p: np.ndarray, y: np.ndarray, *, n_bins: int = DEFAULT_PROB_BINS
+) -> list[dict]:
+    if n_bins < 1:
+        raise ValueError(f"n_bins must be >= 1, got {n_bins}")
+    if p.size == 0:
+        return []
+    idx = _bin_index(p, n_bins)
+    rows: list[dict] = []
+    for b in range(n_bins):
+        mask = idx == b
+        n = int(mask.sum())
+        if n == 0:
+            continue
+        p_mean = float(p[mask].mean())
+        y_mean = float(y[mask].mean())
+        rows.append(
+            {
+                "bin": b,
+                "p_lo": b / n_bins,
+                "p_hi": (b + 1) / n_bins,
+                "n": n,
+                "p_mean": p_mean,
+                "y_mean": y_mean,
+                "gap": p_mean - y_mean,
+            }
+        )
+    return rows
+
+
+def reliability_table(
+    df: pl.DataFrame,
+    *,
+    pred_col: str,
+    y_col: str,
+    date_col: str = "trade_date",
+    n_bins: int = DEFAULT_PROB_BINS,
+) -> pl.DataFrame:
+    """Per-bin ``mean(p)`` vs ``mean(y)`` — the reliability curve, as a table.
+
+    Empty bins are omitted rather than emitted as NaN rows: a probability model
+    that never predicts above 0.8 has no 0.8-0.9 bucket, and saying so with a
+    missing row is clearer than a row of NaNs.
+    """
+    clean = _binary_clean(df, date_col, pred_col, y_col)
+    rows = _reliability_rows(clean[pred_col].to_numpy(), clean[y_col].to_numpy(), n_bins=n_bins)
+    schema = {
+        "bin": pl.Int64,
+        "p_lo": pl.Float64,
+        "p_hi": pl.Float64,
+        "n": pl.Int64,
+        "p_mean": pl.Float64,
+        "y_mean": pl.Float64,
+        "gap": pl.Float64,
+    }
+    return pl.DataFrame(rows, schema=schema)
+
+
+def _precision_at_k(
+    clean: pl.DataFrame, *, pred_col: str, y_col: str, date_col: str, k: int
+) -> tuple[float, float, int]:
+    """Mean per-date precision@k, the matching mean base rate, and n_dates.
+
+    Ordinal rank descending, exactly as ``predict.select_topk`` picks the buy
+    list — so this is the precision of the list that would actually be traded,
+    ties and all. A date with fewer than k names contributes all of them.
+    """
+    if k < 1:
+        raise ValueError(f"k must be >= 1, got {k}")
+    rank = pl.col(pred_col).rank("ordinal", descending=True).over(date_col)
+    picked = clean.with_columns(rank.alias("_pk_rank")).filter(pl.col("_pk_rank") <= k)
+    per_date = picked.group_by(date_col).agg(pl.col(y_col).mean().alias("precision"))
+    base = clean.group_by(date_col).agg(pl.col(y_col).mean().alias("base_rate"))
+    joined = per_date.join(base, on=date_col, how="inner")
+    if joined.height == 0:
+        return float("nan"), float("nan"), 0
+    return (
+        float(joined["precision"].mean()),
+        float(joined["base_rate"].mean()),
+        int(joined.height),
+    )
+
+
+def classification_report(
+    df: pl.DataFrame,
+    *,
+    pred_col: str,
+    y_col: str,
+    date_col: str = "trade_date",
+    k: int = 100,
+    n_bins: int = DEFAULT_PROB_BINS,
+) -> ClassificationReport:
+    """Probability metrics for one slice (`03` §2.1).
+
+    ``pred_col`` must hold probabilities; ``y_col`` a 0/1 label. Rows missing
+    either are dropped, which is how the last ``h`` sessions of a panel — held
+    but not yet resolved — stay out of the metrics.
+    """
+    clean = _binary_clean(df, date_col, pred_col, y_col)
+    p = clean[pred_col].to_numpy()
+    y = clean[y_col].to_numpy()
+
+    daily_auc: list[float] = []
+    for (_d,), grp in clean.group_by([date_col], maintain_order=True):
+        auc = binary_auc(grp[pred_col].to_numpy(), grp[y_col].to_numpy())
+        if auc == auc:  # skip the NaN of a single-class date
+            daily_auc.append(auc)
+
+    precision, base_rate, n_dates_k = _precision_at_k(
+        clean, pred_col=pred_col, y_col=y_col, date_col=date_col, k=k
+    )
+    lift = precision / base_rate if base_rate else float("nan")
+
+    return ClassificationReport(
+        n_obs=int(clean.height),
+        n_dates=int(clean[date_col].n_unique()) if clean.height else 0,
+        base_rate=base_rate if n_dates_k else float("nan"),
+        log_loss=binary_log_loss(p, y),
+        brier=brier_score(p, y),
+        auc_pooled=binary_auc(p, y),
+        auc_daily_mean=float(np.mean(daily_auc)) if daily_auc else float("nan"),
+        n_dates_auc=len(daily_auc),
+        ece=expected_calibration_error(p, y, n_bins=n_bins),
+        n_bins=n_bins,
+        k=k,
+        precision_at_k=precision,
+        lift_at_k=lift,
+    )
+
+
+@dataclass(frozen=True)
+class ThresholdEconomicReport:
+    """Economics of the ``p >= tau`` portfolio (`03` §2.3, D-4).
+
+    The top-k list always holds k names; this one holds however many clear the
+    threshold, which is the point — a calibrated probability should let the
+    portfolio go small when nothing looks good. ``n_rebalances_cash`` counts the
+    grid dates where it went to zero, and those dates enter
+    ``grid_mean_return`` as 0.0 (cash), not as a skipped observation. Ignoring
+    them would report the returns of a strategy that only trades when it likes
+    the odds while pretending it was always invested.
+
+    Same non-overlapping rebalance grid and same 60bp round-trip assumption as
+    ``economic_report`` / ``topk_economic_report``, so the three read together.
+    """
+
+    horizon: int
+    tau: float
+    n_rebalances: int
+    n_rebalances_held: int
+    n_rebalances_cash: int
+    mean_names_held: float
+    min_names_held: int
+    grid_mean_return: float
+    turnover: float
+    cost_bps_roundtrip: float
+    cost_adjusted_return: float
+
+    def as_dict(self) -> dict:
+        return {
+            "horizon": self.horizon,
+            "tau": self.tau,
+            "n_rebalances": self.n_rebalances,
+            "n_rebalances_held": self.n_rebalances_held,
+            "n_rebalances_cash": self.n_rebalances_cash,
+            "mean_names_held": self.mean_names_held,
+            "min_names_held": self.min_names_held,
+            "grid_mean_return": self.grid_mean_return,
+            "turnover": self.turnover,
+            "cost_bps_roundtrip": self.cost_bps_roundtrip,
+            "cost_adjusted_return": self.cost_adjusted_return,
+        }
+
+
+def threshold_membership(
+    df: pl.DataFrame,
+    *,
+    pred_col: str,
+    tau: float,
+    date_col: str = "trade_date",
+    ticker_col: str = "ticker",
+) -> dict:
+    """Per-date set of tickers whose probability clears ``tau``."""
+    clean = df.select([date_col, ticker_col, pred_col]).drop_nulls()
+    clean = clean.filter(pl.col(pred_col).is_finite() & (pl.col(pred_col) >= tau))
+    return {
+        d: set(grp[ticker_col].to_list())
+        for (d,), grp in clean.group_by([date_col], maintain_order=True)
+    }
+
+
+def threshold_economic_report(
+    df: pl.DataFrame,
+    *,
+    pred_col: str,
+    realized_col: str,
+    horizon: int,
+    tau: float = 0.6,
+    date_col: str = "trade_date",
+    ticker_col: str = "ticker",
+    cost_bps_roundtrip: float = 60.0,
+) -> ThresholdEconomicReport:
+    """Equal-weight ``p >= tau`` portfolio on the rebalance grid, net of cost."""
+    grid = rebalance_grid(df[date_col].to_list(), horizon)
+    membership = threshold_membership(
+        df, pred_col=pred_col, tau=tau, date_col=date_col, ticker_col=ticker_col
+    )
+    turnover = portfolio_turnover(membership, grid)
+
+    labels = df.select([date_col, ticker_col, realized_col]).drop_nulls()
+    labels = labels.filter(pl.col(realized_col).is_finite())
+    by_date: dict = {
+        d: dict(zip(grp[ticker_col].to_list(), grp[realized_col].to_list(), strict=True))
+        for (d,), grp in labels.group_by([date_col], maintain_order=True)
+    }
+
+    returns: list[float] = []
+    held_counts: list[int] = []
+    n_cash = 0
+    for d in grid:
+        names = membership.get(d, set())
+        held_counts.append(len(names))
+        if not names:
+            n_cash += 1
+            returns.append(0.0)  # cash
+            continue
+        realized = [by_date.get(d, {})[t] for t in names if t in by_date.get(d, {})]
+        if realized:
+            returns.append(float(np.mean(realized)))
+
+    grid_return = float(np.mean(returns)) if returns else float("nan")
+    cost = 0.0 if turnover != turnover else turnover * cost_bps_roundtrip / 10_000.0
+    net = grid_return - cost if grid_return == grid_return else float("nan")
+
+    return ThresholdEconomicReport(
+        horizon=horizon,
+        tau=tau,
+        n_rebalances=len(grid),
+        n_rebalances_held=sum(1 for n in held_counts if n > 0),
+        n_rebalances_cash=n_cash,
+        mean_names_held=float(np.mean(held_counts)) if held_counts else float("nan"),
+        min_names_held=int(min(held_counts)) if held_counts else 0,
+        grid_mean_return=grid_return,
+        turnover=turnover,
+        cost_bps_roundtrip=cost_bps_roundtrip,
+        cost_adjusted_return=net,
     )

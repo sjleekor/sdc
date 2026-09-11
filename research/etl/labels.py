@@ -18,6 +18,12 @@ Mechanics (etl_00 §2):
   - Outputs (etl_00 §2.2): per-date winsorized regression (``y_reg_*``), per-date
     percentile rank in [0,1] (``y_rank_*`` — the main target), and a 3-class
     label (``y_cls_*`` ∈ {-1,0,1}) thresholded at the 0.2/0.8 ranks.
+  - Binary outputs for the probability model (20260907_model_experiment `01` §3):
+    ``y_up_*`` = 1[raw_label > 0] (L-A, "beat the market") and ``y_top_*`` =
+    1[y_rank >= cls_top] (L-B, "land in the top 20%"). ``y_top`` carries the same
+    information as ``y_cls == 1``; it exists so a classifier never has to re-cut
+    a 3-class column. Neither is in the default ``outputs`` — model 01's label
+    SQL is unchanged by their addition.
   - Auxiliary (etl_00 §2.3): realized volatility / max-drawdown of the t+1..t+H
     daily-return path, produced by :func:`build_risk_label_sql`.
 
@@ -43,7 +49,7 @@ LABEL_SCAN_TABLE = "label_scan"
 
 _VALID_KINDS = ("excess", "abs")
 _VALID_BENCH = ("eqw_market", "index")
-_VALID_OUTPUTS = ("reg", "rank", "cls")
+_VALID_OUTPUTS = ("reg", "rank", "cls", "up", "top")
 
 
 @dataclass(frozen=True)
@@ -214,6 +220,18 @@ def _build_select_cols(spec: LabelSpec) -> str:
                 f"CASE WHEN {null_guard} THEN "
                 f"(CASE WHEN {r} >= {spec.cls_top} THEN 1 "
                 f"WHEN {r} <= {spec.cls_bottom} THEN -1 ELSE 0 END) END AS y_cls_{h}d"
+            )
+        if "up" in spec.outputs:
+            # L-A. ``raw = 0`` is a 0: an excess return of exactly zero did not
+            # beat the market. Measured to be all but absent in this panel.
+            cols.append(f"CASE WHEN {null_guard} THEN CAST({raw} > 0 AS TINYINT) END AS y_up_{h}d")
+        if "top" in spec.outputs:
+            # L-B, the same cut as ``y_cls == 1`` — kept as its own column so a
+            # binary model reads a binary label.
+            r = f"PERCENT_RANK() OVER ({win} ORDER BY {raw})"
+            cols.append(
+                f"CASE WHEN {null_guard} "
+                f"THEN CAST({r} >= {spec.cls_top} AS TINYINT) END AS y_top_{h}d"
             )
     return ",\n            ".join(cols)
 
