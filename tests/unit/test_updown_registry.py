@@ -554,6 +554,70 @@ def test_e3_records_the_delta_and_leaves_the_selection_alone() -> None:
     assert recorded["delta_economic"] == pytest.approx(0.008)
 
 
+def test_e3_finds_an_incumbent_that_an_earlier_stage_recorded() -> None:
+    """E2 adopting nothing leaves the winner in E1's directory, not E2's."""
+    e1_record = _record(
+        stage="E1",
+        variant="y_up-hgb_clf",
+        feature_set="FS0",
+        probability=0.6800,
+        economic=0.0120,
+    )
+    e2 = {"by_horizon": {"20": {"run_id": e1_record.run.run_id, "feature_set": "FS0"}}}
+    records = [
+        _record(
+            stage="E3",
+            variant="flow-native_t",
+            feature_set="FS0",
+            probability=0.6790,
+            economic=0.0130,
+        )
+    ]
+    # E2's own records do not contain the winner — the delta has to come from E1's
+    recorded = sel.select_e3(records, e2, [], [e1_record])["recorded"]["h20_flow-native_t"]
+    assert recorded["delta_probability"] == pytest.approx(-0.001)
+    assert recorded["delta_economic"] == pytest.approx(0.001)
+
+
+def test_e3_reports_nan_when_the_incumbent_record_is_nowhere() -> None:
+    e2 = {"by_horizon": {"20": {"run_id": "E1_h20_gone", "feature_set": "FS0"}}}
+    records = [
+        _record(stage="E3", variant="flow-native_t", probability=0.679, economic=0.013)
+    ]
+    recorded = sel.select_e3(records, e2, [], [])["recorded"]["h20_flow-native_t"]
+    assert recorded["delta_probability"] != recorded["delta_probability"]  # NaN
+
+
+def test_adopted_records_skips_a_dropped_horizon() -> None:
+    kept = _record(stage="E1", variant="y_up-logit", horizon=60, probability=0.66, economic=0.02)
+    selection = {
+        "by_horizon": {"60": {"run_id": kept.run.run_id}},
+        "dropped_horizons": {"120": {"reason": "ECE over the ceiling after isotonic"}},
+    }
+    found = sel.adopted_records(selection, [kept])
+    assert sorted(found) == [60]
+
+
+def test_e4_does_not_raise_when_the_yardstick_is_an_earlier_stages_run() -> None:
+    e1_record = _record(
+        stage="E1",
+        variant="y_up-hgb_clf",
+        feature_set="FS0",
+        probability=0.6800,
+        economic=0.0120,
+    )
+    e2 = {"by_horizon": {"20": {"run_id": e1_record.run.run_id}}}
+    records = [
+        _record(
+            stage="E4", variant="E4a-seed", seed=seed, feature_set="FS0",
+            probability=probability, economic=0.0120,
+        )
+        for seed, probability in ((1, 0.6810), (2, 0.6795))
+    ]
+    payload = sel.select_e4(records, e2, [], [e1_record])
+    assert payload["by_horizon"]["20"]["run_id"] == e1_record.run.run_id
+
+
 def test_e4_measures_the_seed_spread_and_keeps_the_config_by_default() -> None:
     e2_record = _record(
         stage="E2", variant="FS2", feature_set="FS2", probability=0.6800, economic=0.0120

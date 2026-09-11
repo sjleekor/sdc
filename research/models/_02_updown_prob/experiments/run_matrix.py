@@ -578,7 +578,7 @@ def write_selection(stage: str, records: list[sel.RunRecord], *, smoke: bool) ->
     """Apply the stage's rule and write ``selection.json`` (`05` §2)."""
     prior: dict[str, dict] = {}
     prior_records: dict[str, list[sel.RunRecord]] = {}
-    for other in ("E1", "E2", "E4"):
+    for other in ("E0", "E1", "E2", "E4"):
         payload = load_selection(other, smoke=smoke)
         if payload is not None:
             prior[other] = payload

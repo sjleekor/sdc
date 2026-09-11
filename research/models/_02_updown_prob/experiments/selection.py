@@ -313,14 +313,22 @@ def select_e2(
     }
 
 
-def select_e3(records: list[RunRecord], e2: dict, e2_records: list[RunRecord]) -> dict:
+def select_e3(
+    records: list[RunRecord],
+    e2: dict,
+    e2_records: list[RunRecord],
+    earlier_records: list[RunRecord] | None = None,
+) -> dict:
     """E3: records, never adopts (`05` §2 E3).
 
     A same-session flow value that looks better is not a result, it is an
     unverified data path — the size of the gap is what the collection stream
     would have to justify.
+
+    ``earlier_records`` carries the stages before E2, because an adopted config
+    E2 did not change was recorded by E1 (see :func:`adopted_records`).
     """
-    e2_by_horizon = {r.horizon: r for r in e2_records if _is_e2_winner(r, e2)}
+    e2_by_horizon = adopted_records(e2, e2_records, earlier_records or [])
     deltas: dict[str, dict] = {}
     for horizon, group in sorted(_by_horizon(records).items()):
         incumbent = e2_by_horizon.get(horizon)
@@ -345,14 +353,22 @@ def select_e3(records: list[RunRecord], e2: dict, e2_records: list[RunRecord]) -
     }
 
 
-def select_e4(records: list[RunRecord], e2: dict, e2_records: list[RunRecord]) -> dict:
+def select_e4(
+    records: list[RunRecord],
+    e2: dict,
+    e2_records: list[RunRecord],
+    earlier_records: list[RunRecord] | None = None,
+) -> dict:
     """E4: the seed yardstick, and the one variant allowed to replace (`05` §2 E4).
 
     E4a's three seeds give the standard deviation every later claim is measured
     against — including E5's. E4b/c/e replace the adopted config only by beating
     it on *both* primaries by more than that spread.
+
+    ``earlier_records`` as in :func:`select_e3`: at a horizon where E2 adopted
+    nothing the yardstick is an E1 run, and without it this raised instead.
     """
-    e2_by_horizon = {r.horizon: r for r in e2_records if _is_e2_winner(r, e2)}
+    e2_by_horizon = adopted_records(e2, e2_records, earlier_records or [])
     by_horizon: dict[str, dict] = {}
     notes: list[str] = []
     for horizon, group in sorted(_by_horizon(records).items()):
@@ -446,13 +462,41 @@ def build_selection(
         return select_e1(records)
     if stage == "E2":
         return select_e2(records, prior["E1"], prior_records.get("E1", []), rechecks)
+    earlier = [*prior_records.get("E1", []), *prior_records.get("E0", [])]
     if stage == "E3":
-        return select_e3(records, prior["E2"], prior_records.get("E2", []))
+        return select_e3(records, prior["E2"], prior_records.get("E2", []), earlier)
     if stage == "E4":
-        return select_e4(records, prior["E2"], prior_records.get("E2", []))
+        return select_e4(records, prior["E2"], prior_records.get("E2", []), earlier)
     if stage == "E5":
         return select_e5(records, prior["E4"])
     raise ValueError(f"unknown stage {stage!r}")
+
+
+def adopted_records(selection: dict, *pools: list[RunRecord]) -> dict[int, RunRecord]:
+    """The record behind each horizon's adopted run, wherever it was recorded.
+
+    A stage that adopts nothing leaves the incumbent standing, and that
+    incumbent's record sits in the directory of whichever stage ran it — E2's
+    h5 and h60 winners are E1 runs. Looking the run up by id across every pool
+    is what lets a later stage compare against it; searching only the previous
+    stage's own directory finds nothing and silently reports a NaN delta.
+
+    A horizon the selection dropped (`03` §3.3) has no ``run_id`` and is simply
+    absent from the result.
+    """
+    wanted = {
+        int(horizon): entry["run_id"]
+        for horizon, entry in selection.get("by_horizon", {}).items()
+        if entry.get("run_id")
+    }
+    by_run_id = {run_id: horizon for horizon, run_id in wanted.items()}
+    found: dict[int, RunRecord] = {}
+    for pool in pools:
+        for record in pool:
+            horizon = by_run_id.get(record.run.run_id)
+            if horizon is not None:
+                found.setdefault(horizon, record)
+    return found
 
 
 def _is_e1_winner(record: RunRecord, e1: dict) -> bool:
