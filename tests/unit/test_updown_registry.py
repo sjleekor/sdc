@@ -202,6 +202,25 @@ def test_a_pinned_grid_survives_the_correction() -> None:
     assert resolved.grid == "HGB_CLF_GRID_E1"
 
 
+def test_e5_adds_fs3_to_the_inherited_set_instead_of_replacing_it() -> None:
+    """E5 is "adopted + 11", so it resolves to ``<inherited>_FS3``."""
+    run = rg.stage_runs("E5", horizon=5)[0]
+    assert (run.variant, run.feature_set) == ("FS3", rg.SELECTED)
+    resolved = rg.resolve(run, {s: _selection(s) for s in ("E0", "E1", "E2")})
+    assert resolved.feature_set == "FS0_FS3"
+
+    scoped = rg.stage_runs("E5", horizon=20)[0]
+    on_fs1h = {s: _selection(s, feature_set="FS1h") for s in ("E0", "E1", "E2")}
+    assert rg.resolve(scoped, on_fs1h).feature_set == "FS1h_FS3"
+
+
+def test_only_e5_gets_the_fs3_suffix() -> None:
+    """E2 names its own feature sets, so the suffix must not touch them."""
+    e2 = rg.stage_runs("E2", horizon=20, variant="FS2")[0]
+    resolved = rg.resolve(e2, {s: _selection(s) for s in ("E0", "E1")})
+    assert resolved.feature_set == "FS2"
+
+
 def test_resolve_refuses_a_missing_selection_instead_of_defaulting() -> None:
     run = rg.stage_runs("E1", horizon=20)[0]
     with pytest.raises(ValueError, match="selection is missing"):

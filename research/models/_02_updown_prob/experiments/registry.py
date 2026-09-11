@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+from research.models._02_updown_prob import features as fx
+
 SELECTED = "@selected"
 
 STAGES: tuple[str, ...] = ("E0", "E1", "E2", "E3", "E4", "E5")
@@ -36,6 +38,9 @@ GRID_LOGIT = "LOGIT_GRID"
 # forces ``hgb_clf`` because a monotonic constraint is an HGB feature, and at
 # h60 the inherited config is a logit whose grid is a list of ``C`` values.
 FULL_GRID: dict[str, str] = {"hgb_clf": GRID_HGB_CLF, "logit": GRID_LOGIT}
+
+# E5's only variant. Named because :func:`resolve` has to recognise it.
+FS3_VARIANT = "FS3"
 
 
 @dataclass(frozen=True)
@@ -264,7 +269,9 @@ def _e5_runs() -> tuple[Run, ...]:
                     horizon=horizon,
                     label=SELECTED,
                     model=SELECTED,
-                    feature_set=SELECTED,  # FS3 or FS3h, following E2's winner
+                    # Resolved to "<E2's winner>_FS3" — the adopted columns
+                    # plus FS3's eleven, horizon-subset iff the base is.
+                    feature_set=SELECTED,
                     preprocess_profile=SELECTED,
                     seed=seed,
                     grid=SELECTED,
@@ -358,4 +365,11 @@ def resolve(run: Run, selections: dict[str, dict]) -> Run:
         expected = FULL_GRID.get(resolved.model)
         if expected is not None and resolved.grid != expected:
             resolved = replace(resolved, grid=expected)
+
+    # E5 asks "the adopted config, plus FS3's eleven columns" (`05` §2 E5), so
+    # it inherits the feature set and then adds to it. Plain "FS3" would not do:
+    # it is FS2 + 11, and at h5 and h60 the adopted config is FS0, so it would
+    # smuggle back the 28 columns E2 rejected and confound the comparison.
+    if run.variant == FS3_VARIANT and run.feature_set == SELECTED:
+        resolved = replace(resolved, feature_set=f"{resolved.feature_set}{fx.FS3_SUFFIX}")
     return resolved

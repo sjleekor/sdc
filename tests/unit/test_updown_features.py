@@ -293,3 +293,45 @@ def test_label_and_realized_columns_reject_unknown_targets_and_horizons() -> Non
         spec.label_column("y_up", 10)
     with pytest.raises(ValueError, match="horizon"):
         spec.realized_column(10)
+
+
+# --- E5's composite feature sets (`05` §2 E5, `02` §1.5) ---------------------
+
+
+def test_fs3_is_added_to_the_adopted_base_not_to_fs2() -> None:
+    """`05` §2 E5 compares "the adopted config -> + FS3".
+
+    At h5 and h60 the adopted config is FS0, so plain "FS3" (FS2 + 11) would
+    bring back the 28 columns E2 rejected and confound the comparison.
+    """
+    for horizon in fx.HORIZONS:
+        composite = fx.feature_columns("FS0_FS3", horizon)
+        assert set(composite) == set(fx.FS0_COLS) | set(fx.FS3_ADDED)
+        assert len(composite) == len(fx.FS0_COLS) + len(fx.FS3_ADDED)
+
+
+def test_the_horizon_subset_follows_the_base() -> None:
+    """`02` §1.5: subset FS3 when the adopted config is itself horizon-scoped."""
+    for horizon in fx.HORIZONS:
+        scoped = fx.feature_columns("FS1h_FS3", horizon)
+        added = set(scoped) - set(fx.feature_columns("FS1h", horizon))
+        assert added == {
+            c for c in fx.FS3_ADDED if horizon in fx.FS3_TESTED_HORIZONS[c]
+        }
+        # an unscoped base keeps all eleven at every horizon
+        whole = fx.feature_columns("FS1_FS3", horizon)
+        assert set(whole) - set(fx.feature_columns("FS1", horizon)) == set(fx.FS3_ADDED)
+
+
+def test_the_composite_subsumes_the_fixed_fs3_ids() -> None:
+    """FS3 was always "FS2 + 11", so the general form has to agree with it."""
+    for horizon in fx.HORIZONS:
+        assert fx.feature_columns("FS2_FS3", horizon) == fx.feature_columns("FS3", horizon)
+        assert fx.feature_columns("FS2h_FS3", horizon) == fx.feature_columns("FS3h", horizon)
+
+
+def test_an_unknown_composite_base_is_rejected() -> None:
+    with pytest.raises(ValueError, match="unknown feature set"):
+        fx.feature_columns("FS9_FS3", 20)
+    with pytest.raises(ValueError, match="unknown feature set"):
+        fx.feature_columns("FS3_FS3", 20)

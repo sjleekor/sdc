@@ -231,7 +231,23 @@ FS3_TESTED_HORIZONS: dict[str, tuple[int, ...]] = {
     "fin_lifecycle_transition": (20, 60),
 }
 
-FEATURE_SET_IDS: tuple[str, ...] = ("FS0", "FS1", "FS1h", "FS2", "FS2h", "FS3", "FS3h")
+# E5's suffix. `05` §2 E5 compares "the adopted config -> + FS3", and at h5 and
+# h60 the adopted config is FS0 — so plain "FS3" (which is FS2 + 11) would drag
+# back the 28 columns E2 rejected and confound the 11 the parallel stream is
+# actually asking about. ``<base>_FS3`` names "that base, plus FS3's additions".
+# It subsumes the two fixed ids: FS2_FS3 == FS3 and FS2h_FS3 == FS3h.
+FS3_SUFFIX = "_FS3"
+FEATURE_SET_BASES: tuple[str, ...] = ("FS0", "FS1", "FS1h", "FS2", "FS2h")
+FEATURE_SET_IDS: tuple[str, ...] = (
+    "FS0",
+    "FS1",
+    "FS1h",
+    "FS2",
+    "FS2h",
+    "FS3",
+    "FS3h",
+    *(f"{base}{FS3_SUFFIX}" for base in FEATURE_SET_BASES),
+)
 
 
 def feature_columns(feature_set: str, horizon: int) -> tuple[str, ...]:
@@ -247,6 +263,17 @@ def feature_columns(feature_set: str, horizon: int) -> tuple[str, ...]:
         raise ValueError(f"unknown feature set {feature_set!r}; valid: {FEATURE_SET_IDS}")
     if horizon not in HORIZONS:
         raise ValueError(f"unknown horizon {horizon}; valid: {HORIZONS}")
+
+    if feature_set.endswith(FS3_SUFFIX):
+        base_id = feature_set[: -len(FS3_SUFFIX)]
+        base_cols = feature_columns(base_id, horizon)
+        # The horizon rule follows the *base*, which is `02` §1.5's wording:
+        # subset FS3 when the adopted config is itself horizon-scoped, keep all
+        # eleven when it is not.
+        additions = FS3_ADDED
+        if base_id.endswith("h"):
+            additions = tuple(c for c in FS3_ADDED if horizon in FS3_TESTED_HORIZONS[c])
+        return (*base_cols, *additions)
 
     if feature_set == "FS0":
         return FS0_COLS
