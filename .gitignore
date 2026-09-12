@@ -76,3 +76,7 @@ research/*
 !research/models/
 !research/models/**/*.py
 research/output/
+
+# E5 (`02` §1.5) rebuilds five marts without touching the shared 08-23
+# snapshot; the isolated lake symlinks everything else back to data_lake/.
+data_lake_e5/
