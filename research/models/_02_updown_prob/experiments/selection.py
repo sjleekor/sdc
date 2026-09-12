@@ -394,6 +394,9 @@ def select_e4(
             seed_std_economic=seed_std_economic,
             n_seeds=len(seed_values),
             seed_probability_values=seed_values,
+            # E5 compares three seeds against three seeds (`05` §2 E5), so it
+            # needs the economic side of the spread too, not only its sd.
+            seed_economic_values=seed_economic,
             replaced_by=replaced_by,
             variants={
                 r.run.variant: {
@@ -423,12 +426,33 @@ def select_e5(records: list[RunRecord], e4: dict) -> dict:
         seed_std_economic = float(adopted.get("seed_std_economic", float("nan")))
         probability = _mean([r.probability for r in group])
         economic = _mean([r.economic for r in group])
-        beats_probability = probability < adopted["probability_value"] - _nan_zero(seed_std)
-        beats_economic = economic > adopted["economic_value"] + _nan_zero(seed_std_economic)
+        # `05` §2 E5: "the comparison is the adopted config's same three seeds",
+        # so both sides are three-seed means. Falling back to the entry's single
+        # value keeps an older selection.json readable.
+        seed_probabilities = adopted.get("seed_probability_values") or []
+        seed_economics = adopted.get("seed_economic_values") or []
+        against_probability = (
+            _mean(seed_probabilities) if seed_probabilities else adopted["probability_value"]
+        )
+        against_economic = _mean(seed_economics) if seed_economics else adopted["economic_value"]
+        beats_probability = probability < against_probability - _nan_zero(seed_std)
+        beats_economic = economic > against_economic + _nan_zero(seed_std_economic)
         adopt = bool(beats_probability and beats_economic)
         entry = dict(adopted)
+        entry["compared_against"] = {
+            "probability_value": against_probability,
+            "economic_value": against_economic,
+            "basis": "three-seed mean of the adopted config",
+        }
         if adopt:
-            entry["feature_set"] = group[0].run.feature_set
+            # The adopted config is now the FS3 run, so the entry has to name it.
+            # Leaving run_id and ece on the superseded run made the record claim
+            # a config whose numbers it no longer carried.
+            winner = min(group, key=lambda r: r.run.seed)
+            entry["run_id"] = winner.run.run_id
+            entry["seed"] = winner.run.seed
+            entry["ece"] = winner.ece
+            entry["feature_set"] = winner.run.feature_set
             entry["probability_value"] = probability
             entry["economic_value"] = economic
         entry["fs3_adopted"] = adopt

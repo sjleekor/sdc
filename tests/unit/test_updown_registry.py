@@ -792,6 +792,103 @@ def test_e5_adopts_fs3_only_beyond_the_seed_spread() -> None:
     assert entry["feature_set"] == "FS3"
 
 
+def test_an_adopted_fs3_entry_names_the_run_it_came_from() -> None:
+    """The record has to describe the config it now carries the numbers of.
+
+    Leaving ``run_id`` and ``ece`` on the superseded run made E5's h60 entry
+    claim ``E1_h60_y_up-logit_seed0`` at ECE 0.0188 while reporting FS3's
+    log-loss — and that entry is what the holdout preregistration reads.
+    """
+    e4 = {
+        "by_horizon": {
+            "60": {
+                "run_id": "E1_h60_y_up-logit_seed0",
+                "label": "y_up",
+                "model": "logit",
+                "feature_set": "FS0",
+                "preprocess_profile": "rank",
+                "seed": 0,
+                "probability_value": 0.6620,
+                "economic_value": 0.0216,
+                "ece": 0.0188,
+                "seed_std_probability": 0.0,
+                "seed_std_economic": 0.0,
+            }
+        }
+    }
+    group = [
+        _record(
+            stage="E5",
+            variant="FS3",
+            horizon=60,
+            feature_set="FS0_FS3",
+            seed=s,
+            probability=0.6617,
+            economic=0.0227,
+            ece=0.0211,
+        )
+        for s in (0, 1, 2)
+    ]
+    entry = sel.select_e5(group, e4)["by_horizon"]["60"]
+    assert entry["fs3_adopted"] is True
+    assert entry["run_id"] == "E5_h60_FS3_seed0"
+    assert entry["seed"] == 0
+    assert entry["ece"] == pytest.approx(0.0211)
+    assert entry["feature_set"] == "FS0_FS3"
+
+
+def test_e5_compares_three_seeds_against_three_seeds() -> None:
+    """`05` §2 E5 names the adopted config's three seeds as the comparison.
+
+    Against seed 0 alone this FS3 would lose on probability; against the mean
+    of the three it wins, so the basis is not a detail.
+    """
+    e4 = {
+        "by_horizon": {
+            "20": {
+                "run_id": "E2_h20_FS1h_seed0",
+                "label": "y_up",
+                "model": "hgb_clf",
+                "feature_set": "FS1h",
+                "preprocess_profile": "rank",
+                "seed": 0,
+                "ece": 0.0127,
+                "probability_value": 0.6680,  # the best of the three seeds
+                "economic_value": 0.0120,
+                "seed_probability_values": [0.6680, 0.6700, 0.6720],  # mean 0.6700
+                "seed_economic_values": [0.0120, 0.0100, 0.0080],  # mean 0.0100
+                "seed_std_probability": 0.0,
+                "seed_std_economic": 0.0,
+            }
+        }
+    }
+    group = [
+        _record(stage="E5", variant="FS3", feature_set="FS1h_FS3", seed=s,
+                probability=0.6690, economic=0.0110)
+        for s in (0, 1, 2)
+    ]
+    payload = sel.select_e5(group, e4)["by_horizon"]["20"]
+    assert payload["compared_against"]["probability_value"] == pytest.approx(0.6700)
+    assert payload["compared_against"]["economic_value"] == pytest.approx(0.0100)
+    assert payload["fs3_adopted"] is True
+
+
+def test_e4_records_the_economic_seed_values_e5_needs() -> None:
+    e2_record = _record(
+        stage="E2", variant="FS2", feature_set="FS2", probability=0.6800, economic=0.0120
+    )
+    e2 = {"by_horizon": {"20": {"run_id": e2_record.run.run_id}}}
+    seeds = [
+        _record(
+            stage="E4", variant="E4a-seed", seed=s, feature_set="FS2",
+            probability=0.6800, economic=e,
+        )
+        for s, e in ((1, 0.0130), (2, 0.0110))
+    ]
+    entry = sel.select_e4(seeds, e2, [e2_record])["by_horizon"]["20"]
+    assert entry["seed_economic_values"] == pytest.approx([0.0120, 0.0130, 0.0110])
+
+
 # --- the runner ---------------------------------------------------------------
 
 

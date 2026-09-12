@@ -112,3 +112,17 @@ Two KIS facts that are easy to get wrong, both measured live rather than read fr
 ## Scope exclusions
 
 Intraday (minute/hour) bars are out of scope (extension points stubbed in `ports/prices.py`). Selenium is intentionally not used.
+
+## Project layout policy (2026-09-12)
+
+A repo-split policy now applies across `wss_p/` — see `../CLAUDE.md`. Under it, **documents live in
+`wss_p/my/`, collection code in `wss_p/collector/`, modeling code in `wss_p/modeler/`, and data files
+in `wss_p/stock_data/`.**
+
+**This repository is not yet reorganized and is the documented exception.** Docs, code, and data
+(`data/`, `data_lake/`, `data_lake_e5/`, `research/output/`, `reports/`) still live together here.
+Keep following the existing structure inside this repo; a later migration will move this project onto
+the same policy. Do not start splitting it piecemeal.
+
+The migration plan lives in
+`../my/milestones/kr/refactoring/20260912_project_split/00_candidate_plan/`.
