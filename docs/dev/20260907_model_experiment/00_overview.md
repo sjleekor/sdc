@@ -37,20 +37,27 @@
 
 ## 3. 작업 패키지
 
+**상태 (2026-09-12): M-0~M-8 완료. 남은 것은 M-9 holdout 하나뿐이고, 라벨이 성숙하는
+2026-10~11까지 열지 않는다.** 실행은 58 run·장비 시간 38.2시간으로 끝났고 결과는
+[`results/README.md`](results/README.md)에 있다. 단계별 기록은 `06` §3.2~§3.9다.
+
 | id | 작업 | 산출물 | 선행 | 문서 |
 |---|---|---|---|---|
 | **M-0** | 결정 고정 — 라벨·h·경계·k·비용·유니버스·수급 variant (§4) | **완료 2026-09-07** — 권고안 채택 | — | `00` |
-| **M-1** | 라벨 확장 — `LabelSpec.outputs`에 `up`·`top` 추가 (`y_up_{h}d`, `y_top_{h}d`), h=120 지원 | `labels.py` 변경 + 테스트 | M-0 | `01` |
-| **M-2** | 피쳐 집합 registry — FS0/FS1/FS1h/FS2 컬럼 목록을 코드로 고정, 마트 뷰 매핑 확장, 국면 마트 `dim_regime_daily`, interaction 빌더 | `_02/features.py` | M-0 | `02` |
-| **M-3** | 전처리 `rank` 프로파일 — `(date, market)` 내 백분위 변환 + `*_isna` | `preprocess.py` 확장 | — | `02` |
-| **M-4** | 지표 — `classification_report`(AUC·log-loss·Brier·ECE·precision@k), 확률 임계 포트폴리오, 기존 `topk_economic_report` 재사용 | `metrics.py` 확장 | — | `03` |
-| **M-5** | 모델 — HGB 분류기·로지스틱·isotonic 보정, 고정 grid, 시드 | `_02/train.py`, `_02/calibrate.py` | M-3 | `04` |
-| **M-6** | 실험 러너 — 매트릭스 E0~E4를 manifest와 함께 실행, 결과 parquet·markdown | `_02/experiments/run_matrix.py` | M-1~M-5 | `05`·`06` |
-| **M-7** | 실행 E0 → E1 → E2 → E3 → E4 (순서대로, 앞 단계 판정 뒤) | `results/E*/` | M-6 | `05` |
-| **M-8** | 결과 문서 — h별 채택 후보, 보정 곡선, 비용 반영 성과, 한계 | `results/README.md` | M-7 | `05` §6 |
-| M-9 | holdout 1회 (2026-10~11, T1·T2와 같은 날) | 최종 판정 | M-8 + 라벨 성숙 | `03` §5 |
+| **M-1** | 라벨 확장 — `LabelSpec.outputs`에 `up`·`top` 추가 (`y_up_{h}d`, `y_top_{h}d`), h=120 지원 | **완료 2026-09-09** — `06` §3.1 M-PR1 | M-0 | `01` |
+| **M-2** | 피쳐 집합 registry — FS0/FS1/FS1h/FS2 컬럼 목록을 코드로 고정, 마트 뷰 매핑 확장, 국면 마트 `dim_regime_daily`, interaction 빌더 | **완료 2026-09-09** — `06` §3.1 M-PR0·PR4 | M-0 | `02` |
+| **M-3** | 전처리 `rank` 프로파일 — `(date, market)` 내 백분위 변환 + `*_isna` | **완료 2026-09-09** — `06` §3.1 M-PR2 | — | `02` |
+| **M-4** | 지표 — `classification_report`(AUC·log-loss·Brier·ECE·precision@k), 확률 임계 포트폴리오, 기존 `topk_economic_report` 재사용 | **완료 2026-09-09** — `06` §3.1 M-PR3 | — | `03` |
+| **M-5** | 모델 — HGB 분류기·로지스틱·isotonic 보정, 고정 grid, 시드 | **완료 2026-09-09** — `06` §3.1 M-PR6 | M-3 | `04` |
+| **M-6** | 실험 러너 — 매트릭스 E0~E4를 manifest와 함께 실행, 결과 parquet·markdown | **완료 2026-09-09** — `06` §3.1 M-PR5·PR7 | M-1~M-5 | `05`·`06` |
+| **M-7** | 실행 E0 → E1 → E2 → E3 → E4 (순서대로, 앞 단계 판정 뒤) | **완료 2026-09-12** — 49 run. `06` §3.4~§3.8. h120은 E2에서 탈락(§3.6) | M-6 | `05` |
+| **M-8** | 결과 문서 — h별 채택 후보, 보정 곡선, 비용 반영 성과, 한계 | **완료 2026-09-12** — [`results/README.md`](results/README.md) | M-7 | `05` §6 |
+| M-9 | holdout 1회 (2026-10~11, T1·T2와 같은 날) | **대기** — 열 config 6줄은 `results/README.md` §7에 사전등록 완료 | M-8 + 라벨 성숙 | `03` §5 |
 
 M-1~M-5는 서로 독립이라 병행할 수 있다. M-6이 합류점이다.
+
+**E5(FS3)는 이 표에 없다.** 병행 스트림 F-HS-1의 11 컬럼이 2026-09-09에 확정되면서 뒤에 붙은
+단계다. 2026-09-12에 9 run으로 끝났고 h60에서 채택됐다(`06` §3.9).
 
 ---
 
